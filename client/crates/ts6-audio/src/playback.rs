@@ -21,6 +21,9 @@ use crate::devices::pick_output;
 use crate::mixer::Mixer;
 use crate::resample::LinearResampler;
 
+/// Notification sounds waiting to be mixed in, 48 kHz mono.
+type Cues = Arc<std::sync::Mutex<std::collections::VecDeque<f32>>>;
+
 /// Per-peer playback volume, shared with the audio callback.
 type Volumes = Arc<std::sync::Mutex<std::collections::HashMap<u16, f32>>>;
 
@@ -84,6 +87,8 @@ pub struct Playback {
     pub channels: u16,
     packets: SyncSender<(u16, InAudioBuf)>,
     volumes: Volumes,
+    cues: Cues,
+    mixer: Arc<std::sync::Mutex<Mixer>>,
     dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
@@ -119,6 +124,28 @@ impl Playback {
         }
     }
 
+    /// Voice level (RMS, 0..1) of each peer currently talking. Skips a beat
+    /// rather than wait on the audio thread.
+    pub fn peer_levels(&self) -> std::collections::HashMap<u16, f32> {
+        self.mixer
+            .try_lock()
+            .map(|m| m.levels())
+            .unwrap_or_default()
+    }
+
+    /// Play a notification sound over whatever is playing.
+    pub fn play_cue(&self, cue: crate::cues::Cue) {
+        let samples = crate::cues::render(cue);
+        let mut cues = self.cues.lock().unwrap_or_else(|p| p.into_inner());
+        // A burst of joins mixes into one sound instead of queuing seconds of them.
+        for (i, sample) in samples.into_iter().enumerate() {
+            match cues.get_mut(i) {
+                Some(existing) => *existing += sample,
+                None => cues.push_back(sample),
+            }
+        }
+    }
+
     /// Queue one received voice packet for playback.
     pub fn enqueue(&self, from: u16, packet: InAudioBuf) {
         match self.packets.try_send((from, packet)) {
@@ -150,6 +177,7 @@ struct Renderer {
     ready: std::collections::VecDeque<f32>,
     frames: Arc<AtomicU64>,
     monitor: Monitor,
+    cues: Cues,
 }
 
 /// Mixer audio pulled per step: 5 ms, so at most 5 ms of extra latency.
@@ -162,6 +190,7 @@ impl Renderer {
         volumes: Volumes,
         frames: Arc<AtomicU64>,
         monitor: Monitor,
+        cues: Cues,
     ) -> Self {
         Self {
             mixer,
@@ -171,6 +200,7 @@ impl Renderer {
             ready: std::collections::VecDeque::new(),
             frames,
             monitor,
+            cues,
         }
     }
 
@@ -195,6 +225,12 @@ impl Renderer {
                 mixer.render_mono(RENDER_CHUNK)
             };
             self.monitor.mix_into(&mut mono);
+            if let Ok(mut cues) = self.cues.try_lock() {
+                let n = mono.len().min(cues.len());
+                for (out, cue) in mono.iter_mut().zip(cues.drain(..n)) {
+                    *out += cue;
+                }
+            }
             self.resampled.clear();
             self.resampler.process(&mono, &mut self.resampled);
             if self.resampled.is_empty() {
@@ -231,6 +267,10 @@ pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playba
     let dropped = Arc::new(AtomicU64::new(0));
     let (packets, packet_rx) = sync_channel::<(u16, InAudioBuf)>(128);
     let volumes: Volumes = Default::default();
+    let cues: Cues = Default::default();
+    let cues_thread = cues.clone();
+    let mixer = Arc::new(std::sync::Mutex::new(Mixer::new()));
+    let mixer_thread = mixer.clone();
     let volumes_thread = volumes.clone();
 
     let (stop_thread, frames_thread, dropped_thread) =
@@ -240,7 +280,7 @@ pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playba
     let thread = std::thread::Builder::new()
         .name("ts6-playback".into())
         .spawn(move || {
-            let mixer = Arc::new(std::sync::Mutex::new(Mixer::new()));
+            let mixer = mixer_thread;
 
             // Pump: move queued packets into the jitter buffer. Runs on this thread,
             // so the decoder and its queues never leave it.
@@ -271,7 +311,7 @@ pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playba
 
             let stream = match sample_format {
                 SampleFormat::F32 => {
-                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone());
+                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone(), cues_thread.clone());
                     output.build_output_stream(
                         stream_config,
                         move |data: &mut [f32], _| renderer.fill(data, channels),
@@ -280,7 +320,7 @@ pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playba
                     )
                 }
                 SampleFormat::I16 => {
-                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone());
+                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone(), cues_thread.clone());
                     let mut scratch: Vec<f32> = vec![0.0; 8192];
                     output.build_output_stream::<i16, _, _>(
                         stream_config,
@@ -299,7 +339,7 @@ pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playba
                     )
                 }
                 SampleFormat::U16 => {
-                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone());
+                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone(), cues_thread.clone());
                     let mut scratch: Vec<f32> = vec![0.0; 8192];
                     output.build_output_stream::<u16, _, _>(
                         stream_config,
@@ -351,6 +391,8 @@ pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playba
         channels: channels as u16,
         packets,
         volumes,
+        cues,
+        mixer,
         dropped,
         stop,
         frames,

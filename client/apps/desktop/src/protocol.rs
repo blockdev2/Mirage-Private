@@ -113,6 +113,9 @@ pub struct AudioEvent {
     /// Our packet loss towards the server, 0..1.
     #[serde(default)]
     pub loss_out: Option<f32>,
+    /// Voice level (RMS, 0..1) of each peer talking. Older bridges omit it.
+    #[serde(default)]
+    pub levels: std::collections::HashMap<u16, f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

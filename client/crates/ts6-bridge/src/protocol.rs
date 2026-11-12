@@ -211,6 +211,8 @@ pub enum Event<'a> {
         ping_ms: Option<f64>,
         /// Our packet loss towards the server, 0..1.
         loss_out: Option<f32>,
+        /// Voice level (RMS, 0..1) of each peer talking right now.
+        levels: std::collections::HashMap<u16, f32>,
     },
     Devices {
         devices: DeviceLists,
@@ -336,6 +338,7 @@ mod tests {
             ptt_binding: Some("F13".into()),
             ping_ms: None,
             loss_out: None,
+            levels: Default::default(),
         })
         .unwrap();
         assert!(json.contains(r#""speaking":[3,5]"#), "{json}");

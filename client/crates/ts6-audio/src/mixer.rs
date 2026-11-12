@@ -13,12 +13,15 @@ pub type PeerId = u16;
 /// Mixes all incoming voice streams.
 pub struct Mixer {
     handler: AudioHandler<PeerId>,
+    /// Smoothed RMS (0..1) of each talking peer's decoded voice.
+    levels: std::collections::HashMap<PeerId, f32>,
 }
 
 impl Mixer {
     pub fn new() -> Self {
         Self {
             handler: AudioHandler::new(),
+            levels: Default::default(),
         }
     }
 
@@ -47,8 +50,24 @@ impl Mixer {
     /// Render `frames` interleaved stereo frames (the shape `cpal` wants).
     pub fn render_stereo(&mut self, frames: usize) -> Vec<f32> {
         let mut out = vec![0.0; frames * 2];
-        self.handler.fill_buffer(&mut out);
+        let levels = &mut self.levels;
+        self.handler
+            .fill_buffer_with_proc(&mut out, |peer, samples| {
+                let rms = (samples.iter().map(|s| s * s).sum::<f32>()
+                    / samples.len().max(1) as f32)
+                    .sqrt();
+                let level = levels.entry(*peer).or_insert(0.0);
+                // Rise at once, fall gently, like a meter.
+                *level = rms.max(*level * 0.9);
+            });
+        let queues = self.handler.get_queues();
+        self.levels.retain(|peer, _| queues.contains_key(peer));
         out
+    }
+
+    /// Current voice level (RMS, 0..1) of each peer that is talking.
+    pub fn levels(&self) -> std::collections::HashMap<PeerId, f32> {
+        self.levels.clone()
     }
 
     /// Render `frames` mono frames, for metering and for tests.

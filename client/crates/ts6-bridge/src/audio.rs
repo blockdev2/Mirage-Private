@@ -251,6 +251,13 @@ impl AudioEngine {
         self.applied = None;
     }
 
+    /// Play a join or leave sound, when the speakers are open.
+    pub fn play_cue(&self, cue: ts6_audio::cues::Cue) {
+        if let Some(playback) = &self.playback {
+            playback.play_cue(cue);
+        }
+    }
+
     /// How loud one client plays for us (1.0 = unchanged).
     pub fn set_volume(&mut self, client: u16, volume: f32) {
         self.volumes.insert(client, volume);
@@ -320,6 +327,11 @@ impl AudioEngine {
             playback: self.playback.as_ref().map(|p| p.device_name.clone()),
             tone: self.tone,
             ptt_binding: self.ptt_binding.clone(),
+            levels: self
+                .playback
+                .as_ref()
+                .map(|p| p.peer_levels())
+                .unwrap_or_default(),
         }
     }
 }
@@ -340,6 +352,8 @@ pub struct Counters {
     pub playback: Option<String>,
     pub tone: bool,
     pub ptt_binding: Option<String>,
+    /// Voice level (RMS, 0..1) of each peer talking right now.
+    pub levels: std::collections::HashMap<u16, f32>,
 }
 
 /// Spawn the synthetic tone generator; returns its stop flag and thread handle.

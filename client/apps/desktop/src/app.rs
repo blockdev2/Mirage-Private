@@ -440,6 +440,68 @@ impl App {
         })
     }
 
+    /// How loud someone is right now, 0..1: our own microphone level, or the
+    /// decoded voice of a peer. Mapped from -55..-15 dBFS, where speech lives.
+    fn voice_level(&self, client_id: u16) -> f32 {
+        let Some(audio) = self.audio.as_ref() else {
+            return 0.0;
+        };
+        let own = self.snapshot.as_ref().map(|s| s.own_client_id);
+        let db = if own == Some(client_id) {
+            audio.input_level_db.unwrap_or(-90.0)
+        } else {
+            audio
+                .levels
+                .get(&client_id)
+                .map_or(-90.0, |rms| 20.0 * rms.max(1e-6).log10())
+        };
+        ((db + 55.0) / 40.0).clamp(0.0, 1.0)
+    }
+
+    /// The state mark at the right of a participant, vertically centered on
+    /// `at` (its right edge): deafened, then muted, both in red; otherwise
+    /// live bars that follow the voice while the person speaks.
+    fn voice_badge(
+        &self,
+        painter: &egui::Painter,
+        at: egui::Pos2,
+        size: f32,
+        client: &ClientInfo,
+        speaking: bool,
+    ) {
+        let glyph = if client.output_muted {
+            Some(icon::SPEAKER_SLASH)
+        } else if client.input_muted {
+            Some(icon::MICROPHONE_SLASH)
+        } else {
+            None
+        };
+        if let Some(glyph) = glyph {
+            painter.text(
+                at,
+                Align2::RIGHT_CENTER,
+                glyph,
+                FontId::new(size, theme::icons()),
+                theme::DANGER,
+            );
+            return;
+        }
+        let ctx = painter.ctx();
+        let target = if speaking {
+            self.voice_level(client.id).max(0.15)
+        } else {
+            0.0
+        };
+        // Eased so the bars glide between the ~12 updates a second.
+        let level =
+            ctx.animate_value_with_time(egui::Id::unique(("voice-level", client.id)), target, 0.09);
+        if level <= 0.01 {
+            return;
+        }
+        theme::voice_bars(painter, at, size, level, ctx.input(|i| i.time) as f32);
+        ctx.request_repaint();
+    }
+
     /// Sends the saved audio settings to the voice engine and persists them.
     fn apply_audio(&mut self) {
         let audio = self.store.data.audio.clone();
@@ -891,23 +953,13 @@ impl App {
             name,
             name_color,
         );
-        if client.input_muted {
-            painter.text(
-                rect.right_center() - vec2(12.0, 0.0),
-                Align2::RIGHT_CENTER,
-                icon::MICROPHONE_SLASH,
-                FontId::new(14.0, theme::icons()),
-                theme::TEXT_3,
-            );
-        } else if speaking {
-            painter.text(
-                rect.right_center() - vec2(12.0, 0.0),
-                Align2::RIGHT_CENTER,
-                icon::WAVEFORM,
-                FontId::new(14.0, theme::icons()),
-                theme::SUCCESS,
-            );
-        }
+        self.voice_badge(
+            painter,
+            rect.right_center() - vec2(12.0, 0.0),
+            14.0,
+            client,
+            speaking,
+        );
         response
     }
 
@@ -1258,23 +1310,7 @@ impl App {
         }
 
         let corner = pos2(rect.right() - 16.0, baseline);
-        if client.input_muted {
-            painter.text(
-                corner,
-                Align2::RIGHT_BOTTOM,
-                icon::MICROPHONE_SLASH,
-                FontId::new(18.0, theme::icons()),
-                theme::TEXT,
-            );
-        } else if speaking {
-            painter.text(
-                corner,
-                Align2::RIGHT_BOTTOM,
-                icon::WAVEFORM,
-                FontId::new(18.0, theme::icons()),
-                theme::SUCCESS,
-            );
-        }
+        self.voice_badge(painter, corner - vec2(0.0, 9.0), 18.0, client, speaking);
     }
 
     /// A table row: hairline between rows, status as plain colored text.
@@ -1776,25 +1812,43 @@ impl App {
         ));
         // The whole line, edge to edge and into half the gap around it, is
         // one target, as in Discord.
-        let full = ui.max_rect();
+        // Square and edge to edge across the chat, as in Discord.
+        let clip = ui.clip_rect();
         let area = Rect::from_x_y_ranges(
-            full.left() - 8.0..=full.right(),
-            row.response.rect.top() - 5.0..=row.response.rect.bottom() + 5.0,
+            clip.left()..=clip.right(),
+            row.response.rect.top() - 4.0..=row.response.rect.bottom() + 4.0,
         );
         let response = ui.interact(area, menu_id, Sense::click());
-        if response.hovered() || response.context_menu_opened() {
+        let reply = |app: &mut Self| {
+            let line: String = body.lines().next().unwrap_or("").chars().take(80).collect();
+            app.chat_reply = Some((entry.author.clone(), line));
+        };
+        let active = ui.rect_contains_pointer(area) || response.context_menu_opened();
+        if active {
             ui.painter().set(
                 highlight,
-                egui::Shape::rect_filled(area, CornerRadius::same(6), theme::SURFACE),
+                egui::Shape::rect_filled(area, CornerRadius::ZERO, theme::SURFACE),
             );
+            // Quick reply: a bare glyph at the row's right, like the gear.
+            let spot = Rect::from_min_size(
+                pos2(area.right() - 44.0, area.top() + 4.0),
+                vec2(30.0, 30.0),
+            );
+            let button = ui.put(spot, |ui: &mut egui::Ui| {
+                theme::glyph_button(ui, icon::REPLY, t.chat_reply, 30.0, 0.0)
+            });
+            if button.clicked() {
+                reply(self);
+            }
         }
-        response.context_menu(|ui| {
-            if ui.button(t.chat_reply).clicked() {
-                let line: String = body.lines().next().unwrap_or("").chars().take(80).collect();
-                self.chat_reply = Some((entry.author.clone(), line));
+        egui::Popup::context_menu(&response).show(|ui| {
+            ui.set_width(180.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            if peer::menu_item(ui, icon::REPLY, t.chat_reply).clicked() {
+                reply(self);
                 ui.close();
             }
-            if ui.button(t.chat_copy_text).clicked() {
+            if peer::menu_item(ui, icon::COPY, t.chat_copy_text).clicked() {
                 ui.ctx().copy_text(body.to_string());
                 ui.close();
             }

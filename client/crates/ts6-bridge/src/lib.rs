@@ -288,6 +288,35 @@ fn log(events: &broadcast::Sender<String>, level: &str, text: impl Into<String>)
     );
 }
 
+/// Compares our channel's members with the last snapshot: someone new means a
+/// join sound, someone gone a leave sound. Moving channels ourselves sounds as
+/// a join; the first snapshot of a session is silent.
+fn membership_cue(
+    members: &mut Option<(u64, std::collections::HashSet<u16>)>,
+    snapshot: &ts6_core::Snapshot,
+) -> Option<ts6_audio::cues::Cue> {
+    use ts6_audio::cues::Cue;
+    let own = snapshot.clients.iter().find(|c| c.is_self)?;
+    let now: std::collections::HashSet<u16> = snapshot
+        .clients
+        .iter()
+        .filter(|c| c.channel_id == own.channel_id && !c.is_self)
+        .map(|c| c.id)
+        .collect();
+    let previous = members.replace((own.channel_id, now.clone()));
+    let (channel, before) = previous?;
+    if channel != own.channel_id {
+        return Some(Cue::Join);
+    }
+    if now.difference(&before).next().is_some() {
+        Some(Cue::Join)
+    } else if before.difference(&now).next().is_some() {
+        Some(Cue::Leave)
+    } else {
+        None
+    }
+}
+
 fn publish_state(session: &mut Session, events: &broadcast::Sender<String>) {
     match session.snapshot() {
         Ok(snapshot) => {
@@ -373,6 +402,7 @@ fn publish_audio(
             ptt_binding: counters.ptt_binding,
             ping_ms: own.map(|(ping, _)| ping),
             loss_out: own.map(|(_, loss)| loss),
+            levels: counters.levels,
         },
     );
 }
@@ -388,6 +418,8 @@ async fn session_task(
     // were last requested.
     let mut watched: Option<u16> = None;
     let mut info_requested: Option<std::time::Instant> = None;
+    // Our channel and who is in it, to sound joins and leaves.
+    let mut members: Option<(u64, std::collections::HashSet<u16>)> = None;
     let mut engine = audio::AudioEngine::new();
     let mut config = audio::AudioConfig::default();
     // Diagnostic counter (docs/verification.md V-21): tells "packets never arrive"
@@ -432,6 +464,11 @@ async fn session_task(
                     Some(Wake::Item(item)) => match item {
                         Item::StateChanged => {
                             refresh(active, &events, &mut media, &internal);
+                            if let Ok(snapshot) = active.snapshot() {
+                                if let Some(cue) = membership_cue(&mut members, &snapshot) {
+                                    engine.play_cue(cue);
+                                }
+                            }
                             if let Some(client) = watched {
                                 publish_connection_info(active, client, &events);
                             }
@@ -518,6 +555,7 @@ async fn session_task(
             );
             log(&events, "warn", "connection closed");
             session = None;
+            members = None;
             engine.stop();
             media.reset();
             publish_media(&media, &events);
@@ -1026,5 +1064,70 @@ mod access_tests {
             &headers("localhost:9000", Some("http://localhost:9000")),
             9000
         ));
+    }
+}
+
+#[cfg(test)]
+mod cue_tests {
+    use super::membership_cue;
+    use ts6_audio::cues::Cue;
+    use ts6_core::{ClientInfo, ServerInfo, Snapshot};
+
+    fn snapshot(clients: &[(u16, u64, bool)]) -> Snapshot {
+        Snapshot {
+            own_client_id: 1,
+            own_uid: None,
+            server: ServerInfo {
+                name: String::new(),
+                version: String::new(),
+                platform: String::new(),
+                max_clients: 0,
+                welcome_message: String::new(),
+                icon_id: 0,
+            },
+            channels: Vec::new(),
+            clients: clients
+                .iter()
+                .map(|&(id, channel_id, is_self)| ClientInfo {
+                    id,
+                    channel_id,
+                    name: String::new(),
+                    uid: None,
+                    input_muted: false,
+                    output_muted: false,
+                    is_self,
+                    avatar_hash: None,
+                    myteamspeak_avatar: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn joins_and_leaves_in_our_channel_sound() {
+        let mut members = None;
+        // First snapshot of a session is silent.
+        assert_eq!(
+            membership_cue(&mut members, &snapshot(&[(1, 5, true)])),
+            None
+        );
+        // Someone in another channel does not count.
+        assert_eq!(
+            membership_cue(&mut members, &snapshot(&[(1, 5, true), (2, 6, false)])),
+            None
+        );
+        assert_eq!(
+            membership_cue(&mut members, &snapshot(&[(1, 5, true), (2, 5, false)])),
+            Some(Cue::Join)
+        );
+        assert_eq!(
+            membership_cue(&mut members, &snapshot(&[(1, 5, true)])),
+            Some(Cue::Leave)
+        );
+        // We move channel ourselves.
+        assert_eq!(
+            membership_cue(&mut members, &snapshot(&[(1, 7, true)])),
+            Some(Cue::Join)
+        );
     }
 }

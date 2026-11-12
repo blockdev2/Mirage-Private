@@ -14,6 +14,7 @@
 
 pub mod capture;
 pub mod codec;
+pub mod cues;
 pub mod denoise;
 pub mod devices;
 pub mod dpdfnet;

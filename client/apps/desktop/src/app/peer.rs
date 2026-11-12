@@ -563,7 +563,7 @@ fn percent_field(ui: &mut egui::Ui, client: u16, volume: &mut f32, color: Color3
 }
 
 /// Full-width menu row with a leading icon.
-fn menu_item(ui: &mut egui::Ui, glyph: &str, label: &str) -> egui::Response {
+pub(super) fn menu_item(ui: &mut egui::Ui, glyph: &str, label: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     let painter = ui.painter();

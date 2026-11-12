@@ -62,7 +62,6 @@ pub mod icon {
     pub const SEND: &str = "\u{E396}";
     pub const USER_PLUS: &str = "\u{E4D0}";
     pub const SPEAKER: &str = "\u{E44A}";
-    pub const WAVEFORM: &str = "\u{E802}";
     pub const HOUSE: &str = "\u{E2C2}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_UP: &str = "\u{E13C}";
@@ -82,6 +81,8 @@ pub mod icon {
     pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
     pub const EYE: &str = "\u{E220}";
     pub const IMAGE: &str = "\u{E2CA}";
+    pub const REPLY: &str = "\u{E024}";
+    pub const COPY: &str = "\u{E1CA}";
     pub const EYE_SLASH: &str = "\u{E224}";
 }
 
@@ -811,6 +812,27 @@ pub fn avatar_color(name: &str) -> Color32 {
         acc.wrapping_mul(31).wrapping_add(byte as usize)
     });
     AVATAR_PALETTE[hash % AVATAR_PALETTE.len()]
+}
+
+/// Four rounded bars that rise with the voice, right edge at `at.x` and
+/// centered on `at.y`. `level` is 0..1; each bar has its own shape and a
+/// slight sway so steady speech still looks alive, never mechanical.
+pub fn voice_bars(painter: &egui::Painter, at: egui::Pos2, size: f32, level: f32, time: f32) {
+    const SHAPE: [f32; 4] = [0.55, 1.0, 0.8, 0.45];
+    let bar = (size * 0.16).max(2.0);
+    let gap = bar * 0.75;
+    let width = bar * 4.0 + gap * 3.0;
+    let left = at.x - width;
+    for (i, shape) in SHAPE.iter().enumerate() {
+        let sway = 0.18 * (time * 11.0 + i as f32 * 1.9).sin() * level;
+        let h = (0.22 + (level * shape + sway).clamp(0.0, 1.0) * 0.78) * size;
+        let x = left + i as f32 * (bar + gap);
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::pos2(x, at.y - h / 2.0), egui::vec2(bar, h)),
+            CornerRadius::same((bar / 2.0) as u8),
+            SUCCESS.gamma_multiply(0.55 + 0.45 * level),
+        );
+    }
 }
 
 #[cfg(test)]
