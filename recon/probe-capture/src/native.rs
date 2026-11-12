@@ -172,8 +172,14 @@ fn validate_owned_texture(state: &State) -> Result<bool> {
     Ok(is_fixture_pixel(pixel))
 }
 
-pub fn run(output: Option<&std::path::Path>) -> Result<()> {
-    if let Some(path) = output {
+pub enum Mode {
+    Capture,
+    Mp4(std::path::PathBuf),
+    Stream(std::path::PathBuf),
+}
+
+pub fn run(mode: Mode) -> Result<()> {
+    if let Mode::Mp4(path) | Mode::Stream(path) = &mode {
         anyhow::ensure!(!path.exists(), "output must not already exist");
     }
     let fixture = Fixture::create()?;
@@ -266,22 +272,26 @@ pub fn run(output: Option<&std::path::Path>) -> Result<()> {
         bail!("owned texture or resize validation failed");
     }
     fixture.close()?;
-    let encoding = output
-        .map(|path| {
-            crate::encoder::encode(
-                state.device.as_ref().context("missing device")?,
-                state.context.as_ref().context("missing context")?,
-                state.texture.as_ref().context("missing texture")?,
-                path,
-            )
-        })
-        .transpose()?;
+    let device = state.device.as_ref().context("missing device")?;
+    let context = state.context.as_ref().context("missing context")?;
+    let texture = state.texture.as_ref().context("missing texture")?;
+    let (encoding, streaming) = match &mode {
+        Mode::Capture => (None, None),
+        Mode::Mp4(path) => (
+            Some(crate::encoder::encode(device, context, texture, path)?),
+            None,
+        ),
+        Mode::Stream(directory) => (
+            None,
+            Some(crate::mft::stream(device, context, texture, directory)?),
+        ),
+    };
     println!(
         "{}",
         serde_json::json!({"captured_frames":state.frames,"owned_texture_allocations":state.allocations,
         "final_width":state.width,"final_height":state.height,"resize_observed":resized,
         "fixture_pixel_matches":matches,"gpu_copy_submission_mean_us":state.submission_ns as f64 / state.frames as f64 / 1000.0,
-        "validation_readbacks":1,"user_windows_captured":false,"network_used":false,"encoded_video":encoding.is_some(),"encoding":encoding})
+        "validation_readbacks":1,"user_windows_captured":false,"network_used":false,"encoded_video":encoding.is_some(),"encoding":encoding,"streaming":streaming})
     );
     Ok(())
 }

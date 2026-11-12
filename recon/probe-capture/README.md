@@ -133,3 +133,73 @@ References: [MF GPU device manager](https://learn.microsoft.com/en-us/windows/wi
 [hardware transform permission](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-readwrite-enable-hardware-transforms),
 [color propagation](https://learn.microsoft.com/en-us/windows/win32/medfound/extended-color-information),
 [synchronous finalization](https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-imfsinkwriter-finalize).
+
+## Direct MFT multi-codec stream diagnostic (`--stream`)
+
+Added 2026-11-12. `--stream <new-private-directory>` captures the owned
+synthetic window as before, converts it to NV12 on the GPU, and then, for each
+of **H.264, HEVC and AV1**, drives the encoder `IMFTransform` directly instead
+of using the MP4 sink writer. The output is raw access units (Annex B for
+H.264/HEVC, low-overhead OBUs for AV1) — the form an RTP sender consumes.
+`--codecs` prints capability discovery only.
+
+How the encoder is driven:
+
+- Candidates come from `MFTEnumEx` (hardware first, then software), NV12 in,
+  codec out. Async hardware MFTs are unlocked (`MF_TRANSFORM_ASYNC_UNLOCK`) and
+  driven through `METransformNeedInput/HaveOutput/DrainComplete` events, polled
+  with `MF_EVENT_FLAG_NO_WAIT` under a 15 s deadline so a stuck driver cannot
+  hang the probe. Sync MFTs use the `ProcessInput`/`ProcessOutput` loop with
+  `MF_E_NOTACCEPTING` back-pressure. Stream changes renegotiate the output type.
+- The capture device's `IMFDXGIDeviceManager` is handed to hardware encoders,
+  so the NV12 texture is consumed without CPU readback.
+- Parameter sets missing from the first unit would be taken from
+  `MF_MT_MPEG_SEQUENCE_HEADER` (reported as `parameter_sets_from_media_type`).
+
+Verification, all without FFmpeg:
+
+- `bitstream.rs` (pure Rust, unit-tested): Annex B splitting, emulation-prevention
+  removal, Exp-Golomb, H.264 and HEVC SPS dimensions including conformance
+  cropping, AV1 OBU parsing, sequence-header dimensions and KEY_FRAME detection.
+- `rtp.rs` (pure Rust, unit-tested): RFC 6184 (single NAL + FU-A), RFC 7798
+  (single NAL + FU) and the AV1 RTP payload format (OBU elements without
+  `obu_size`, Z/Y fragmentation, N on a new coded video sequence). Every run
+  depacketizes and requires a byte-exact round trip against a canonical form.
+- An OS decoder MFT decodes the units back to NV12 and the centre sample is
+  compared with the BT.709 limited-range value of the fixture colour
+  (expected Y≈135, U≈100, V≈62).
+- `scripts/check_native_stream.py` re-parses the written elementary files with
+  a separate Python implementation and cross-checks lengths, keyframes and
+  parameter sets against the probe report.
+
+Observed on the development workstation (three consecutive runs, identical):
+
+| Codec | Encoder | Units | Bitstream dims | Keyframes | RTP (MTU 1200) | OS decode |
+| --- | --- | --- | --- | --- | --- | --- |
+| H.264 | hardware | 20 | 640x360 | 1 | 43 packets, lossless | centre YUV (135,100,62), match |
+| HEVC | hardware | 20 | 640x360 | 1 | 45 packets, lossless | no OS decoder installed |
+| AV1 | hardware | 20 | 640x360 | 1 | 24 packets, lossless | no OS decoder installed |
+
+Findings that matter for the product:
+
+- **Adapter affinity.** On a multi-GPU machine, hardware encoder MFTs belonging
+  to other adapters rejected the capture device manager with `E_FAIL`
+  (`skipped_candidates`); the probe fell through to the encoder on the capture
+  adapter. Production code should select it directly via `MFTEnum2` with
+  `MFT_ENUM_ADAPTER_LUID` of the capture device instead of trial and error.
+- **Decode capability is the real constraint, not encode.** This machine
+  encodes HEVC and AV1 in hardware but has no Media Foundation decoder for
+  either (they ship as optional Store codec extensions). A receiver like this
+  could only watch H.264. Codec choice must therefore be negotiated from the
+  *viewer's* decoders, with H.264 as the universal baseline; HEVC/AV1 are
+  opportunistic upgrades. Hardware decoder MFT counts were 0 for all codecs,
+  which is normal: MF exposes DXVA hardware decode through the software decoder
+  MFT, so a count of 0 does not mean decode is CPU-only.
+- The official TeamSpeak viewer's accepted codecs are still unknown; the only
+  measured interop is the earlier Chromium VP8 test. Confirm before choosing a
+  default.
+
+Limits: one repeated still frame (no motion, no rate control or keyframe
+interval tested), 640x360@20, file output rather than live RTP sockets, HEVC/AV1
+pixel content not decoded on this machine, latency and encode-time percentiles
+not measured.

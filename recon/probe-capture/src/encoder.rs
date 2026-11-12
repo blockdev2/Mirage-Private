@@ -12,8 +12,8 @@ use windows::{
     core::{Interface, PCWSTR},
 };
 
-struct Runtime;
-struct ContextProtection {
+pub(crate) struct Runtime;
+pub(crate) struct ContextProtection {
     lock: ID3D11Multithread,
     previous: bool,
 }
@@ -26,8 +26,18 @@ impl Drop for ContextProtection {
         }
     }
 }
+impl ContextProtection {
+    /// Enable D3D11 multithread protection for MF worker threads, restoring
+    /// the previous mode on drop.
+    pub(crate) fn enable(context: &ID3D11DeviceContext) -> Result<Self> {
+        let lock: ID3D11Multithread = context.cast().context("query context protection")?;
+        // SAFETY: Capture is joined; MF may use the immediate context concurrently.
+        let previous = unsafe { lock.SetMultithreadProtected(true).as_bool() };
+        Ok(Self { lock, previous })
+    }
+}
 impl Runtime {
-    fn start() -> Result<Self> {
+    pub(crate) fn start() -> Result<Self> {
         // SAFETY: Runs on the post-capture owner thread; paired with teardown.
         unsafe {
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
@@ -51,7 +61,7 @@ impl Drop for Runtime {
     }
 }
 
-fn convert(
+pub(crate) fn convert(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     input: &ID3D11Texture2D,
@@ -175,7 +185,7 @@ fn convert(
     }
 }
 
-fn media_type(subtype: &windows::core::GUID) -> Result<IMFMediaType> {
+pub(crate) fn media_type(subtype: &windows::core::GUID) -> Result<IMFMediaType> {
     // SAFETY: Attributes describe the fixed, bounded diagnostic format.
     unsafe {
         let mt = MFCreateMediaType()?;

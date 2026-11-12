@@ -157,6 +157,16 @@ adapter on multi-GPU systems is still unrecorded. This does
 not yet produce streaming access units or benchmark a live encode queue; see
 the [probe record](../recon/probe-capture/README.md#gpu-input-h264-diagnostic).
 
+Direct-MFT follow-up: the probe now drives H.264, HEVC and AV1 encoder MFTs
+without the sink writer and emits raw access units. All three encoded on
+hardware here; dimensions were read by Mirage's own bitstream parser, RTP
+packetization (RFC 6184/7798, AV1 RTP) round-tripped losslessly at MTU 1200,
+and the OS H.264 decoder reproduced the fixture colour. No FFmpeg is involved.
+HEVC/AV1 decoders were absent, so codec selection must follow the viewer's
+decode capabilities with H.264 as baseline. Encoders on other adapters reject
+the capture device; select by adapter LUID (`MFTEnum2`). Details in the
+[probe record](../recon/probe-capture/README.md#direct-mft-multi-codec-stream-diagnostic---stream).
+
 1. Measure GPU-texture capture/ownership on an explicitly selected synthetic
    window, including resize, minimize, device loss and stopping capture.
 2. Encode synthetic GPU frames and produce bounded elementary bitstreams; record
