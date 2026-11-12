@@ -156,6 +156,14 @@ pub enum BridgeEvent {
         client: u16,
         info: Option<ConnectionInfo>,
     },
+    /// Answer to `chat_fetch`: a cached attachment, or `None` on failure.
+    ChatFile {
+        channel: String,
+        path: String,
+        file: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+    },
     /// Local paths of cached avatars (by client uid) and of the server icon.
     Media {
         #[serde(default)]
@@ -176,6 +184,18 @@ pub enum Command {
         channel: String,
         text: String,
         request_id: String,
+    },
+    /// Send a local file to the current channel (photo, GIF or any file).
+    ChatAttach {
+        session_id: String,
+        channel: String,
+        path: String,
+        request_id: String,
+    },
+    /// Download an attachment referenced by a message into the bridge cache.
+    ChatFetch {
+        channel: String,
+        path: String,
     },
     Connect {
         address: String,
@@ -274,6 +294,40 @@ mod tests {
     }
 
     #[test]
+    fn attachment_commands_and_events_round_trip() {
+        let json = serde_json::to_string(&Command::ChatAttach {
+            session_id: "s1".into(),
+            channel: "3".into(),
+            path: "C:/pics/cat.gif".into(),
+            request_id: "r9".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"op":"chat_attach","session_id":"s1","channel":"3","path":"C:/pics/cat.gif","request_id":"r9"}"#
+        );
+        let fetch = serde_json::to_string(&Command::ChatFetch {
+            channel: "3".into(),
+            path: "/mirage-a-cat.gif".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            fetch,
+            r#"{"op":"chat_fetch","channel":"3","path":"/mirage-a-cat.gif"}"#
+        );
+        let event: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"chat_file","channel":"3","path":"/x.gif","file":"C:/cache/chat_ab","kind":"gif"}"#,
+        )
+        .unwrap();
+        assert!(matches!(event, BridgeEvent::ChatFile { file: Some(_), .. }));
+        let chat: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"chat","channel":"3","sender":"a","text":"t","from_self":false,"ts":"x","attachments":[{"kind":"link","url":"https://x.test","label":"x"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(chat, BridgeEvent::Chat(m) if m.attachments.len() == 1));
+    }
+
+    #[test]
     fn serializes_the_correlated_chat_command() {
         let json = serde_json::to_string(&Command::Chat {
             session_id: "s1".into(),
@@ -326,4 +380,8 @@ pub struct ChatMessage {
     pub text: String,
     pub from_self: bool,
     pub ts: String,
+    /// Attachments the bridge recognised in `text`; absent on older bridges.
+    #[serde(default)]
+    #[allow(dead_code)] // rendering re-parses the text with the same rules
+    pub attachments: Vec<serde_json::Value>,
 }

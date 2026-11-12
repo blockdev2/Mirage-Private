@@ -8,7 +8,7 @@ description = "Native Windows desktop frontend for the ts6-bridge WebSocket serv
 [dependencies]
 eframe = "0.37.0"
 egui = "0.37.0"
-egui_extras = { version = "0.37.0", features = ["image"] }
+egui_extras = { version = "0.37.0", features = ["image", "gif", "webp"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }

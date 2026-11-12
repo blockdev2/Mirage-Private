@@ -66,6 +66,33 @@ const CHAT_GAP: f32 = 12.0;
 /// Message text: softer than the sender's name, brighter than the time.
 const CHAT_TEXT: Color32 = Color32::from_rgb(205, 210, 219);
 const CHAT_SEND_SIZE: f32 = 28.0;
+/// Largest size a chat picture is drawn at.
+const CHAT_PICTURE_MAX: egui::Vec2 = egui::vec2(360.0, 240.0);
+
+/// A chat attachment's local state.
+#[derive(Clone)]
+enum ChatFile {
+    Loading,
+    Ready {
+        file: String,
+        uri: String,
+        picture: bool,
+    },
+    Unavailable,
+}
+
+/// The text of a message without the BBCode of its attachments, which are
+/// drawn separately.
+fn display_text(segments: &[ts6_bridge::attachments::Segment]) -> String {
+    use ts6_bridge::attachments::Segment;
+    let mut text = String::new();
+    for segment in segments {
+        if let Segment::Text(part) = segment {
+            text.push_str(part);
+        }
+    }
+    text.trim().to_string()
+}
 /// Most messages drawn at once; older ones stay in the log.
 const CHAT_RENDER_LIMIT: usize = 200;
 /// Width of the logo in the sidebar, in points. The bitmap is resampled to
@@ -136,6 +163,10 @@ pub struct App {
     chat_draft: String,
     /// The message being answered: author and its first line.
     chat_reply: Option<(String, String)>,
+    /// Chat attachments by (channel, server path): fetched once, then shown.
+    chat_files: HashMap<(String, String), ChatFile>,
+    /// Attachment sends waiting for their `chat_result`, by request id.
+    pending_attachments: HashMap<String, String>,
     /// Room chat history and the delivery state of what we sent.
     chat: ChatLog,
     /// Whether the bridge advertised the correlated channel-chat contract.
@@ -220,6 +251,8 @@ impl App {
             chat: ChatLog::default(),
             channel_chat: false,
             next_chat_request: 0,
+            chat_files: HashMap::new(),
+            pending_attachments: HashMap::new(),
             logo: None,
             chat_notice: None,
             connect_started: None,
@@ -371,8 +404,33 @@ impl App {
                 error,
                 code,
             } => {
+                if self.pending_attachments.remove(&request_id).is_some() {
+                    // The posted message arrives like any other one; only a
+                    // failure needs saying.
+                    self.chat_notice = error.map(|_| match code.as_deref() {
+                        Some("upload_permission") => self.t.chat_attach_no_permission,
+                        _ => self.t.chat_attach_failed,
+                    });
+                    return;
+                }
                 let failure = error.map(|_| Failure::parse(code.as_deref()));
                 self.chat.resolve(&request_id, failure);
+            }
+            BridgeEvent::ChatFile {
+                channel,
+                path,
+                file,
+                kind,
+            } => {
+                let state = match file {
+                    Some(file) => ChatFile::Ready {
+                        uri: format!("file://{}", file.replace('\\', "/")),
+                        file,
+                        picture: matches!(kind.as_deref(), Some("image" | "gif")),
+                    },
+                    None => ChatFile::Unavailable,
+                };
+                self.chat_files.insert((channel, path), state);
             }
             BridgeEvent::Media {
                 avatars,
@@ -1566,7 +1624,7 @@ impl App {
                 vec2(ui.available_width(), 32.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let button = CHAT_SEND_SIZE + ui.spacing().item_spacing.x;
+                    let button = 2.0 * (CHAT_SEND_SIZE + ui.spacing().item_spacing.x);
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut self.chat_draft)
                             .hint_text(placeholder)
@@ -1581,6 +1639,22 @@ impl App {
                     }
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let can_send = self.channel_chat && !self.chat_draft.trim().is_empty();
+                    let can_attach = self.channel_chat && self.pending_attachments.is_empty();
+                    let attach = ui
+                        .add_enabled_ui(can_attach, |ui| {
+                            ui.add_sized(
+                                vec2(CHAT_SEND_SIZE, CHAT_SEND_SIZE),
+                                egui::Button::new(RichText::new("📎").size(16.0)).frame(false),
+                            )
+                            .on_hover_text(t.chat_attach)
+                        })
+                        .inner
+                        .clicked();
+                    if attach {
+                        if let Some(file) = rfd::FileDialog::new().pick_file() {
+                            self.attach_file(file);
+                        }
+                    }
                     let clicked = ui
                         .add_enabled_ui(can_send, |ui| {
                             theme::icon_button(ui, icon::SEND, t.chat_send, false, CHAT_SEND_SIZE)
@@ -1600,6 +1674,48 @@ impl App {
         if submit {
             self.submit_chat();
         }
+    }
+
+    /// Sends a local file to the current channel. The bridge uploads it to the
+    /// channel's file transfer and posts a message that references it; the
+    /// picture then appears when that message arrives.
+    fn attach_file(&mut self, file: std::path::PathBuf) {
+        let (Some(snapshot), Some(session_id)) = (&self.snapshot, self.status.session_id.clone())
+        else {
+            self.chat_notice = Some(self.t.chat_offline);
+            return;
+        };
+        let Some(channel) = self.own_channel(snapshot) else {
+            return;
+        };
+        self.next_chat_request += 1;
+        let request_id = format!("native-file-{}", self.next_chat_request);
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.pending_attachments.insert(request_id.clone(), name);
+        self.chat_notice = Some(self.t.chat_attach_sending);
+        self.send(Command::ChatAttach {
+            session_id,
+            channel: channel.to_string(),
+            path: file.display().to_string(),
+            request_id,
+        });
+    }
+
+    /// Requests a picture once and reports what to show for it now.
+    fn chat_file(&mut self, channel: u64, path: String) -> ChatFile {
+        let key = (channel.to_string(), path);
+        if let Some(state) = self.chat_files.get(&key) {
+            return state.clone();
+        }
+        self.chat_files.insert(key.clone(), ChatFile::Loading);
+        self.send(Command::ChatFetch {
+            channel: key.0,
+            path: key.1,
+        });
+        ChatFile::Loading
     }
 
     /// Hands the draft to the bridge, correlated with this session and channel,
@@ -1705,6 +1821,82 @@ impl App {
             });
     }
 
+    /// Pictures inline (animated GIFs play), files as a save button, web
+    /// pictures and links as links. Web pictures are never loaded by Mirage:
+    /// fetching them would reveal the user's address to whoever posted them.
+    fn chat_attachments(
+        &mut self,
+        ui: &mut egui::Ui,
+        segments: &[ts6_bridge::attachments::Segment],
+    ) {
+        use ts6_bridge::attachments::Segment;
+        let t = self.t;
+        for segment in segments {
+            match segment {
+                Segment::Text(_) => {}
+                Segment::Picture(file) => match self.chat_file(file.channel_id, file.path()) {
+                    ChatFile::Ready {
+                        uri, picture: true, ..
+                    } => {
+                        ui.add(
+                            egui::Image::new(uri)
+                                .max_height(CHAT_PICTURE_MAX.y)
+                                .max_width(CHAT_PICTURE_MAX.x.min(ui.available_width()))
+                                .corner_radius(6),
+                        );
+                    }
+                    ChatFile::Loading => {
+                        ui.label(
+                            RichText::new(t.chat_attachment_loading)
+                                .small()
+                                .color(theme::TEXT_3),
+                        );
+                    }
+                    _ => {
+                        ui.label(
+                            RichText::new(t.chat_attachment_unavailable)
+                                .small()
+                                .color(theme::TEXT_3),
+                        );
+                    }
+                },
+                Segment::File(file) => {
+                    let size = file
+                        .size
+                        .map(|bytes| format!(" ({:.1} MB)", bytes as f64 / 1_000_000.0))
+                        .unwrap_or_default();
+                    let label = format!("📎 {}{size}", file.name);
+                    if ui
+                        .button(label)
+                        .on_hover_text(t.chat_attachment_save)
+                        .clicked()
+                    {
+                        let target = rfd::FileDialog::new()
+                            .set_file_name(file.name.as_str())
+                            .save_file();
+                        if let Some(target) = target {
+                            match self.chat_file(file.channel_id, file.path()) {
+                                ChatFile::Ready { file: cached, .. } => {
+                                    if std::fs::copy(&cached, &target).is_err() {
+                                        self.chat_notice = Some(t.chat_attachment_unavailable);
+                                    }
+                                }
+                                _ => self.chat_notice = Some(t.chat_attachment_loading),
+                            }
+                        }
+                    }
+                }
+                Segment::WebPicture(url) => {
+                    ui.hyperlink_to(t.chat_web_picture, url);
+                }
+                Segment::Link { url, label } => {
+                    let text = if label.trim().is_empty() { url } else { label };
+                    ui.hyperlink_to(text, url);
+                }
+            }
+        }
+    }
+
     /// One message in the style of a chat client: a round avatar, the sender's
     /// nickname with the time, then the text. Messages of one sender within the
     /// same minute share a single header. Delivery state shows only when it is
@@ -1717,7 +1909,9 @@ impl App {
         snapshot: Option<&Snapshot>,
     ) {
         let t = self.t;
-        let (quote, body) = split_quote(&entry.text);
+        let segments = ts6_bridge::attachments::parse(&entry.text);
+        let display = display_text(&segments);
+        let (quote, body) = split_quote(&display);
         // Reserved under the row, filled once we know it is hovered.
         let highlight = ui.painter().add(egui::Shape::Noop);
         let row = ui.horizontal_top(|ui| {
@@ -1787,6 +1981,7 @@ impl App {
                     // Not selectable, so a right-click reaches the row menu.
                     .selectable(false),
                 );
+                self.chat_attachments(ui, &segments);
                 match entry.delivery {
                     Delivery::Delivered => {}
                     Delivery::Pending(_) => {

@@ -6,6 +6,57 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One attachment or link recognised in a chat message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Attachment {
+    /// A picture (photo or GIF) on this server's channel file transfer;
+    /// fetch it with `chat_fetch`.
+    Picture {
+        channel: String,
+        path: String,
+        name: String,
+    },
+    /// A file on this server's channel file transfer.
+    File {
+        channel: String,
+        path: String,
+        name: String,
+        size: Option<u64>,
+    },
+    /// A picture on the web. Not fetched by the bridge: loading it reveals the
+    /// user's address to whoever chose the URL, so the UI must ask first.
+    WebPicture { url: String },
+    /// A plain web link.
+    Link { url: String, label: String },
+}
+
+impl Attachment {
+    /// Everything recognised in a message's BBCode.
+    pub fn from_text(text: &str) -> Vec<Self> {
+        use ts6_core::attachments::Segment;
+        ts6_core::attachments::parse(text)
+            .into_iter()
+            .filter_map(|segment| match segment {
+                Segment::Text(_) => None,
+                Segment::Picture(file) => Some(Self::Picture {
+                    channel: file.channel_id.to_string(),
+                    path: file.path(),
+                    name: file.name,
+                }),
+                Segment::File(file) => Some(Self::File {
+                    channel: file.channel_id.to_string(),
+                    path: file.path(),
+                    name: file.name,
+                    size: file.size,
+                }),
+                Segment::WebPicture(url) => Some(Self::WebPicture { url }),
+                Segment::Link { url, label } => Some(Self::Link { url, label }),
+            })
+            .collect()
+    }
+}
+
 /// Commands from the UI.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -25,6 +76,23 @@ pub enum Command {
         channel: String,
         text: String,
         request_id: String,
+    },
+    /// Send a local file (photo, GIF or any file) to the current channel.
+    /// The native frontend picks the file; the bridge reads it, uploads it to
+    /// the channel's file transfer and posts a message that references it.
+    /// Answered with `chat_result` for the same `request_id`.
+    ChatAttach {
+        #[serde(default)]
+        session_id: String,
+        channel: String,
+        path: String,
+        request_id: String,
+    },
+    /// Download an attachment referenced by a received message into the local
+    /// cache. Answered with `chat_file`.
+    ChatFetch {
+        channel: String,
+        path: String,
     },
     Disconnect,
     Join {
@@ -97,6 +165,21 @@ pub enum Command {
     AvatarUploaded {
         flag: Option<String>,
     },
+    /// Internal: a chat attachment upload finished; `message` (the text that
+    /// references it) is set on success.
+    #[serde(skip)]
+    AttachmentSent {
+        request_id: String,
+        channel: u64,
+        message: Option<String>,
+    },
+    /// Internal: a chat attachment download finished.
+    #[serde(skip)]
+    ChatFileDone {
+        channel: u64,
+        path: String,
+        file: Option<String>,
+    },
     /// Internal: periodic wake-up so speaking indicators expire on time even
     /// when nobody is talking and no other event arrives.
     #[serde(skip)]
@@ -119,6 +202,10 @@ impl std::fmt::Debug for Command {
             Self::SetAvatar { .. } => "SetAvatar",
             Self::MediaDone { .. } => "MediaDone",
             Self::AvatarUploaded { .. } => "AvatarUploaded",
+            Self::ChatAttach { .. } => "ChatAttach",
+            Self::ChatFetch { .. } => "ChatFetch",
+            Self::AttachmentSent { .. } => "AttachmentSent",
+            Self::ChatFileDone { .. } => "ChatFileDone",
             Self::Tick => "Tick",
             Self::Volume { .. } => "Volume",
             Self::ConnectionInfo { .. } => "ConnectionInfo",
@@ -163,7 +250,18 @@ pub enum Event<'a> {
         sender: String,
         text: String,
         from_self: bool,
+        /// Pictures, files and links recognised in `text` (BBCode). Text-only
+        /// frontends can ignore this; `text` is unchanged.
+        attachments: Vec<Attachment>,
         ts: String,
+    },
+    /// Answer to `chat_fetch`: the cached file, or `null` when the download
+    /// failed or the server refused it. `kind` comes from the file content.
+    ChatFile {
+        channel: String,
+        path: String,
+        file: Option<String>,
+        kind: Option<&'a str>,
     },
     /// Answer to one `chat` command. `error` is human-readable English;
     /// `code` is the stable machine-readable reason (`not_connected`,

@@ -189,3 +189,10 @@ For the frontend wire contract, with a trusted loopback server already running:
 This starts two isolated bridges and does not enable audio. Build browser assets
 first. It verifies independent delivery, sender echoes, and validation failures.
 See [channel chat](channel-chat.md) for the current frontend scope.
+
+For chat attachments and emoji, with a trusted server whose guest group may
+upload files: `python scripts/check_chat_attachments.py --binary .audit-local/full-audit-target/debug/ts6-bridge.exe --server 127.0.0.1:19987`
+(add `--channel <name>` for a dedicated test channel). Fixtures stay under
+ignored `.audit-local/chat-attachments`. Exit code 2 means the server denied
+uploads, so the success path was not verified. Unit tests for the harnesses
+run with `python -m unittest discover -s scripts -p "test_*.py"`.
