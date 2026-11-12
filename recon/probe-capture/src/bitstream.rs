@@ -12,6 +12,10 @@ pub enum Codec {
 impl Codec {
     pub const ALL: [Codec; 3] = [Codec::H264, Codec::Hevc, Codec::Av1];
 
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|codec| codec.as_str() == name)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Codec::H264 => "h264",

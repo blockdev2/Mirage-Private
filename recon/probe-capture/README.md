@@ -203,3 +203,51 @@ Limits: one repeated still frame (no motion, no rate control or keyframe
 interval tested), 640x360@20, file output rather than live RTP sockets, HEVC/AV1
 pixel content not decoded on this machine, latency and encode-time percentiles
 not measured.
+
+## Live RTP over UDP (`--rtp-send` / `--rtp-recv`)
+
+Added 2026-11-12. Two separate processes exchange real RTP over loopback UDP.
+
+- `--rtp-recv <port> <h264|hevc|av1> <frames> <new-dir>` binds `127.0.0.1`,
+  prints a ready line, reassembles access units as packets arrive, inspects
+  each with the Rust bitstream parser, then decodes the stream through an OS
+  decoder (when one exists) and measures every decoded frame.
+- `--rtp-send <127.0.0.1:port> <codec> <frames> [drop-packet-index]` captures
+  the owned fixture, then encodes a **moving pattern** (a 32x32 block travels
+  across the top band each frame; each frame gets its own NV12 texture) paced
+  in real time at 20 FPS. Each unit is packetized and sent the moment the
+  encoder releases it. Non-loopback destinations are refused. The optional
+  index deliberately drops one packet (sequence still advances) to test
+  recovery.
+- The encoder is asked for a 20-frame GOP through `ICodecAPI`
+  (`CODECAPI_AVEncMPVGOPSize`) so late joiners and loss recovery get periodic
+  keyframes; the sender reports whether the encoder accepted it.
+- `Reassembler` (pure Rust, unit-tested) locks the SSRC, detects gaps and
+  sequence wrap, discards incomplete units, and after any loss withholds output
+  until the next keyframe — where a production receiver would send a keyframe
+  request (RTCP PLI), which is not implemented yet.
+- `scripts/check_native_rtp.py` orchestrates both processes per codec and
+  validates what the receiver observed; `--loss-test` adds a drop-packet-50 run.
+
+Observed on the development workstation (60 frames each; repeated, identical):
+
+| Codec | Encoder | GOP accepted | Packets | Loss | Keyframes at | Median / p95 inter-arrival | Media rate | OS decode |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| H.264 | hardware | yes | 134 | 0 | 0, 20, 40 | 50 / ~56 ms | ~115 kbit/s | 60/60 frames, colour match, motion in all 60 |
+| HEVC | hardware | yes | 137 | 0 | 0, 20, 40 | 50 / ~57 ms | ~118 kbit/s | no OS decoder |
+| AV1 | hardware | yes | 72 | 0 | 0, 20, 40 | 50 / ~54 ms | ~101 kbit/s | no OS decoder |
+
+Loss-recovery run (packet 50 dropped), identical for all three codecs: 1 packet
+lost, 1 damaged unit discarded, 19 units withheld, 40 delivered, playback
+resumed exactly at the next keyframe; for H.264 all 40 decoded frames matched
+the fixture colour (no corruption after recovery).
+
+What this does and does not show: the native capture → GPU convert → hardware
+encode → RTP → UDP → reassembly → decode chain works end to end in real time
+for one process pair on one machine. The low bitrate reflects the simple
+synthetic content; the 800 kbit/s target is not enforced (no CBR mode set).
+Not covered: real network loss/jitter/reordering, RTCP (PLI/NACK, receiver
+reports, congestion control), SRTP/DTLS encryption, cross-machine NAT, live
+re-capture per frame (the pattern is drawn on the captured texture), and the
+official TeamSpeak viewer. With a 1 s GOP and no PLI, worst-case recovery
+after loss is about one second.

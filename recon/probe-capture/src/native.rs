@@ -176,6 +176,12 @@ pub enum Mode {
     Capture,
     Mp4(std::path::PathBuf),
     Stream(std::path::PathBuf),
+    RtpSend {
+        destination: std::net::SocketAddr,
+        codec: mirage_native_capture_probe::bitstream::Codec,
+        frames: u32,
+        drop_packet: Option<u64>,
+    },
 }
 
 pub fn run(mode: Mode) -> Result<()> {
@@ -284,6 +290,23 @@ pub fn run(mode: Mode) -> Result<()> {
         Mode::Stream(directory) => (
             None,
             Some(crate::mft::stream(device, context, texture, directory)?),
+        ),
+        Mode::RtpSend {
+            destination,
+            codec,
+            frames,
+            drop_packet,
+        } => (
+            None,
+            Some(crate::mft::rtp_send(
+                device,
+                context,
+                texture,
+                *codec,
+                *destination,
+                *frames,
+                *drop_packet,
+            )?),
         ),
     };
     println!(

@@ -167,6 +167,14 @@ decode capabilities with H.264 as baseline. Encoders on other adapters reject
 the capture device; select by adapter LUID (`MFTEnum2`). Details in the
 [probe record](../recon/probe-capture/README.md#direct-mft-multi-codec-stream-diagnostic---stream).
 
+Live RTP follow-up: two processes now stream a moving pattern over loopback
+UDP in real time (20 FPS) for H.264, HEVC and AV1, all hardware-encoded with a
+requested 20-frame GOP honoured. 60/60 frames arrived with no loss; a
+deliberate single-packet drop was detected, the damaged frame discarded and
+playback resumed cleanly at the next keyframe. Next protocol work: RTCP PLI
+for immediate recovery, NACK/congestion control, and SRTP/DTLS; then
+cross-machine and official-viewer tests.
+
 1. Measure GPU-texture capture/ownership on an explicitly selected synthetic
    window, including resize, minimize, device loss and stopping capture.
 2. Encode synthetic GPU frames and produce bounded elementary bitstreams; record

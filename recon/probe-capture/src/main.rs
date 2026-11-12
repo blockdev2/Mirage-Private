@@ -7,31 +7,47 @@ mod mft;
 #[cfg(windows)]
 mod native;
 
+const USAGE: &str = "usage: mirage-native-capture-probe [--codecs | --encode <new.mp4> | \
+--stream <new-dir> | --rtp-send <127.0.0.1:port> <h264|hevc|av1> <frames> [drop-packet-index] | \
+--rtp-recv <port> <h264|hevc|av1> <frames> <new-dir>]";
+
 fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     {
-        let mut args = std::env::args_os().skip(1);
-        let mode = match args.next() {
-            None => native::Mode::Capture,
-            Some(flag) if flag == "--encode" => {
-                native::Mode::Mp4(std::path::PathBuf::from(args.next().ok_or_else(|| {
-                    anyhow::anyhow!("--encode requires a new private MP4 path")
-                })?))
+        use anyhow::Context;
+        use mirage_native_capture_probe::bitstream::Codec;
+
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let codec = |name: &str| Codec::parse(name).context("codec must be h264, hevc or av1");
+        let mode = match args.as_slice() {
+            [] => native::Mode::Capture,
+            ["--codecs"] => return mft::codecs(),
+            ["--encode", path] => native::Mode::Mp4(path.into()),
+            ["--stream", directory] => native::Mode::Stream(directory.into()),
+            ["--rtp-send", destination, name, frames, rest @ ..] if rest.len() <= 1 => {
+                native::Mode::RtpSend {
+                    destination: destination.parse().context("destination must be ip:port")?,
+                    codec: codec(name)?,
+                    frames: frames.parse().context("frames must be a number")?,
+                    drop_packet: rest
+                        .first()
+                        .map(|n| n.parse().context("drop index must be a number"))
+                        .transpose()?,
+                }
             }
-            Some(flag) if flag == "--stream" => {
-                native::Mode::Stream(std::path::PathBuf::from(args.next().ok_or_else(|| {
-                    anyhow::anyhow!("--stream requires a new private directory")
-                })?))
+            ["--rtp-recv", port, name, frames, directory] => {
+                let report = mft::rtp_receive(
+                    codec(name)?,
+                    port.parse().context("port must be a number")?,
+                    frames.parse().context("frames must be a number")?,
+                    std::path::Path::new(directory),
+                )?;
+                println!("{report}");
+                return Ok(());
             }
-            Some(flag) if flag == "--codecs" => {
-                anyhow::ensure!(args.next().is_none(), "unexpected extra argument");
-                return mft::codecs();
-            }
-            Some(_) => anyhow::bail!(
-                "expected no arguments, --codecs, --encode <new.mp4> or --stream <new-directory>"
-            ),
+            _ => anyhow::bail!(USAGE),
         };
-        anyhow::ensure!(args.next().is_none(), "unexpected extra argument");
         native::run(mode)
     }
     #[cfg(not(windows))]

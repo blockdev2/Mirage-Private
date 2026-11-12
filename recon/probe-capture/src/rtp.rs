@@ -180,10 +180,261 @@ pub fn rtp_packet(
     packet
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RtpHeader {
+    pub marker: bool,
+    pub payload_type: u8,
+    pub sequence: u16,
+    pub timestamp: u32,
+    pub ssrc: u32,
+}
+
+/// Parse an RTP packet (RFC 3550), skipping CSRCs, header extension and padding.
+pub fn parse_rtp(packet: &[u8]) -> Option<(RtpHeader, &[u8])> {
+    let first = *packet.first()?;
+    if first >> 6 != 2 || packet.len() < RTP_HEADER_LEN {
+        return None;
+    }
+    let mut start = RTP_HEADER_LEN + 4 * usize::from(first & 0x0f);
+    if first & 0x10 != 0 {
+        let words = u16::from_be_bytes([*packet.get(start + 2)?, *packet.get(start + 3)?]);
+        start += 4 + 4 * usize::from(words);
+    }
+    let mut end = packet.len();
+    if first & 0x20 != 0 {
+        end = end.checked_sub(usize::from(*packet.last()?))?;
+    }
+    let payload = packet.get(start..end)?;
+    let header = RtpHeader {
+        marker: packet[1] & 0x80 != 0,
+        payload_type: packet[1] & 0x7f,
+        sequence: u16::from_be_bytes([packet[2], packet[3]]),
+        timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
+        ssrc: u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]),
+    };
+    Some((header, payload))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReceiveStats {
+    pub packets: u64,
+    pub lost: u64,
+    pub late_or_duplicate: u64,
+    pub foreign_ssrc: u64,
+    pub malformed: u64,
+    pub units: u64,
+    /// Units incomplete or undecodable because of loss.
+    pub dropped_units: u64,
+    /// Complete units withheld until the next keyframe after a loss.
+    pub awaiting_keyframe: u64,
+}
+
+const MAX_PACKETS_PER_UNIT: usize = 4096;
+const MAX_UNIT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Receiver-side access-unit reassembly. Units are delimited by timestamp and
+/// the marker bit. After any loss, output resumes only at a keyframe, which is
+/// where a production receiver would also send a keyframe request (PLI).
+pub struct Reassembler {
+    codec: Codec,
+    ssrc: Option<u32>,
+    expected: Option<u16>,
+    current: Option<(u32, Vec<Vec<u8>>, bool)>,
+    need_keyframe: bool,
+    pub stats: ReceiveStats,
+}
+
+impl Reassembler {
+    pub fn new(codec: Codec) -> Self {
+        Self {
+            codec,
+            ssrc: None,
+            expected: None,
+            current: None,
+            need_keyframe: true,
+            stats: ReceiveStats::default(),
+        }
+    }
+
+    pub fn push(&mut self, packet: &[u8]) -> Option<Vec<u8>> {
+        let Some((header, payload)) = parse_rtp(packet) else {
+            self.stats.malformed += 1;
+            return None;
+        };
+        if *self.ssrc.get_or_insert(header.ssrc) != header.ssrc {
+            self.stats.foreign_ssrc += 1;
+            return None;
+        }
+        if let Some(expected) = self.expected {
+            let gap = header.sequence.wrapping_sub(expected) as i16;
+            if gap < 0 {
+                self.stats.late_or_duplicate += 1;
+                return None;
+            }
+            if gap > 0 {
+                self.stats.lost += gap as u64;
+                self.need_keyframe = true;
+                if let Some(current) = self.current.as_mut() {
+                    current.2 = true;
+                }
+            }
+        }
+        self.expected = Some(header.sequence.wrapping_add(1));
+        self.stats.packets += 1;
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|(timestamp, _, _)| *timestamp != header.timestamp)
+        {
+            self.current = None; // previous unit never saw its marker
+            self.stats.dropped_units += 1;
+        }
+        let (_, parts, broken) = self
+            .current
+            .get_or_insert_with(|| (header.timestamp, Vec::new(), false));
+        let size: usize = parts.iter().map(Vec::len).sum();
+        if parts.len() >= MAX_PACKETS_PER_UNIT || size + payload.len() > MAX_UNIT_BYTES {
+            *broken = true;
+        } else {
+            parts.push(payload.to_vec());
+        }
+        if !header.marker {
+            return None;
+        }
+        let (_, parts, broken) = self.current.take()?;
+        let unit = (!broken).then(|| depacketize(self.codec, &parts)).flatten();
+        let Some(unit) = unit else {
+            self.stats.dropped_units += 1;
+            self.need_keyframe = true;
+            return None;
+        };
+        let keyframe = crate::bitstream::inspect(self.codec, &unit).is_some_and(|au| au.keyframe);
+        if self.need_keyframe && !keyframe {
+            self.stats.awaiting_keyframe += 1;
+            return None;
+        }
+        self.need_keyframe = false;
+        self.stats.units += 1;
+        Some(unit)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bitstream::{av1_canonical, tests::*};
+
+    fn h264_stream() -> Vec<Vec<u8>> {
+        // keyframe (SPS+PPS+large IDR), then two inter frames, then keyframe.
+        let key = |len| {
+            let mut unit = vec![0, 0, 0, 1];
+            unit.extend(h264_sps_640x360());
+            unit.extend([0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1]);
+            unit.extend(big_nal(&[0x65], len));
+            unit
+        };
+        let inter = |len| {
+            let mut unit = vec![0, 0, 0, 1];
+            unit.extend(big_nal(&[0x41], len));
+            unit
+        };
+        vec![key(3000), inter(1500), inter(200), key(2500)]
+    }
+
+    fn packetize(units: &[Vec<u8>], first_sequence: u16) -> Vec<Vec<Vec<u8>>> {
+        let mut sequence = first_sequence;
+        units
+            .iter()
+            .enumerate()
+            .map(|(frame, unit)| {
+                let parts = payloads(Codec::H264, unit, 500).unwrap();
+                let count = parts.len();
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, part)| {
+                        let packet =
+                            rtp_packet(96, sequence, frame as u32 * 4500, 9, i + 1 == count, part);
+                        sequence = sequence.wrapping_add(1);
+                        packet
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reassembles_in_order_stream_across_sequence_wrap() {
+        let units = h264_stream();
+        let mut receiver = Reassembler::new(Codec::H264);
+        let mut out = Vec::new();
+        for packet in packetize(&units, 65530).concat() {
+            out.extend(receiver.push(&packet));
+        }
+        assert_eq!(
+            out,
+            units
+                .iter()
+                .map(|u| annexb_canonical(u))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!((receiver.stats.lost, receiver.stats.units), (0, 4));
+    }
+
+    #[test]
+    fn loss_drops_unit_and_waits_for_next_keyframe() {
+        let units = h264_stream();
+        let mut packets = packetize(&units, 100);
+        packets[1].remove(1); // lose a fragment of the first inter frame
+        let mut receiver = Reassembler::new(Codec::H264);
+        let out: Vec<_> = packets
+            .concat()
+            .iter()
+            .filter_map(|p| receiver.push(p))
+            .collect();
+        assert_eq!(out.len(), 2, "first keyframe and the recovery keyframe");
+        assert_eq!(out[1], annexb_canonical(&units[3]));
+        let stats = receiver.stats;
+        assert_eq!(
+            (stats.lost, stats.dropped_units, stats.awaiting_keyframe),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn ignores_duplicates_foreign_ssrc_and_garbage() {
+        let units = h264_stream();
+        let packets = packetize(&units[..1], 0).concat();
+        let mut receiver = Reassembler::new(Codec::H264);
+        receiver.push(&packets[0]);
+        receiver.push(&packets[0]);
+        let mut foreign = packets[1].clone();
+        foreign[11] ^= 1;
+        receiver.push(&foreign);
+        receiver.push(&[0x00, 1, 2]);
+        let out: Vec<_> = packets[1..]
+            .iter()
+            .filter_map(|p| receiver.push(p))
+            .collect();
+        assert_eq!(out.len(), 1);
+        let stats = receiver.stats;
+        assert_eq!(
+            (stats.late_or_duplicate, stats.foreign_ssrc, stats.malformed),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn parses_csrc_extension_and_padding() {
+        let mut packet = vec![0xb1, 0x60, 0, 7, 0, 0, 0, 9, 0, 0, 0, 5];
+        packet.extend([1, 2, 3, 4]); // one CSRC
+        packet.extend([0xbe, 0xde, 0, 1, 9, 9, 9, 9]); // one-word extension
+        packet.extend([0xaa, 0xbb, 0, 0, 3]); // payload + 3 padding bytes
+        let (header, payload) = parse_rtp(&packet).unwrap();
+        assert_eq!((header.sequence, header.timestamp, header.ssrc), (7, 9, 5));
+        assert_eq!(payload, [0xaa, 0xbb]);
+        assert!(parse_rtp(&[0x40; 12]).is_none(), "wrong version");
+    }
 
     fn big_nal(header: &[u8], len: usize) -> Vec<u8> {
         let mut nal = header.to_vec();
