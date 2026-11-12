@@ -8,12 +8,13 @@
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use tungstenite::{Message, WebSocket};
 
-use crate::protocol::{BridgeEvent, Command};
+use crate::protocol::{AudioEvent, BridgeEvent, Command};
 
 const BRIDGE_PORT: u16 = 8787;
 const BRIDGE_URL: &str = "ws://127.0.0.1:8787/ws";
@@ -44,6 +45,10 @@ pub enum Incoming {
 pub struct Bridge {
     pub incoming: Receiver<Incoming>,
     pub outgoing: SyncSender<Command>,
+    /// Latest audio meter. These arrive about ten times a second, so they
+    /// replace each other here instead of filling the event queue while the
+    /// window is minimized and not drained.
+    pub audio: Arc<Mutex<Option<AudioEvent>>>,
 }
 
 impl Bridge {
@@ -52,13 +57,16 @@ impl Bridge {
         start_embedded_bridge();
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let audio = Arc::new(Mutex::new(None));
+        let link_audio = Arc::clone(&audio);
         thread::Builder::new()
             .name("ts6-bridge-link".into())
-            .spawn(move || link_loop(event_tx, command_rx, ctx))
+            .spawn(move || link_loop(event_tx, command_rx, link_audio, ctx))
             .expect("failed to start the bridge link thread");
         Self {
             incoming: event_rx,
             outgoing: command_tx,
+            audio,
         }
     }
 }
@@ -83,7 +91,12 @@ fn start_embedded_bridge() {
     }
 }
 
-fn link_loop(events: SyncSender<Incoming>, commands: Receiver<Command>, ctx: egui::Context) {
+fn link_loop(
+    events: SyncSender<Incoming>,
+    commands: Receiver<Command>,
+    audio: Arc<Mutex<Option<AudioEvent>>>,
+    ctx: egui::Context,
+) {
     loop {
         if !notify(&events, &ctx, SocketState::Connecting) {
             return;
@@ -94,7 +107,7 @@ fn link_loop(events: SyncSender<Incoming>, commands: Receiver<Command>, ctx: egu
                 return;
             }
             // `run_session` returns false only when the UI has gone away.
-            if !run_session(&mut socket, &events, &commands, &ctx) {
+            if !run_session(&mut socket, &events, &commands, &audio, &ctx) {
                 return;
             }
         }
@@ -146,6 +159,7 @@ fn run_session(
     socket: &mut WebSocket<TcpStream>,
     events: &SyncSender<Incoming>,
     commands: &Receiver<Command>,
+    audio: &Mutex<Option<AudioEvent>>,
     ctx: &egui::Context,
 ) -> bool {
     let mut resync = false;
@@ -179,7 +193,7 @@ fn run_session(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 if let Ok(event) = serde_json::from_str::<BridgeEvent>(text.as_str()) {
-                    match forward(events, Incoming::Event(event)) {
+                    match route(events, audio, event) {
                         Forward::Sent => {}
                         Forward::Dropped => resync = true,
                         Forward::Gone => return false,
@@ -203,6 +217,23 @@ enum Forward {
     Dropped,
     /// The UI has gone away.
     Gone,
+}
+
+/// Audio meters overwrite the latest slot; everything else is queued.
+fn route(
+    events: &SyncSender<Incoming>,
+    audio: &Mutex<Option<AudioEvent>>,
+    event: BridgeEvent,
+) -> Forward {
+    match event {
+        BridgeEvent::Audio(meter) => {
+            if let Ok(mut slot) = audio.lock() {
+                *slot = Some(meter);
+            }
+            Forward::Sent
+        }
+        other => forward(events, Incoming::Event(other)),
+    }
 }
 
 /// Never blocks: a full queue drops the event so the socket keeps being read.
@@ -245,6 +276,28 @@ mod queue_tests {
             forward(&tx, Incoming::Socket(SocketState::Open)),
             Forward::Gone
         );
+    }
+
+    #[test]
+    fn audio_meters_never_fill_the_event_queue() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let slot = Mutex::new(None);
+        for packets in 0..10_000 {
+            let meter = AudioEvent {
+                rx_packets: packets,
+                ..AudioEvent::default()
+            };
+            assert_eq!(route(&tx, &slot, BridgeEvent::Audio(meter)), Forward::Sent);
+        }
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().rx_packets, 9_999);
+        // The queue is still free for an event that must not be lost.
+        let chat = BridgeEvent::ChatResult {
+            request_id: "r1".into(),
+            error: None,
+            code: None,
+        };
+        assert_eq!(route(&tx, &slot, chat), Forward::Sent);
+        assert_eq!(rx.try_iter().count(), 1);
     }
 
     #[test]

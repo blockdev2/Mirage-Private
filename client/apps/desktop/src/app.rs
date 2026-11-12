@@ -238,6 +238,16 @@ impl App {
                 Incoming::Event(event) => self.apply_event(event),
             }
         }
+        let meter = self
+            .bridge
+            .audio
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        // A meter read before a disconnect must not revive the call view.
+        if let Some(meter) = meter.filter(|_| self.status.connected) {
+            self.apply_event(BridgeEvent::Audio(meter));
+        }
     }
 
     fn apply_event(&mut self, event: BridgeEvent) {
@@ -458,6 +468,24 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Closing the window during a call must end the session on the server;
+    /// otherwise the identity lingers and reopening fails as a clone. Waits at
+    /// most one second so a stuck bridge cannot hold the window open.
+    fn on_exit(&mut self) {
+        if !self.status.connected {
+            return;
+        }
+        self.send(Command::Disconnect);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match self.bridge.incoming.recv_timeout(left) {
+                Ok(Incoming::Event(BridgeEvent::Status(status))) if !status.connected => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         let ctx = ui.ctx().clone();

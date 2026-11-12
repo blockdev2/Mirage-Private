@@ -107,8 +107,29 @@ teamspeak-go treats `ConnectFailedBanned` as terminal and disconnects without
 retrying. Mirage's vendored library reconnects only after timeouts, and the
 desktop shows a ban message, so the behavior agrees. No code was copied.
 
+### Second follow-up
+
+- Audio meter events (about ten per second, nearly all link traffic) now
+  overwrite a single latest-value slot instead of entering the 4096-event
+  queue, so a minimized window no longer fills the queue and drops chat.
+  Regression test added.
+- Closing the window during a call ended the process without a
+  `clientdisconnect`; reopening within about 30 seconds failed with
+  `ClientTooManyClonesConnected`. Reproduced with the previous build by closing
+  the real window (`CloseMainWindow`) and reopening against beta13.1. The app
+  now disconnects on exit (waiting at most one second) and the reopen connects.
+  The clone refusal also has a Portuguese message.
+- Soak against beta13.1: two bridges, one channel message every 3 seconds
+  alternating direction for 15 minutes, with one disconnect/reconnect midway:
+  299 of 299 delivered, latency median 1 ms and maximum 2 ms on loopback,
+  bridge working set constant at 21 MB. Earlier harness runs failed at
+  startup only because the harness killed bridges without disconnecting,
+  triggering the same clone refusal.
+- PR #4 combined with this main passed the full workspace tests and Clippy
+  locally; it awaits owner review.
+
 ### Still not verified
 
-The native desktop chat was not driven automatically (no screen-control tool
-was available in this session); it was built and opened for manual testing.
-Real microphone/speaker calls and long-running load remain open.
+Native chat was exercised through the embedded bridge and window close/reopen,
+not by clicking the rendered UI. Real microphone/speaker calls, hosted or
+non-loopback servers, and sessions longer than 15 minutes remain open.
