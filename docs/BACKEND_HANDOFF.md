@@ -163,3 +163,9 @@ authorized hosted/official-client interoperability, and the planned Go-peer
 matrix. Persistent group chat, direct-message UI, WebRTC media, S3 integration
 and release packaging remain outside the implemented feature set of this branch.
 Do not infer their state on a future combined branch from this record alone.
+
+## Status after integration
+
+The integration recorded in [INTEGRATION_RECORD.md](INTEGRATION_RECORD.md)
+bounded the `wait_result` replay paths and reduced unknown-command logging to
+name and size. Native link channels remain unbounded and are still open.
