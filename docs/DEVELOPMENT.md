@@ -142,7 +142,7 @@ Repository files do not configure hosted settings. Before public launch, the own
 5. Add practical labels (`bug`, `enhancement`, `documentation`, `maintenance`, `good first issue`); do not put private vulnerabilities in public labels/issues.
 6. Resolve known advisories and review all resolved/native dependency licenses before distributing binaries. Define release tags, verified platforms/server versions, and release approval separately; no release workflow is supplied.
 
-The CI includes Windows build/test/lint/format, UI build/audit, repository policy checks, and Rust dependency audits. It has no deployment credentials or publishing steps. Gitleaks is a local pre-publication requirement; hosted secret scanning requires administrator setup. Hosted CI has not been executed merely by adding workflow files.
+The CI includes Windows build/test/lint/format, native capture probe lint/tests, harness unit tests, UI build/audit, repository policy checks, and Rust dependency audits for all three lockfiles. It has no deployment credentials or publishing steps. Gitleaks is a local pre-publication requirement; hosted secret scanning requires administrator setup. Hosted CI has not been executed merely by adding workflow files.
 
 ## Live voice progress regression
 
@@ -169,9 +169,12 @@ optimization over build throughput and remains unchanged.
 
 The GitHub workflow runs for pull requests and pushes to main, avoiding duplicate
 push and pull-request runs for the same feature branch. Its SHA-pinned Rust cache
-restores dependency artifacts for both workspaces. Only successful pushes to main
-save this cache; pull requests can restore but cannot populate the shared cache.
-Cargo binaries are excluded. CI uses GitHub-hosted runners and does not consume
+restores dependency artifacts for the client workspace and both standalone
+probes. Only successful pushes to main save these caches; pull requests can
+restore but cannot populate them. Cargo binaries are excluded from the build
+cache; the dependency-audit job caches only the pinned `cargo-audit` binary
+(keyed by its version), so it is no longer compiled from source on every run.
+npm downloads are cached by `setup-node` from the lockfile. CI uses GitHub-hosted runners and does not consume
 the developer machine's CPU. Cache effectiveness depends on the runner and key;
 measure hosted runs before claiming a speedup.
 

@@ -10,7 +10,7 @@ Implemented: TS3-compatible UDP session establishment, channel/client snapshots,
 
 The native frontend is an eframe/egui desktop application. The React/Vite browser frontend remains available for browser-based development with the standalone bridge. Neither frontend is distributed through a packaged installer or release. Previous local experiments used TeamSpeak Server **6.0.0-beta13.1**; their results are summarized in [verification](docs/verification.md) and do not establish compatibility with every TS6 server release.
 
-Both frontends implement current-channel text chat through the bridge. Browser send/receive and reload recovery were verified against a local beta13.1 server; native rendering and interaction remain to be manually validated. Direct-client messages are verified through the CLI but have no dedicated frontend conversation view. See [channel chat](docs/channel-chat.md). Matrix chat integration, WebRTC video/screensharing, S3 file integration, and acoustic echo cancellation are not implemented. RNNoise noise suppression is present in the capture pipeline, but real microphone quality, long-running stability, and non-Windows operation remain unverified. The synthetic CLI tone-rate defect was corrected in a loopback retest; sustained voice and late-join behavior still need broader validation.
+Both frontends implement current-channel text chat through the bridge. Browser send/receive and reload recovery were verified against a local beta13.1 server; native rendering and interaction remain to be manually validated. Direct-client messages are verified through the CLI but have no dedicated frontend conversation view. The native frontend also sends photos, animated GIFs and files (up to 5 MB) through the channel's classic file transfer, with `:shortcode:` emoji; the bridge path was verified end to end on a loopback server, while the rendered native window was not exercised and default servers deny guest uploads. See [channel chat](docs/channel-chat.md). Matrix chat integration, WebRTC video/screensharing, S3 file integration, and acoustic echo cancellation are not implemented. RNNoise noise suppression is present in the capture pipeline, but real microphone quality, long-running stability, and non-Windows operation remain unverified. The synthetic CLI tone-rate defect was corrected in a loopback retest; sustained voice and late-join behavior still need broader validation.
 
 **Experimental software:** the RustCrypto advisory identified in the historical audit has been addressed by a dependency migration. Publication uses a clean source import; unsafe local historical commits are excluded. Private security reporting and production readiness still require follow-up. See [publication verification](docs/PUBLICATION.md) and the [historical audit](docs/AUDIT.md).
 
@@ -20,9 +20,12 @@ Manual stream-control and synthetic WebRTC diagnostics now exercise signaling
 and decoded video fixtures. These are not a native screen-sharing feature;
 end-user capture, hardware codecs and official-viewer video remain unverified. A
 standalone [owned-window capture probe](recon/probe-capture/README.md) validates
-WGC, resizing and a GPU texture copy with one final readback. Its optional H.264
-file diagnostic also passed independent decoding of a repeated synthetic frame;
-actual encoder hardware and native live streaming remain unverified. See
+WGC, resizing and a GPU texture copy with one final readback. It also drives
+Media Foundation H.264, HEVC and AV1 encoders directly (no FFmpeg), lets the user
+choose the encoder backend and GPU (discrete, integrated or CPU), and streams
+live RTP over loopback UDP with loss recovery; those checks passed on one
+development machine. End-user screen sharing, TS6 stream transport and
+official-viewer video remain unimplemented or unverified. See
 [streaming research](docs/persistent-chat-and-streaming-research.md) and the
 [native pipeline direction](docs/native-streaming-architecture.md).
 

@@ -5,6 +5,7 @@ No tagged releases have been established in this checkout. Entries describe repo
 ## Unreleased
 
 - Add channel chat attachments (photos, animated GIFs and files up to 5 MB) over classic channel file transfer with legacy BBCode references, `:shortcode:` emoji, cached `chat_fetch`, a distinct `upload_permission` refusal, and a two-bridge live check.
+- CI: cache the pinned cargo-audit binary instead of compiling it every run; lint, test and audit the native capture probe; run harness unit tests.
 - Let the native capture probe choose the encoder backend (hardware/software) and GPU (discrete, integrated, by index) with clean refusal of unsupported combinations.
 
 - Add English onboarding, shared agent instructions, contribution and security policies, issue/PR templates, and CI/dependency monitoring.
