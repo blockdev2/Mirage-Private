@@ -79,7 +79,11 @@ pub mod icon {
     pub const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
+    pub const X: &str = "\u{E4F6}";
+    pub const DOWNLOAD: &str = "\u{E20C}";
+    pub const PAPERCLIP: &str = "\u{E39A}";
     pub const EYE: &str = "\u{E220}";
+    pub const TRASH: &str = "\u{E4A6}";
     pub const IMAGE: &str = "\u{E2CA}";
     pub const REPLY: &str = "\u{E024}";
     pub const COPY: &str = "\u{E1CA}";
