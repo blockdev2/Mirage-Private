@@ -5,19 +5,20 @@ Do not duplicate or override its rules in tool-specific files.
 
 ## Purpose and status
 
-Independent experimental TeamSpeak 6 client: Rust network/audio core and a browser UI.
-First-party license: MIT. English is mandatory throughout first-party contributions.
+Independent experimental TeamSpeak 6 client: Rust network/audio core, native eframe/egui desktop frontend, and React browser frontend.
+First-party license: MIT. First-party prose is English; native desktop end-user UI text is Brazilian Portuguese.
 Previous interoperability experiments used server beta13.1; they are not fresh tests.
 See [README](README.md) and [current audit](docs/AUDIT.md) for limits and blockers.
 
 ## Navigate
 
-- `client/Cargo.toml`: five-crate workspace and lockfile.
+- `client/Cargo.toml`: six-package workspace and lockfile.
 - `ts6-core`: `Session`, `ClientConfig`, `Snapshot`, identity persistence, event polling.
 - `ts6-audio`: Opus, mono 48 kHz processing, capture/playback on dedicated threads.
 - `ts6-input`: Windows global PTT and bounded transmit gate.
 - `ts6-cli`: manual measurement commands; no-argument invocation prints usage.
 - `ts6-bridge`: one loopback HTTP/WebSocket service, one session, audio orchestration.
+- `client/apps/desktop`: native eframe/egui desktop frontend; embeds a bridge without static-file serving.
 - `client/apps/ui`: React 19 + TypeScript 7 + Vite 8; wire types in `src/types.ts`.
 - `client/vendor/tsclientlib`: third-party workspace; read `client/UPSTREAM.md` before changes.
 - `recon/probe-ts6`: independent early probe, outside the main workspace.
@@ -32,7 +33,7 @@ python scripts/check_repository.py
 cd client
 ./scripts/build.ps1 build --locked --workspace
 ./scripts/build.ps1 test --locked --workspace
-cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -- --check
+cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -p ts6-desktop -- --check
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 cd apps/ui
 npm ci --ignore-scripts
@@ -40,8 +41,10 @@ npm run build
 npm audit
 ```
 
-Build the UI before running `cargo run --locked -p ts6-bridge` from `client`.
-The default URL is http://127.0.0.1:8787. Private-server tests require an explicit
+Run the native client with `cargo run --locked -p ts6-desktop` from `client`.
+For the browser frontend, build `apps/ui/dist` before running
+`cargo run --locked -p ts6-bridge`. The default bridge URL is http://127.0.0.1:8787.
+Private-server tests require an explicit
 `ALLOW_PRIVATE_TARGETS=1` process environment setting; no `.env` loader exists.
 
 ## Critical pitfalls

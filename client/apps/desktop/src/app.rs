@@ -133,6 +133,10 @@ pub struct App {
     chat_draft: String,
     /// Room chat history and the delivery state of what we sent.
     chat: ChatLog,
+    /// Whether the bridge advertised the correlated channel-chat contract.
+    channel_chat: bool,
+    /// Counter for chat request ids, unique within this application run.
+    next_chat_request: u64,
     /// The logo resampled for the current display scale.
     logo: Option<LogoTexture>,
     /// Why the last attempt to send was refused before it left, if it was.
@@ -206,6 +210,8 @@ impl App {
             output_muted: false,
             chat_draft: String::new(),
             chat: ChatLog::default(),
+            channel_chat: false,
+            next_chat_request: 0,
             logo: None,
             chat_notice: None,
             connect_started: None,
@@ -226,6 +232,7 @@ impl App {
                     self.socket = state;
                     if state != SocketState::Open {
                         self.bridge_version = None;
+                        self.channel_chat = false;
                     }
                 }
                 Incoming::Event(event) => self.apply_event(event),
@@ -235,8 +242,13 @@ impl App {
 
     fn apply_event(&mut self, event: BridgeEvent) {
         match event {
-            BridgeEvent::Hello { version, devices } => {
+            BridgeEvent::Hello {
+                version,
+                channel_chat,
+                devices,
+            } => {
                 self.bridge_version = Some(version);
+                self.channel_chat = channel_chat;
                 self.devices = devices;
             }
             BridgeEvent::Status(status) => {
@@ -308,35 +320,29 @@ impl App {
                     }
                 }
             }
-            BridgeEvent::Chat {
-                scope,
-                from_id,
-                from_name,
-                text,
-                from_self,
-            } => {
-                if let Some(scope) = Scope::parse(&scope) {
-                    // A channel message belongs to the channel we are in now.
-                    let channel = match scope {
-                        Scope::Channel => self.snapshot.as_ref().and_then(|s| self.own_channel(s)),
-                        _ => None,
-                    };
-                    let author = from_name.unwrap_or_else(|| "?".to_string());
-                    let message = ChatIncoming {
-                        scope,
-                        channel,
-                        from_id,
-                        author,
-                        text,
-                        mine: from_self,
+            BridgeEvent::Chat(message) => {
+                // The bridge forwards channel messages only, tagged with the
+                // channel they were received in.
+                if let Ok(channel) = message.channel.parse::<u64>() {
+                    let incoming = ChatIncoming {
+                        scope: Scope::Channel,
+                        channel: Some(channel),
+                        from_id: None,
+                        author: message.sender,
+                        text: message.text,
+                        mine: message.from_self,
                     };
                     self.chat
-                        .receive(message, Instant::now(), clock::local_hour_minute());
+                        .receive(incoming, Instant::now(), clock::local_hour_minute());
                 }
             }
-            BridgeEvent::ChatSent => self.chat.deliver_oldest_pending(),
-            BridgeEvent::ChatFailed { code } => {
-                self.chat.fail_oldest_pending(Failure::parse(&code));
+            BridgeEvent::ChatResult {
+                request_id,
+                error,
+                code,
+            } => {
+                let failure = error.map(|_| Failure::parse(code.as_deref()));
+                self.chat.resolve(&request_id, failure);
             }
             BridgeEvent::Media {
                 avatars,
@@ -1466,7 +1472,7 @@ impl App {
                         self.chat_notice = None;
                     }
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let can_send = !self.chat_draft.trim().is_empty();
+                    let can_send = self.channel_chat && !self.chat_draft.trim().is_empty();
                     let clicked = ui
                         .add_enabled_ui(can_send, |ui| {
                             theme::icon_button(ui, icon::SEND, t.chat_send, false, CHAT_SEND_SIZE)
@@ -1488,8 +1494,8 @@ impl App {
         }
     }
 
-    /// Hands the draft to the bridge and shows it as pending. The server's echo
-    /// is what later confirms it.
+    /// Hands the draft to the bridge, correlated with this session and channel,
+    /// and shows it as pending until its `chat_result` (or an echo) arrives.
     fn submit_chat(&mut self) {
         let text = self.chat_draft.trim().to_string();
         if text.is_empty() {
@@ -1499,22 +1505,38 @@ impl App {
             self.chat_notice = Some(self.t.chat_too_long);
             return;
         }
-        let Some(snapshot) = &self.snapshot else {
+        let (Some(snapshot), Some(session_id)) = (&self.snapshot, self.status.session_id.clone())
+        else {
+            self.chat_notice = Some(self.t.chat_offline);
             return;
         };
-        let channel = self.own_channel(snapshot);
+        if !self.channel_chat {
+            self.chat_notice = Some(self.t.chat_offline);
+            return;
+        }
+        let Some(channel) = self.own_channel(snapshot) else {
+            return;
+        };
         let me = snapshot.clients.iter().find(|c| c.is_self);
         let author = me.map_or_else(|| self.nickname.clone(), |c| c.name.clone());
         let from_id = Some(snapshot.own_client_id);
+        self.next_chat_request += 1;
+        let request_id = format!("native-{}", self.next_chat_request);
         self.chat.sent(
-            channel,
+            request_id.clone(),
+            Some(channel),
             from_id,
             author,
             text.clone(),
             Instant::now(),
             clock::local_hour_minute(),
         );
-        self.send(Command::Chat { text });
+        self.send(Command::Chat {
+            session_id,
+            channel: channel.to_string(),
+            text,
+            request_id,
+        });
         self.chat_draft.clear();
         self.chat_notice = None;
     }

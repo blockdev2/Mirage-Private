@@ -61,3 +61,6 @@ identity.json
 *.pcapng
 __pycache__/
 .audit-local/
+
+# Per-checkout agent context; never share local priorities or machine details.
+/AGENTS.local.md

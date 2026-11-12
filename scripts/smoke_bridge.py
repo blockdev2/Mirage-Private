@@ -58,6 +58,21 @@ def send(connection, payload):
     connection.sendall(header + mask + bytes(value ^ mask[index % 4] for index, value in enumerate(data)))
 
 
+def disconnected_status(connection, stream):
+    """Wait for status without treating periodic audio counters as its response."""
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        connection.settimeout(max(.01, deadline - time.monotonic()))
+        opcode, payload = frame(stream)
+        assert opcode == 1, "unexpected frame before disconnected status"
+        event = json.loads(payload)
+        if event["ev"] == "status":
+            assert event["connected"] is False and event.get("error") is None
+            return
+        assert event["ev"] in {"audio", "media", "devices", "log"}, "unexpected bridge event"
+    raise AssertionError("disconnected status deadline exceeded")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -106,17 +121,28 @@ def main():
         try:
             assert status == 101
             frame(stream)  # greeting
+            disconnected_status(connection, stream)
             send(connection, '{"op":"refresh"}')
-            _, payload = frame(stream)
-            event = json.loads(payload)
-            assert event["ev"] == "log" and event["text"] == "not connected"
+            disconnected_status(connection, stream)
             send(connection, "x" * (16 * 1024 + 1))
             # Axum may close the connection without sending a close frame on an oversized input.
-            try:
-                opcode, _ = frame(stream)
-                assert opcode == 8, "oversized command was not rejected"
-            except (AssertionError, ConnectionError):
-                assert stream.read(1) == b"", "connection remained open after oversized input"
+            deadline = time.monotonic() + 3
+            rejected = False
+            while time.monotonic() < deadline:
+                connection.settimeout(max(.01, deadline - time.monotonic()))
+                try:
+                    opcode, payload = frame(stream)
+                except (AssertionError, ConnectionError):
+                    assert stream.read(1) == b"", "connection remained open after oversized input"
+                    rejected = True
+                    break
+                if opcode == 8:
+                    rejected = True
+                    break
+                # Events already in flight may precede the close; an open connection
+                # still fails this bounded check rather than being treated as rejection.
+                assert opcode == 1 and json.loads(payload)["ev"] in {"audio", "status", "log"}
+            assert rejected, "oversized command was not rejected before the deadline"
         finally:
             stream.close()
             connection.close()

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AudioEvent,
+  ChatMessage,
+  ChatResult,
   BridgeEvent,
   Command,
   DeviceLists,
@@ -19,7 +21,10 @@ export type Bridge = {
   devices: DeviceLists;
   logs: LogLine[];
   version: string | null;
-  send: (command: Command) => void;
+  chatMessages: ChatMessage[];
+  chatResult: ChatResult | null;
+  channelChat: boolean;
+  send: (command: Command) => boolean;
 };
 
 /// Owns the WebSocket to `ts6-bridge` and exposes the latest projection of it.
@@ -37,6 +42,9 @@ export function useBridge(): Bridge {
   const [devices, setDevices] = useState<DeviceLists>({ inputs: [], outputs: [] });
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [version, setVersion] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatResult, setChatResult] = useState<ChatResult | null>(null);
+  const [channelChat, setChannelChat] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<number | null>(null);
 
@@ -57,11 +65,18 @@ export function useBridge(): Bridge {
       setSocket("connecting");
 
       ws.onopen = () => {
+        if (disposed) return;
         setSocket("open");
         pushLog({ level: "info", text: "bridge connected", ts: stamp() });
       };
 
       ws.onclose = () => {
+        if (disposed) return;
+        setChannelChat(false);
+        setChatMessages([]);
+        setChatResult(null);
+        setAudio(null);
+        setStatus((previous) => ({ ...previous, connected: false }));
         setSocket("closed");
         if (!disposed) {
           retryRef.current = window.setTimeout(open, 1200);
@@ -69,6 +84,7 @@ export function useBridge(): Bridge {
       };
 
       ws.onmessage = (message) => {
+        if (disposed) return;
         let event: BridgeEvent;
         try {
           event = JSON.parse(message.data as string) as BridgeEvent;
@@ -76,12 +92,20 @@ export function useBridge(): Bridge {
           return;
         }
         switch (event.ev) {
+          case "chat":
+            setChatMessages((previous) => [...previous, { ...event, ts: stamp() }].slice(-200));
+            break;
+          case "chat_result":
+            setChatResult(event);
+            break;
           case "hello":
+            setChannelChat(event.channel_chat === true);
             setVersion(event.version);
             setDevices(event.devices);
             break;
           case "status":
             setStatus({
+              session_id: event.session_id,
               connected: event.connected,
               address: event.address,
               nickname: event.nickname,
@@ -89,6 +113,8 @@ export function useBridge(): Bridge {
             });
             if (!event.connected) {
               setSnapshot(null);
+              setChatMessages([]);
+              setChatResult(null);
             }
             break;
           case "state":
@@ -131,11 +157,13 @@ export function useBridge(): Bridge {
   const send = useCallback((command: Command) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(command));
+      try { ws.send(JSON.stringify(command)); return true; }
+      catch { return false; }
     }
+    return false;
   }, []);
 
-  return { socket, status, snapshot, audio, devices, logs, version, send };
+  return { chatMessages, chatResult, channelChat, socket, status, snapshot, audio, devices, logs, version, send };
 }
 
 function stamp(): string {

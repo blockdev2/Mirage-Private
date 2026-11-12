@@ -11,7 +11,7 @@ python scripts/check_repository.py
 cd client
 ./scripts/build.ps1 build --locked --workspace
 ./scripts/build.ps1 test --locked --workspace
-cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -- --check
+cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -p ts6-desktop -- --check
 cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings
 cd apps/ui
 npm ci --ignore-scripts
@@ -19,11 +19,13 @@ npm run build
 npm audit
 ```
 
-The build helper sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` for bundled libopus under CMake 4. Direct Cargo builds need the same environment setting. Select the five first-party packages explicitly with `cargo fmt -p ...`: `--all` also traverses local path dependencies and would reformat the vendored workspace. Clippy may emit upstream deprecation warnings; inspect the actual result rather than hiding warnings. The current first-party Clippy baseline is recorded in [AUDIT.md](AUDIT.md).
+The build helper sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` for bundled libopus under CMake 4. Direct Cargo builds need the same environment setting. Select the six first-party packages explicitly with `cargo fmt -p ...`: `--all` also traverses local path dependencies and would reformat the vendored workspace. Clippy may emit upstream deprecation warnings; inspect the actual result rather than hiding warnings. The current first-party Clippy baseline is recorded in [AUDIT.md](AUDIT.md).
 
-Rust tests cover codec/meter/resampling/mixing, state/configuration, key parsing/gating, bridge serialization, access policy, and safety regressions. They do not prove real microphone quality, voice latency, server permissions, or cross-platform operation. After building both UI and bridge, run `python scripts/smoke_bridge.py --binary client/target/debug/ts6-bridge.exe` from the repository root. This launches and stops only its own local bridge, checks HTTP and WebSocket boundaries, and sends no server-connect or audio commands.
+Rust tests cover codec/meter/resampling/mixing, state/configuration, key parsing/gating, bridge serialization, access policy, desktop components, and safety regressions. They do not prove real microphone quality, voice latency, server permissions, or cross-platform operation. After building the bridge, run `python scripts/smoke_bridge.py --binary client/target/debug/ts6-bridge.exe` from the repository root. This launches and stops only its own local bridge, checks HTTP and WebSocket boundaries, and sends no server-connect or audio commands.
 
-The UI build runs TypeScript checking; there is no established automated UI interaction suite.
+The browser UI build runs TypeScript checking. There is no established automated end-to-end interaction suite for either frontend.
+
+To run the native desktop application from `client`, use `cargo run --locked -p ts6-desktop`. It embeds the bridge and does not require the browser UI build. Its WebSocket link limits TCP connection attempts and individual handshake reads/writes to two seconds, then restores 40 ms read polling for UI commands. This handles an unresponsive service occupying the bridge port; it is not an overall deadline against a peer that continually sends partial data. To run the browser UI, build `apps/ui/dist` and start the standalone `ts6-bridge` as described below.
 
 For dependency security, install the audited tool version separately and run:
 
@@ -43,8 +45,8 @@ No `.env` loader exists. Set environment variables in the launching shell. Do no
 | --- | --- |
 | `TS6_BRIDGE_PORT` | 8787; valid environment value takes precedence over `--port` |
 | `--port <u16>` | Alternative bridge port; invalid input currently falls back to a default |
-| `TS6_UI_DIR` | Overrides `--ui`; otherwise build-time source-tree `apps/ui/dist` |
-| `--ui <directory>` | Static asset path; set it when relocating the binary |
+| `TS6_UI_DIR` | Standalone bridge asset directory; overrides `--ui`, otherwise uses build-time source-tree `apps/ui/dist` |
+| `--ui <directory>` | Standalone bridge static asset path; set it when relocating the binary |
 | `ALLOW_PRIVATE_TARGETS=1` | Explicit private/loopback destination override in vendored resolver |
 | `RUST_LOG` | Bridge tracing filter; default `info,ts6_bridge=debug` |
 | `APPDATA` | First choice for identity directory, suffixed with `ts6client` |
@@ -52,6 +54,8 @@ No `.env` loader exists. Set environment variables in the launching shell. Do no
 | `HOME` | Final fallback: `.config/ts6client` below HOME; empty HOME falls back to a relative location |
 
 The default private identity is `identity.json` inside that config directory. CLI `--identity <path>` selects a different file. Protect it with a user-only ACL on Windows. Do not share identities across simultaneous clients; the server can reject clones. Keep protected backups. On malformed JSON the client fails instead of replacing the account.
+
+The native desktop embeds a bridge with no static-file fallback. Standalone bridge mode serves static files only from its resolved UI directory; an empty UI path does not fall back to the process working directory.
 
 For UI development, run the bridge and then `npm run dev` under `client/apps/ui`. Vite uses port 5174 and proxies `/ws` to `ws://127.0.0.1:8787`. Use the exact local URL displayed; only HTTP origins on localhost/127.0.0.1 at bridge port or 5174 are allowed. The Vite proxy target is fixed: change it deliberately if testing a different bridge port. Never expose the development server or bridge publicly.
 
@@ -75,6 +79,8 @@ ptt-probe <key> [seconds]
 
 Inspect `crates/ts6-cli/src/main.rs` for diagnostic-only modes including `duplex-probe`. Common connection options are `--name`, `--identity`, `--channel`, `--channel-password`, `--server-password`, `--local-ip`, and `--verbose`. Audio-call also accepts `--input` and `--output`. Passwords supplied on the command line can be visible to local process inspection; use only isolated test credentials. `--verbose` enables sensitive protocol logging. Never attach raw output to a public issue.
 
+On Windows, the manual `audio-send` diagnostic temporarily requests 1 ms timer resolution so its 20 ms synthetic frames are paced accurately; an RAII guard pairs the request with restoration when generation ends. This does not change the real microphone path, which is driven by the audio device. Windows timer requests can increase wakeups and power use, and before Windows 10 version 2004 the setting is system-wide; run only this bounded diagnostic when needed. See Microsoft's [`timeBeginPeriod` documentation](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod).
+
 Bridge session-only diagnostics: `cargo run --locked -p ts6-bridge -- --probe 127.0.0.1:9987 --seconds 20`. `--no-tone`, `--no-commands`, and `--current-thread` vary that diagnostic. These modes connect to a server and may transmit synthetic audio; ordinary offline verification does not run them.
 
 ## Manual server/hardware testing
@@ -92,7 +98,7 @@ The legacy `v21-*.ps1` and `bridge-first.ps1` scripts are research helpers, not 
 - UI missing: build `apps/ui/dist` and confirm `TS6_UI_DIR`/`--ui` points there.
 - WebSocket rejected: use a permitted local HTTP origin and exact bridge Host/port; remove public proxies. Native probes may omit Origin.
 - No microphone or unsupported format: enumerate `devices`; inspect capture errors. A selected device does not prove its stream started successfully.
-- No chat delivery: TS3 text command acceptance is not Matrix chat integration.
+- Channel chat: use the two-peer regression below; command acceptance alone is not proof of receiver delivery. Persistent group-chat integration remains separate.
 - PTT invalid/unavailable: transmission is disabled; select a valid Windows binding. Do not remove the guard.
 
 ## GitHub administration
@@ -116,3 +122,40 @@ It transmits a synthetic tone and uses separate ignored test identities; it does
 not capture the microphone. This is a manual integration test, not offline CI.
 See [late-join investigation](late-join-investigation.md) for the diagnosed sender
 polling defect, measurements, and remaining limitations.
+
+## Build performance
+
+Cargo normally chooses its parallel job count from the CPUs available to its
+process. The native CMake driver receives Cargo's job limit. Avoid a hardcoded
+machine-wide limit: memory pressure and other applications affect the best value.
+For an explicit temporary limit, pass `--jobs N` to the Cargo subcommand, for
+example `./scripts/build.ps1 build --locked --workspace --jobs 8`. This does not
+change global configuration. Use `cargo build --locked --workspace --timings`
+to generate a local timing report; reports can contain local paths and must not
+be committed. Reuse a target directory for incremental builds and avoid running
+multiple Cargo processes against the same directory, which makes them wait on a
+lock. The release profile uses thin LTO and one codegen unit; this favors release
+optimization over build throughput and remains unchanged.
+
+The GitHub workflow runs for pull requests and pushes to main, avoiding duplicate
+push and pull-request runs for the same feature branch. Its SHA-pinned Rust cache
+restores dependency artifacts for both workspaces. Only successful pushes to main
+save this cache; pull requests can restore but cannot populate the shared cache.
+Cargo binaries are excluded. CI uses GitHub-hosted runners and does not consume
+the developer machine's CPU. Cache effectiveness depends on the runner and key;
+measure hosted runs before claiming a speedup.
+
+## Manual chat transport regression
+
+With a trusted loopback TS6 server already running, use
+`python scripts/check_chat_delivery.py --binary client/target/debug/ts6-cli.exe`
+from the root. Set `--port` if the server uses a different voice port. The helper
+connects independent ignored identities, verifies channel and direct reception
+with sender echoes reported separately, and stops only its own diagnostic clients.
+It does not start audio or enable frontend chat. Keep the test directory private.
+
+For the frontend wire contract, with a trusted loopback server already running:
+`python scripts/check_channel_chat.py --binary .audit-local/full-audit-target/debug/ts6-bridge.exe --server-port 19987`.
+This starts two isolated bridges and does not enable audio. Build browser assets
+first. It verifies independent delivery, sender echoes, and validation failures.
+See [channel chat](channel-chat.md) for the current frontend scope.

@@ -49,6 +49,7 @@ export type Snapshot = {
 };
 
 export type StatusEvent = {
+  session_id?: string | null;
   connected: boolean;
   address: string | null;
   nickname: string | null;
@@ -68,8 +69,17 @@ export type AudioEvent = {
 
 export type LogLine = { level: string; text: string; ts: string };
 
+export type ChatMessage = { channel: string; sender: string; text: string; from_self: boolean; ts: string };
+/** `code` is a stable reason; `not_confirmed` sends may still have reached the server. */
+export type ChatResult = {
+  request_id: string;
+  error: string | null;
+  code?: "not_connected" | "stale_session" | "stale_channel" | "invalid" | "not_confirmed" | null;
+};
 export type BridgeEvent =
-  | { ev: "hello"; version: string; devices: DeviceLists }
+  | ({ ev: "chat" } & ChatMessage)
+  | ({ ev: "chat_result" } & ChatResult)
+  | { ev: "hello"; channel_chat?: boolean; version: string; devices: DeviceLists }
   | ({ ev: "status" } & StatusEvent)
   | { ev: "state"; snapshot: Snapshot }
   | ({ ev: "log" } & LogLine)
@@ -78,6 +88,7 @@ export type BridgeEvent =
   | { ev: "media"; avatars: Record<string, string>; server_icon: string | null };
 
 export type Command =
+  | { op: "chat"; session_id: string; channel: string; text: string; request_id: string }
   | { op: "connect"; address: string; nickname?: string; channel?: string; server_password?: string }
   | { op: "disconnect" }
   | { op: "join"; channel: string }

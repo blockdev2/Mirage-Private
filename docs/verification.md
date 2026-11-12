@@ -82,7 +82,7 @@ A synchronized local self-hosted server connection did not receive `notifychatlo
 
 ## V-20 — Browser UI and bridge
 
-React UI plus a local WebSocket bridge provided connection, channels/clients, and audio controls. Early runtime descriptions in the original log are outdated: current source uses a multi-thread Tokio runtime with the session future owned by the blocking thread. Tauri packaging is not implemented.
+The React UI plus a local WebSocket bridge provided connection, channels/clients, and audio controls in this historical browser test. The current source also includes a native eframe/egui frontend. Early runtime descriptions in the original log are outdated: current source uses a multi-thread Tokio runtime with the session future owned by the blocking thread. Installer/release packaging is not implemented.
 
 ## V-21 — Superseded bridge receive diagnosis
 

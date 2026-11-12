@@ -12,9 +12,7 @@ use anyhow::{anyhow, Result};
 use futures::prelude::*;
 use tokio::time::{timeout_at, Instant};
 use tsclientlib::prelude::*;
-use tsclientlib::{
-    Connection, DisconnectOptions, InMessage, MessageHandle, StreamItem, TextMessageTargetMode,
-};
+use tsclientlib::{Connection, DisconnectOptions, InMessage, MessageHandle, StreamItem};
 use tsproto_packets::packets::{Direction, Flags, InAudioBuf, OutCommand, OutPacket, PacketType};
 
 use crate::config::ClientConfig;
@@ -69,48 +67,14 @@ pub enum Item {
     FileFailed { handle: u16, error: String },
 }
 
-/// Who a received text message was addressed to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextScope {
-    /// Everyone in the channel we are in.
-    Channel,
-    /// Everyone on the server.
-    Server,
-    /// Only us.
-    Private,
-}
-
 #[derive(Debug, Clone)]
 pub struct TextMessage {
+    pub target: tsclientlib::MessageTarget,
+    pub channel_id: Option<u64>,
     pub invoker_id: Option<u16>,
     pub invoker_name: Option<String>,
     pub message: String,
     pub from_self: bool,
-    pub scope: TextScope,
-}
-
-/// Builds the surfaced message. `None` for a target mode we cannot place, so
-/// such a message is dropped instead of being shown in the wrong conversation.
-fn text_message(
-    own_id: Option<u16>,
-    invoker_id: u16,
-    invoker_name: &str,
-    message: &str,
-    target: TextMessageTargetMode,
-) -> Option<TextMessage> {
-    let scope = match target {
-        TextMessageTargetMode::Channel => TextScope::Channel,
-        TextMessageTargetMode::Server => TextScope::Server,
-        TextMessageTargetMode::Client => TextScope::Private,
-        TextMessageTargetMode::Unknown => return None,
-    };
-    Some(TextMessage {
-        invoker_id: Some(invoker_id),
-        invoker_name: Some(invoker_name.to_string()),
-        message: message.to_string(),
-        from_self: Some(invoker_id) == own_id,
-        scope,
-    })
 }
 
 /// A wake-up from [`Session::poll_with`].
@@ -125,6 +89,7 @@ pub enum Wake<T = ()> {
 }
 
 pub struct Session {
+    session_id: String,
     con: Connection,
     config: ClientConfig,
     /// Items consumed while waiting for a command result, replayed to the caller.
@@ -157,7 +122,17 @@ impl Session {
         }
 
         let con = builder.connect()?;
+        static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let session_id = format!(
+            "{:x}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let mut session = Self {
+            session_id,
             con,
             config,
             pending: VecDeque::new(),
@@ -218,27 +193,42 @@ impl Session {
         // A channel with active voice traffic can produce items faster than the
         // caller drains them; keep the queue bounded so a busy server cannot grow
         // it without limit.
-        const MAX_PENDING: usize = 4096;
-        if self.pending.len() >= MAX_PENDING {
+        if self.pending.len() >= MAX_PENDING_ITEMS {
             self.pending.pop_front();
         }
         match item {
-            StreamItem::BookEvents(_) => self.pending.push_back(Item::StateChanged),
+            StreamItem::BookEvents(events) => enqueue_book_items(
+                &mut self.pending,
+                book_items(
+                    events,
+                    self.con.get_state().ok().map(|state| state.own_client.0),
+                    current_channel(&self.con),
+                ),
+            ),
             StreamItem::UnknownCommand { name, content } => self
                 .pending
                 .push_back(Item::UnknownCommand { name, content }),
             StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                let own = self.own_id();
-                for first in msg.iter() {
-                    if let Some(text) = text_message(
-                        own,
-                        first.invoker_id.0,
-                        &first.invoker_name,
-                        &first.message,
-                        first.target,
-                    ) {
-                        self.pending.push_back(Item::TextMessage(text));
-                    }
+                if let Some(first) = msg.iter().next() {
+                    let invoker_id = Some(first.invoker_id.0);
+                    self.pending.push_back(Item::TextMessage(TextMessage {
+                        invoker_id,
+                        invoker_name: Some(first.invoker_name.clone()),
+                        message: first.message.clone(),
+                        channel_id: current_channel(&self.con),
+                        target: match first.target {
+                            tsclientlib::TextMessageTargetMode::Channel => {
+                                tsclientlib::MessageTarget::Channel
+                            }
+                            tsclientlib::TextMessageTargetMode::Server => {
+                                tsclientlib::MessageTarget::Server
+                            }
+                            _ => tsclientlib::MessageTarget::Client(
+                                first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                            ),
+                        },
+                        from_self: invoker_id == self.own_id(),
+                    }));
                 }
             }
             StreamItem::IdentityLevelIncreasing(level) => {
@@ -258,6 +248,15 @@ impl Session {
         &self.config
     }
 
+    /// Server destination of this live session, for local frontend resynchronization.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn address(&self) -> &str {
+        &self.config.address
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
         self.con
             .get_state()
@@ -273,25 +272,45 @@ impl Session {
         loop {
             let raw = self.con.events().next().await?;
             match raw {
-                Ok(StreamItem::BookEvents(_)) => return Some(Item::StateChanged),
+                Ok(StreamItem::BookEvents(events)) => {
+                    enqueue_book_items(
+                        &mut self.pending,
+                        book_items(
+                            events,
+                            self.con.get_state().ok().map(|state| state.own_client.0),
+                            current_channel(&self.con),
+                        ),
+                    );
+                    return self.pending.pop_front();
+                }
                 Ok(StreamItem::UnknownCommand { name, content }) => {
                     return Some(Item::UnknownCommand { name, content })
                 }
                 Ok(StreamItem::MessageEvent(InMessage::TextMessage(msg))) => {
-                    let own = self.own_id();
-                    let mut texts = msg.iter().filter_map(|first| {
-                        text_message(
-                            own,
-                            first.invoker_id.0,
-                            &first.invoker_name,
-                            &first.message,
-                            first.target,
-                        )
-                    });
-                    let Some(first) = texts.next() else { continue };
-                    // A packet may carry several messages; queue the rest.
-                    self.pending.extend(texts.map(Item::TextMessage));
-                    return Some(Item::TextMessage(first));
+                    let first = match msg.iter().next() {
+                        Some(m) => m,
+                        None => continue,
+                    };
+                    let invoker_id = Some(first.invoker_id.0);
+                    let from_self = invoker_id == self.own_id();
+                    return Some(Item::TextMessage(TextMessage {
+                        invoker_id,
+                        invoker_name: Some(first.invoker_name.clone()),
+                        message: first.message.clone(),
+                        channel_id: current_channel(&self.con),
+                        target: match first.target {
+                            tsclientlib::TextMessageTargetMode::Channel => {
+                                tsclientlib::MessageTarget::Channel
+                            }
+                            tsclientlib::TextMessageTargetMode::Server => {
+                                tsclientlib::MessageTarget::Server
+                            }
+                            _ => tsclientlib::MessageTarget::Client(
+                                first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                            ),
+                        },
+                        from_self,
+                    }));
                 }
                 // TextMessage is the only message we surface for now; other
                 // in-messages are either handled by the library or not needed yet.
@@ -328,24 +347,42 @@ impl Session {
     /// messages we do not surface yet).
     fn map_raw(&mut self, raw: StreamItem) -> Option<Item> {
         match raw {
-            StreamItem::BookEvents(_) => Some(Item::StateChanged),
+            StreamItem::BookEvents(events) => {
+                enqueue_book_items(
+                    &mut self.pending,
+                    book_items(
+                        events,
+                        self.con.get_state().ok().map(|state| state.own_client.0),
+                        current_channel(&self.con),
+                    ),
+                );
+                self.pending.pop_front()
+            }
             StreamItem::UnknownCommand { name, content } => {
                 Some(Item::UnknownCommand { name, content })
             }
             StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                let own = self.own_id();
-                let mut texts = msg.iter().filter_map(|first| {
-                    text_message(
-                        own,
-                        first.invoker_id.0,
-                        &first.invoker_name,
-                        &first.message,
-                        first.target,
-                    )
-                });
-                let first = texts.next()?;
-                self.pending.extend(texts.map(Item::TextMessage));
-                Some(Item::TextMessage(first))
+                let first = msg.iter().next()?;
+                let invoker_id = Some(first.invoker_id.0);
+                let from_self = invoker_id == self.own_id();
+                Some(Item::TextMessage(TextMessage {
+                    invoker_id,
+                    invoker_name: Some(first.invoker_name.clone()),
+                    message: first.message.clone(),
+                    channel_id: current_channel(&self.con),
+                    target: match first.target {
+                        tsclientlib::TextMessageTargetMode::Channel => {
+                            tsclientlib::MessageTarget::Channel
+                        }
+                        tsclientlib::TextMessageTargetMode::Server => {
+                            tsclientlib::MessageTarget::Server
+                        }
+                        _ => tsclientlib::MessageTarget::Client(
+                            first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                        ),
+                    },
+                    from_self,
+                }))
             }
             StreamItem::MessageEvent(_) => None,
             StreamItem::IdentityLevelIncreasing(level) => Some(Item::IdentityLevel(level)),
@@ -510,22 +547,38 @@ impl Session {
                 StreamItem::MessageResult(got, result) if got == handle => {
                     return result.map_err(|err| anyhow!("server rejected `{name}`: {err}"));
                 }
-                StreamItem::BookEvents(_) => self.pending.push_back(Item::StateChanged),
+                StreamItem::BookEvents(events) => enqueue_book_items(
+                    &mut self.pending,
+                    book_items(
+                        events,
+                        self.con.get_state().ok().map(|state| state.own_client.0),
+                        current_channel(&self.con),
+                    ),
+                ),
                 StreamItem::UnknownCommand { name, content } => self
                     .pending
                     .push_back(Item::UnknownCommand { name, content }),
                 StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                    let own = self.own_id();
-                    for first in msg.iter() {
-                        if let Some(text) = text_message(
-                            own,
-                            first.invoker_id.0,
-                            &first.invoker_name,
-                            &first.message,
-                            first.target,
-                        ) {
-                            self.pending.push_back(Item::TextMessage(text));
-                        }
+                    if let Some(first) = msg.iter().next() {
+                        let invoker_id = Some(first.invoker_id.0);
+                        self.pending.push_back(Item::TextMessage(TextMessage {
+                            invoker_id,
+                            invoker_name: Some(first.invoker_name.clone()),
+                            message: first.message.clone(),
+                            channel_id: current_channel(&self.con),
+                            target: match first.target {
+                                tsclientlib::TextMessageTargetMode::Channel => {
+                                    tsclientlib::MessageTarget::Channel
+                                }
+                                tsclientlib::TextMessageTargetMode::Server => {
+                                    tsclientlib::MessageTarget::Server
+                                }
+                                _ => tsclientlib::MessageTarget::Client(
+                                    first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                                ),
+                            },
+                            from_self: invoker_id == self.own_id(),
+                        }));
                     }
                 }
                 StreamItem::Audio(packet) => self.pending.push_back(Item::Audio(packet)),
@@ -535,6 +588,9 @@ impl Session {
                     }
                 }
             }
+            // The deadline bounds waiting time, not queue length: apply the same
+            // drop-oldest policy as every other replay path.
+            trim_pending(&mut self.pending);
         }
     }
 
@@ -706,5 +762,139 @@ fn bool_flag(value: bool) -> String {
         "1".to_string()
     } else {
         "0".to_string()
+    }
+}
+
+/// Keep replay bounded even when one library event contains a batch of messages.
+fn enqueue_book_items(pending: &mut VecDeque<Item>, items: Vec<Item>) {
+    for item in items {
+        if pending.len() >= MAX_PENDING_ITEMS {
+            pending.pop_front();
+        }
+        pending.push_back(item);
+    }
+}
+
+/// Upper bound on items held for replay. Overflow drops the oldest item so the
+/// network keeps being polled; there is no blocking backpressure.
+const MAX_PENDING_ITEMS: usize = 4096;
+
+fn trim_pending(pending: &mut VecDeque<Item>) {
+    while pending.len() > MAX_PENDING_ITEMS {
+        pending.pop_front();
+    }
+}
+
+fn current_channel(con: &Connection) -> Option<u64> {
+    let state = con.get_state().ok()?;
+    state
+        .clients
+        .get(&state.own_client)
+        .map(|client| client.channel.0)
+}
+
+fn book_items(
+    events: Vec<tsclientlib::events::Event>,
+    own_id: Option<u16>,
+    channel_id: Option<u64>,
+) -> Vec<Item> {
+    let mut items = Vec::new();
+    for event in events {
+        if let tsclientlib::events::Event::Message {
+            invoker,
+            message,
+            target,
+        } = event
+        {
+            let invoker_id = Some(invoker.id.0);
+            items.push(Item::TextMessage(TextMessage {
+                invoker_id,
+                invoker_name: Some(invoker.name),
+                channel_id: if matches!(target, tsclientlib::MessageTarget::Channel) {
+                    channel_id
+                } else {
+                    None
+                },
+                target,
+                message,
+                from_self: invoker_id == own_id,
+            }));
+        }
+    }
+    items.push(Item::StateChanged);
+    items
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn message_batches_keep_the_replay_queue_bounded() {
+        let mut pending = VecDeque::new();
+        pending.extend((0..MAX_PENDING_ITEMS).map(|_| Item::StateChanged));
+        enqueue_book_items(
+            &mut pending,
+            vec![Item::TextMessage(TextMessage {
+                invoker_id: Some(7),
+                invoker_name: None,
+                message: "newest fixture".into(),
+                channel_id: Some(3),
+                target: tsclientlib::MessageTarget::Channel,
+                from_self: false,
+            })],
+        );
+        assert_eq!(pending.len(), MAX_PENDING_ITEMS);
+        assert!(
+            matches!(pending.back(), Some(Item::TextMessage(msg)) if msg.message == "newest fixture")
+        );
+    }
+
+    #[test]
+    fn silent_reply_with_continuing_traffic_stays_bounded() {
+        let mut pending = VecDeque::new();
+        for _ in 0..(MAX_PENDING_ITEMS * 3) {
+            pending.push_back(Item::StateChanged);
+            trim_pending(&mut pending);
+        }
+        pending.push_back(Item::Reconnecting);
+        trim_pending(&mut pending);
+        assert_eq!(pending.len(), MAX_PENDING_ITEMS);
+        assert!(matches!(pending.back(), Some(Item::Reconnecting)));
+    }
+
+    #[test]
+    fn bookkeeping_messages_preserve_text_sender_and_self_echo() {
+        let events = [7, 9]
+            .into_iter()
+            .map(|id| tsclientlib::events::Event::Message {
+                target: tsclientlib::MessageTarget::Channel,
+                invoker: tsclientlib::Invoker {
+                    id: tsclientlib::ClientId(id),
+                    name: "fixture peer".into(),
+                    uid: None,
+                },
+                message: "Unicode: emoji \u{1f600} | slash / backslash \\ newline\n".into(),
+            })
+            .collect();
+        let items = book_items(events, Some(7), Some(3));
+        let messages: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::TextMessage(msg) => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].channel_id, Some(3));
+        assert_eq!(messages[0].invoker_id, Some(7));
+        assert_eq!(messages[0].invoker_name.as_deref(), Some("fixture peer"));
+        assert!(messages[0].from_self);
+        assert!(!messages[1].from_self);
+        assert_eq!(
+            messages[0].message,
+            "Unicode: emoji \u{1f600} | slash / backslash \\ newline\n"
+        );
+        assert!(items.iter().any(|item| matches!(item, Item::StateChanged)));
     }
 }

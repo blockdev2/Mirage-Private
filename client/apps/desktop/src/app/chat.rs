@@ -1,10 +1,11 @@
 //! Room chat history and delivery tracking.
 //!
-//! The server accepts a message with a reply to the command and, as in the
-//! standard TeamSpeak protocol, does not echo it back to the sender. So a
-//! message we send is pending until the bridge reports that the server accepted
-//! it, and failed if the server refuses it or never answers. An echo, if one
-//! ever comes, only confirms the same message and is never shown twice.
+//! Every send carries a request id, and the bridge answers it with one
+//! `chat_result`. Success means the server accepted the command; it is not
+//! proof that anyone received it. Whether the server echoes a message back to
+//! its sender varies (isolated beta13.1 tests observed echoes), so a message we
+//! send is shown locally, marked by its result, and a matching echo only
+//! confirms it instead of appearing twice. Sends are never retried.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -23,6 +24,9 @@ pub const MAX_MESSAGE_BYTES: usize = 1024;
 pub type Clock = (u8, u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// The bridge's correlated chat contract forwards channel messages only; server
+// and private scopes are kept for a future direct-message view.
+#[allow(dead_code)]
 pub enum Scope {
     /// Everyone in a channel.
     Channel,
@@ -30,18 +34,6 @@ pub enum Scope {
     Server,
     /// Only the two of us.
     Private,
-}
-
-impl Scope {
-    /// Parses the bridge's `scope` field.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "channel" => Some(Self::Channel),
-            "server" => Some(Self::Server),
-            "private" => Some(Self::Private),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +47,13 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// Parses the bridge's `chat_failed` code.
-    pub fn parse(code: &str) -> Self {
+    /// Parses the `code` of a failed `chat_result`. A send the server did not
+    /// confirm may still have been delivered, so it is never called rejected.
+    pub fn parse(code: Option<&str>) -> Self {
         match code {
-            "not_connected" => Self::Offline,
-            _ => Self::Rejected,
+            Some("not_connected" | "stale_session") => Self::Offline,
+            Some("not_confirmed") | None => Self::NoAnswer,
+            Some(_) => Self::Rejected,
         }
     }
 }
@@ -68,7 +62,8 @@ impl Failure {
 pub enum Delivery {
     /// Handed to the bridge, waiting for the server's answer.
     Pending(Instant),
-    /// The server accepted it (every message from someone else is delivered).
+    /// The server accepted the command or echoed it (every message from someone
+    /// else is delivered). Acceptance alone does not prove recipient delivery.
     Delivered,
     Failed(Failure),
 }
@@ -88,6 +83,8 @@ pub struct Entry {
     sent: Option<Instant>,
     /// Whether the server's echo of it has been seen.
     echoed: bool,
+    /// Bridge request id of a message we sent.
+    request: Option<String>,
 }
 
 impl Entry {
@@ -157,12 +154,15 @@ impl ChatLog {
             time,
             sent: None,
             echoed: false,
+            request: None,
         });
     }
 
     /// A channel message we have just handed to the bridge.
+    #[allow(clippy::too_many_arguments)]
     pub fn sent(
         &mut self,
+        request: String,
         channel: Option<u64>,
         from_id: Option<u16>,
         author: String,
@@ -181,27 +181,26 @@ impl ChatLog {
             time,
             sent: Some(now),
             echoed: false,
+            request: Some(request),
         });
     }
 
-    /// The server accepted the oldest pending message.
-    pub fn deliver_oldest_pending(&mut self) {
-        if let Some(entry) = self.oldest_pending() {
-            entry.delivery = Delivery::Delivered;
-        }
-    }
-
-    /// The bridge reported that the oldest pending message did not leave.
-    pub fn fail_oldest_pending(&mut self, failure: Failure) {
-        if let Some(entry) = self.oldest_pending() {
-            entry.delivery = Delivery::Failed(failure);
-        }
-    }
-
-    fn oldest_pending(&mut self) -> Option<&mut Entry> {
-        self.entries
+    /// Applies the bridge's answer to the send with this request id. Unknown
+    /// ids (an answer for a cleared conversation) are ignored. An echo that
+    /// already confirmed the message wins over a later "not confirmed".
+    pub fn resolve(&mut self, request: &str, failure: Option<Failure>) {
+        let Some(entry) = self
+            .entries
             .iter_mut()
-            .find(|entry| matches!(entry.delivery, Delivery::Pending(_)))
+            .find(|entry| entry.request.as_deref() == Some(request))
+        else {
+            return;
+        };
+        entry.delivery = match failure {
+            None => Delivery::Delivered,
+            Some(Failure::NoAnswer) if entry.echoed => Delivery::Delivered,
+            Some(failure) => Delivery::Failed(failure),
+        };
     }
 
     /// Marks messages whose answer is overdue. Returns whether anything changed.
@@ -271,33 +270,54 @@ mod tests {
 
     fn log_with_pending(text: &str, at: Instant) -> ChatLog {
         let mut log = ChatLog::default();
-        log.sent(Some(1), Some(7), "eu".into(), text.into(), at, TIME);
+        log.sent(
+            "r1".into(),
+            Some(1),
+            Some(7),
+            "eu".into(),
+            text.into(),
+            at,
+            TIME,
+        );
         log
     }
 
     #[test]
     fn the_server_accepting_the_command_delivers_the_message() {
         let mut log = log_with_pending("oi", Instant::now());
-        log.deliver_oldest_pending();
+        log.resolve("r1", None);
         assert_eq!(log.visible(Some(1), 10)[0].delivery, Delivery::Delivered);
     }
 
     #[test]
-    fn deliveries_follow_the_order_of_sending() {
+    fn results_are_matched_by_request_id_not_order() {
         let now = Instant::now();
         let mut log = log_with_pending("primeira", now);
-        log.sent(Some(1), Some(7), "eu".into(), "segunda".into(), now, TIME);
-        log.deliver_oldest_pending();
+        log.sent(
+            "r2".into(),
+            Some(1),
+            Some(7),
+            "eu".into(),
+            "segunda".into(),
+            now,
+            TIME,
+        );
+        log.resolve("r2", None);
         let shown = log.visible(Some(1), 10);
-        assert_eq!(shown[0].delivery, Delivery::Delivered);
-        assert!(matches!(shown[1].delivery, Delivery::Pending(_)));
+        assert!(matches!(shown[0].delivery, Delivery::Pending(_)));
+        assert_eq!(shown[1].delivery, Delivery::Delivered);
+        log.resolve("unknown", Some(Failure::Rejected));
+        assert!(matches!(
+            log.visible(Some(1), 10)[0].delivery,
+            Delivery::Pending(_)
+        ));
     }
 
     #[test]
     fn an_echo_of_a_sent_message_is_never_shown_twice() {
         let now = Instant::now();
         let mut log = log_with_pending("oi", now);
-        log.deliver_oldest_pending();
+        log.resolve("r1", None);
         log.receive(incoming("eu", 7, "oi", true), now, TIME);
         assert_eq!(log.visible(Some(1), 10).len(), 1);
     }
@@ -316,7 +336,7 @@ mod tests {
     fn a_late_echo_is_a_new_message_from_another_session_of_ours() {
         let start = Instant::now();
         let mut log = log_with_pending("oi", start);
-        log.deliver_oldest_pending();
+        log.resolve("r1", None);
         log.receive(
             incoming("eu", 7, "oi", true),
             start + ECHO_WINDOW + Duration::from_secs(1),
@@ -338,14 +358,39 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_send_fails_the_oldest_pending_message() {
+    fn a_refused_send_fails_only_its_own_message() {
         let now = Instant::now();
         let mut log = log_with_pending("primeira", now);
-        log.sent(Some(1), Some(7), "eu".into(), "segunda".into(), now, TIME);
-        log.fail_oldest_pending(Failure::Rejected);
+        log.sent(
+            "r2".into(),
+            Some(1),
+            Some(7),
+            "eu".into(),
+            "segunda".into(),
+            now,
+            TIME,
+        );
+        log.resolve("r1", Some(Failure::Rejected));
         let shown = log.visible(Some(1), 10);
         assert_eq!(shown[0].delivery, Delivery::Failed(Failure::Rejected));
         assert!(matches!(shown[1].delivery, Delivery::Pending(_)));
+    }
+
+    #[test]
+    fn an_unconfirmed_send_that_was_echoed_stays_delivered() {
+        let now = Instant::now();
+        let mut log = log_with_pending("oi", now);
+        log.receive(incoming("eu", 7, "oi", true), now, TIME);
+        log.resolve("r1", Some(Failure::parse(Some("not_confirmed"))));
+        assert_eq!(log.visible(Some(1), 10)[0].delivery, Delivery::Delivered);
+    }
+
+    #[test]
+    fn result_codes_never_call_an_unconfirmed_send_rejected() {
+        assert_eq!(Failure::parse(Some("not_confirmed")), Failure::NoAnswer);
+        assert_eq!(Failure::parse(None), Failure::NoAnswer);
+        assert_eq!(Failure::parse(Some("stale_session")), Failure::Offline);
+        assert_eq!(Failure::parse(Some("invalid")), Failure::Rejected);
     }
 
     #[test]
@@ -392,7 +437,7 @@ mod tests {
         let mut log = log_with_pending("oi", start);
         let left = log.next_expiry(start + Duration::from_secs(2)).unwrap();
         assert_eq!(left, SEND_TIMEOUT - Duration::from_secs(2));
-        log.deliver_oldest_pending();
+        log.resolve("r1", None);
         assert!(log.next_expiry(start).is_none());
     }
 
