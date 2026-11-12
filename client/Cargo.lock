@@ -5796,6 +5796,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "ts6-bridge",
  "tungstenite 0.30.0",
 ]
 

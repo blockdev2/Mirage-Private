@@ -6,7 +6,8 @@
 //! `127.0.0.1`.
 
 use std::io::ErrorKind;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use tungstenite::{Message, WebSocket};
 
 use crate::protocol::{BridgeEvent, Command};
 
-const BRIDGE_ADDR: &str = "127.0.0.1:8787";
+const BRIDGE_PORT: u16 = 8787;
 const BRIDGE_URL: &str = "ws://127.0.0.1:8787/ws";
 const RETRY_DELAY: Duration = Duration::from_millis(1200);
 /// Upper bound on how long a command can wait before it is written.
@@ -41,6 +42,7 @@ pub struct Bridge {
 impl Bridge {
     /// Starts the link thread. `ctx` is used only to wake the UI when data arrives.
     pub fn spawn(ctx: egui::Context) -> Self {
+        start_embedded_bridge();
         let (event_tx, event_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         thread::Builder::new()
@@ -51,6 +53,26 @@ impl Bridge {
             incoming: event_rx,
             outgoing: command_tx,
         }
+    }
+}
+
+/// Hosts the bridge inside this process unless one is already listening, so the
+/// client runs from a single executable. An external `ts6-bridge` still works:
+/// the link simply connects to it instead.
+fn start_embedded_bridge() {
+    let address = SocketAddr::from(([127, 0, 0, 1], BRIDGE_PORT));
+    if TcpStream::connect_timeout(&address, Duration::from_millis(150)).is_ok() {
+        return;
+    }
+    let started = thread::Builder::new()
+        .name("ts6-bridge-host".into())
+        .spawn(|| {
+            if let Err(error) = ts6_bridge::serve_blocking(BRIDGE_PORT, PathBuf::new()) {
+                eprintln!("embedded ts6-bridge stopped: {error:#}");
+            }
+        });
+    if let Err(error) = started {
+        eprintln!("could not start the embedded ts6-bridge: {error}");
     }
 }
 
@@ -84,7 +106,8 @@ fn notify(events: &Sender<Incoming>, ctx: &egui::Context, state: SocketState) ->
 }
 
 fn connect() -> Result<WebSocket<TcpStream>, String> {
-    let stream = TcpStream::connect(BRIDGE_ADDR).map_err(|error| error.to_string())?;
+    let address = SocketAddr::from(([127, 0, 0, 1], BRIDGE_PORT));
+    let stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
     stream.set_nodelay(true).ok();
     let (socket, _response) =
         tungstenite::client(BRIDGE_URL, stream).map_err(|error| error.to_string())?;
