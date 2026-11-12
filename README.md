@@ -76,3 +76,7 @@ See [development and configuration](docs/DEVELOPMENT.md), [architecture](docs/ar
 Read [CONTRIBUTING.md](CONTRIBUTING.md), [community expectations](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md). Coding agents start with [AGENTS.md](AGENTS.md); Claude-specific orientation is in [CLAUDE.md](CLAUDE.md). Technical claims require source or executed verification evidence.
 
 The [MIT license](LICENSE) already applies to first-party code. Retain all [third-party notices](client/THIRD_PARTY.md) and follow [vendoring rules](client/UPSTREAM.md). No releases or release-support commitments are established by this repository.
+
+## Protocol research and team integration
+
+Read the [version-pinned TeamSpeak Go reference review](docs/protocol-reference-teamspeak-go.md) for backend research leads, evidence limits and proposed experiments. Follow the [PR-only team integration workflow](docs/TEAM_INTEGRATION.md) when contributing or consolidating branches.

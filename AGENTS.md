@@ -4,6 +4,15 @@
 
 Read this file, [README.md](README.md), [architecture](docs/architecture.md), and the affected source and dependency manifests before editing. Use [development](docs/DEVELOPMENT.md) for commands. [CLAUDE.md](CLAUDE.md) adds orientation, not a second policy.
 
+If an ignored `AGENTS.local.md` exists in this checkout, read it for local task
+context. Never publish its workstation-specific content. The shared
+[team integration policy](docs/TEAM_INTEGRATION.md) requires topic branches and
+pull requests; never update main directly or consolidate competing team work
+without the owner's explicit integration authorization.
+
+Protocol research references and their evidence limits are recorded in
+[the TeamSpeak Go review](docs/protocol-reference-teamspeak-go.md).
+
 ## Required workflow
 
 **Inspect → Understand → Plan → Implement → Test → Review → Document → Report.**
