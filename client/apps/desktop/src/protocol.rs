@@ -135,6 +135,24 @@ pub enum BridgeEvent {
         client: u16,
         info: Option<ConnectionInfo>,
     },
+    /// A text message from the server, or the echo of one we sent. `scope` is
+    /// `channel`, `server` or `private`.
+    Chat {
+        scope: String,
+        #[serde(default)]
+        from_id: Option<u16>,
+        #[serde(default)]
+        from_name: Option<String>,
+        text: String,
+        from_self: bool,
+    },
+    /// The server accepted the oldest message we sent.
+    ChatSent,
+    /// A message we sent did not leave. `code` is `not_connected`, `empty`,
+    /// `too_long` or `rejected`.
+    ChatFailed {
+        code: String,
+    },
     /// Local paths of cached avatars (by client uid) and of the server icon.
     Media {
         #[serde(default)]
@@ -194,6 +212,10 @@ pub enum Command {
     SetAvatar {
         path: Option<String>,
     },
+    /// Send a message to the channel we are in.
+    Chat {
+        text: String,
+    },
 }
 
 #[cfg(test)]
@@ -228,6 +250,30 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(audio, BridgeEvent::Audio(a) if a.speaking == vec![3]));
+    }
+
+    #[test]
+    fn parses_chat_events() {
+        let chat: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"chat","scope":"channel","from_id":4,"from_name":"ana","text":"oi","from_self":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            chat,
+            BridgeEvent::Chat {
+                from_id: Some(4),
+                ..
+            }
+        ));
+        let failed: BridgeEvent =
+            serde_json::from_str(r#"{"ev":"chat_failed","code":"rejected"}"#).unwrap();
+        assert!(matches!(failed, BridgeEvent::ChatFailed { code } if code == "rejected"));
+    }
+
+    #[test]
+    fn serializes_the_chat_command() {
+        let json = serde_json::to_string(&Command::Chat { text: "oi".into() }).unwrap();
+        assert_eq!(json, r#"{"op":"chat","text":"oi"}"#);
     }
 
     #[test]

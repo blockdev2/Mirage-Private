@@ -189,7 +189,7 @@ pub enum TransmitMode {
     Continuous,
 }
 
-/// Microphone noise suppression (RNNoise in the voice engine).
+/// Microphone noise suppression in the voice engine (RNNoise or DPDFNet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoiseLevel {
@@ -199,6 +199,8 @@ pub enum NoiseLevel {
     Standard,
     /// Also mutes everything that is not speech: keyboard, clicks, breathing.
     Strong,
+    /// DPDFNet, a neural speech enhancer that keeps the voice and removes the rest.
+    Advanced,
 }
 
 impl NoiseLevel {
@@ -208,6 +210,7 @@ impl NoiseLevel {
             Self::Off => 0,
             Self::Standard => 1,
             Self::Strong => 2,
+            Self::Advanced => 3,
         }
     }
 }

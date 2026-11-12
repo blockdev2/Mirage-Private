@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, mpsc};
 use tower_http::services::ServeDir;
 
 use protocol::{Command, Event};
-use ts6_core::{Item, Session, Wake};
+use ts6_core::{ChatTarget, Item, Session, TextScope, Wake};
 
 #[derive(Clone)]
 struct App {
@@ -165,6 +165,9 @@ pub async fn serve(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// TeamSpeak refuses text messages longer than this many bytes.
+const MAX_CHAT_BYTES: usize = 1024;
 
 fn browser_allowed(headers: &HeaderMap, port: u16) -> bool {
     let hosts = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
@@ -416,14 +419,21 @@ async fn session_task(
                             }
                             engine.on_audio(packet)
                         }
-                        Item::TextMessage(message) => log(
+                        // Message text is user content: it goes to the UI only, never
+                        // to the log or the event console.
+                        Item::TextMessage(message) => protocol::publish(
                             &events,
-                            "text",
-                            format!(
-                                "{}: {}",
-                                message.invoker_name.as_deref().unwrap_or("?"),
-                                message.message
-                            ),
+                            &Event::Chat {
+                                scope: match message.scope {
+                                    TextScope::Channel => "channel",
+                                    TextScope::Server => "server",
+                                    TextScope::Private => "private",
+                                },
+                                from_id: message.invoker_id,
+                                from_name: message.invoker_name.as_deref(),
+                                text: &message.message,
+                                from_self: message.from_self,
+                            },
                         ),
                         Item::UnknownCommand { name, content } => {
                             tracing::debug!(%name, %content, "unknown server command");
@@ -692,6 +702,29 @@ async fn apply_command(
             None => log(events, "warn", "not connected"),
         },
 
+        Command::Chat { text } => {
+            let text = text.trim();
+            let failure = match session.as_mut() {
+                None => Some("not_connected"),
+                Some(_) if text.is_empty() => Some("empty"),
+                Some(_) if text.len() > MAX_CHAT_BYTES => Some("too_long"),
+                Some(active) => match active.send_chat(ChatTarget::Channel, text).await {
+                    Ok(()) => {
+                        protocol::publish(events, &Event::ChatSent);
+                        None
+                    }
+                    Err(error) => {
+                        // The error names the server's refusal, never the text.
+                        tracing::debug!(%error, "chat message not sent");
+                        Some("rejected")
+                    }
+                },
+            };
+            if let Some(code) = failure {
+                protocol::publish(events, &Event::ChatFailed { code });
+            }
+        }
+
         Command::SetAvatar { path } => match (session.as_mut(), path) {
             (Some(active), Some(path)) => {
                 if let Err(error) = media.start_upload(active, std::path::Path::new(&path)) {
@@ -735,6 +768,14 @@ async fn apply_command(
 /// desktop client to host the bridge in-process, so one executable is enough.
 /// The session is not `Send`, so this must own the thread it runs on.
 pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
+    // Quiet by default: debug output can include server command content. Set
+    // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

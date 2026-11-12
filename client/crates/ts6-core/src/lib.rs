@@ -16,7 +16,7 @@ pub mod session;
 pub mod state;
 
 pub use config::ClientConfig;
-pub use session::{ChatTarget, Item, Session, TextMessage, Wake};
+pub use session::{ChatTarget, Item, Session, TextMessage, TextScope, Wake};
 pub use state::{ChannelInfo, ClientInfo, ConnectionInfo, ServerInfo, Snapshot};
 
 // Packet-level types needed to build/send voice and TS6 stream commands, so that

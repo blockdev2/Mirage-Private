@@ -31,3 +31,52 @@ opt-level = 3
 
 [profile.dev.package.realfft]
 opt-level = 3
+
+# DPDFNet runs a neural network every 10 ms, so tract and the numeric crates it
+# leans on need optimization even in debug builds; without it the model runs
+# slower than real time. Listed one by one on purpose: a wildcard would also
+# rebuild the native libopus (audiopus_sys), which needs CMake. Test
+# `dpdfnet::tests::it_keeps_up_with_real_time` fails if one is missing.
+[profile.dev.package]
+tract-core = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-data = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-linalg = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-hir = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-nnef = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-onnx = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-onnx-opl = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-extra = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+ndarray = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+smallvec = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+num-traits = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+num-complex = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+num-integer = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+num-rational = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+half = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+bit-set = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+bit-vec = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+anymap3 = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+downcast-rs = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+dyn-clone = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+prost = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+ts6-audio = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+matrixmultiply = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+rawpointer = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+itertools = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+either = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+hashbrown = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+foldhash = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+strength_reduce = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+transpose = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+primal-check = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+libm = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+byteorder = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+string-interner = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+rayon = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+rayon-core = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+crossbeam-deque = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+crossbeam-epoch = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+crossbeam-utils = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+tract-transformers = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+zerocopy = { opt-level = 3, debug-assertions = false, overflow-checks = false }
+metrics = { opt-level = 3, debug-assertions = false, overflow-checks = false }

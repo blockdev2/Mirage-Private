@@ -12,7 +12,9 @@ use anyhow::{anyhow, Result};
 use futures::prelude::*;
 use tokio::time::{timeout_at, Instant};
 use tsclientlib::prelude::*;
-use tsclientlib::{Connection, DisconnectOptions, InMessage, MessageHandle, StreamItem};
+use tsclientlib::{
+    Connection, DisconnectOptions, InMessage, MessageHandle, StreamItem, TextMessageTargetMode,
+};
 use tsproto_packets::packets::{Direction, Flags, InAudioBuf, OutCommand, OutPacket, PacketType};
 
 use crate::config::ClientConfig;
@@ -67,12 +69,48 @@ pub enum Item {
     FileFailed { handle: u16, error: String },
 }
 
+/// Who a received text message was addressed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextScope {
+    /// Everyone in the channel we are in.
+    Channel,
+    /// Everyone on the server.
+    Server,
+    /// Only us.
+    Private,
+}
+
 #[derive(Debug, Clone)]
 pub struct TextMessage {
     pub invoker_id: Option<u16>,
     pub invoker_name: Option<String>,
     pub message: String,
     pub from_self: bool,
+    pub scope: TextScope,
+}
+
+/// Builds the surfaced message. `None` for a target mode we cannot place, so
+/// such a message is dropped instead of being shown in the wrong conversation.
+fn text_message(
+    own_id: Option<u16>,
+    invoker_id: u16,
+    invoker_name: &str,
+    message: &str,
+    target: TextMessageTargetMode,
+) -> Option<TextMessage> {
+    let scope = match target {
+        TextMessageTargetMode::Channel => TextScope::Channel,
+        TextMessageTargetMode::Server => TextScope::Server,
+        TextMessageTargetMode::Client => TextScope::Private,
+        TextMessageTargetMode::Unknown => return None,
+    };
+    Some(TextMessage {
+        invoker_id: Some(invoker_id),
+        invoker_name: Some(invoker_name.to_string()),
+        message: message.to_string(),
+        from_self: Some(invoker_id) == own_id,
+        scope,
+    })
 }
 
 /// A wake-up from [`Session::poll_with`].
@@ -190,14 +228,17 @@ impl Session {
                 .pending
                 .push_back(Item::UnknownCommand { name, content }),
             StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                if let Some(first) = msg.iter().next() {
-                    let invoker_id = Some(first.invoker_id.0);
-                    self.pending.push_back(Item::TextMessage(TextMessage {
-                        invoker_id,
-                        invoker_name: Some(first.invoker_name.clone()),
-                        message: first.message.clone(),
-                        from_self: invoker_id == self.own_id(),
-                    }));
+                let own = self.own_id();
+                for first in msg.iter() {
+                    if let Some(text) = text_message(
+                        own,
+                        first.invoker_id.0,
+                        &first.invoker_name,
+                        &first.message,
+                        first.target,
+                    ) {
+                        self.pending.push_back(Item::TextMessage(text));
+                    }
                 }
             }
             StreamItem::IdentityLevelIncreasing(level) => {
@@ -237,18 +278,20 @@ impl Session {
                     return Some(Item::UnknownCommand { name, content })
                 }
                 Ok(StreamItem::MessageEvent(InMessage::TextMessage(msg))) => {
-                    let first = match msg.iter().next() {
-                        Some(m) => m,
-                        None => continue,
-                    };
-                    let invoker_id = Some(first.invoker_id.0);
-                    let from_self = invoker_id == self.own_id();
-                    return Some(Item::TextMessage(TextMessage {
-                        invoker_id,
-                        invoker_name: Some(first.invoker_name.clone()),
-                        message: first.message.clone(),
-                        from_self,
-                    }));
+                    let own = self.own_id();
+                    let mut texts = msg.iter().filter_map(|first| {
+                        text_message(
+                            own,
+                            first.invoker_id.0,
+                            &first.invoker_name,
+                            &first.message,
+                            first.target,
+                        )
+                    });
+                    let Some(first) = texts.next() else { continue };
+                    // A packet may carry several messages; queue the rest.
+                    self.pending.extend(texts.map(Item::TextMessage));
+                    return Some(Item::TextMessage(first));
                 }
                 // TextMessage is the only message we surface for now; other
                 // in-messages are either handled by the library or not needed yet.
@@ -290,15 +333,19 @@ impl Session {
                 Some(Item::UnknownCommand { name, content })
             }
             StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                let first = msg.iter().next()?;
-                let invoker_id = Some(first.invoker_id.0);
-                let from_self = invoker_id == self.own_id();
-                Some(Item::TextMessage(TextMessage {
-                    invoker_id,
-                    invoker_name: Some(first.invoker_name.clone()),
-                    message: first.message.clone(),
-                    from_self,
-                }))
+                let own = self.own_id();
+                let mut texts = msg.iter().filter_map(|first| {
+                    text_message(
+                        own,
+                        first.invoker_id.0,
+                        &first.invoker_name,
+                        &first.message,
+                        first.target,
+                    )
+                });
+                let first = texts.next()?;
+                self.pending.extend(texts.map(Item::TextMessage));
+                Some(Item::TextMessage(first))
             }
             StreamItem::MessageEvent(_) => None,
             StreamItem::IdentityLevelIncreasing(level) => Some(Item::IdentityLevel(level)),
@@ -468,14 +515,17 @@ impl Session {
                     .pending
                     .push_back(Item::UnknownCommand { name, content }),
                 StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                    if let Some(first) = msg.iter().next() {
-                        let invoker_id = Some(first.invoker_id.0);
-                        self.pending.push_back(Item::TextMessage(TextMessage {
-                            invoker_id,
-                            invoker_name: Some(first.invoker_name.clone()),
-                            message: first.message.clone(),
-                            from_self: invoker_id == self.own_id(),
-                        }));
+                    let own = self.own_id();
+                    for first in msg.iter() {
+                        if let Some(text) = text_message(
+                            own,
+                            first.invoker_id.0,
+                            &first.invoker_name,
+                            &first.message,
+                            first.target,
+                        ) {
+                            self.pending.push_back(Item::TextMessage(text));
+                        }
                     }
                 }
                 StreamItem::Audio(packet) => self.pending.push_back(Item::Audio(packet)),

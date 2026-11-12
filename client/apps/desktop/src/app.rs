@@ -11,21 +11,22 @@ use egui::{
 };
 
 use crate::bridge::{Bridge, Incoming, SocketState};
+use crate::clock;
 use crate::protocol::{
-    AudioEvent, BridgeEvent, ChannelInfo, ClientInfo, Command, Device, DeviceLists, LogLine,
-    Snapshot, StatusEvent,
+    AudioEvent, BridgeEvent, ChannelInfo, ClientInfo, Command, DeviceLists, LogLine, Snapshot,
+    StatusEvent,
 };
-use crate::store::{
-    AddressProblem, NoiseLevel, Store, TransmitMode, NICKNAME_MAX_CHARS, VAD_MAX_DB, VAD_MIN_DB,
-};
+use crate::store::{AddressProblem, Store, TransmitMode};
 use crate::strings::{Strings, PT};
 use crate::theme::{self, icon, Tone};
 
+mod chat;
 mod home;
 mod peer;
+mod settings;
+use chat::{ChatLog, Delivery, Entry, Failure, Incoming as ChatIncoming, Scope, MAX_MESSAGE_BYTES};
 use home::{Dialog, PendingConnect, Section};
 
-const LOGO: &[u8] = include_bytes!("../assets/logo.webp");
 const MAX_LOG_LINES: usize = 300;
 const MAX_TREE_DEPTH: usize = 16;
 /// How long the connect button stays disabled while waiting for the bridge.
@@ -45,7 +46,32 @@ const MAX_COLUMNS: usize = 4;
 /// Height kept below the grid: controls, divider, chat heading, composer and a
 /// usable slice of history.
 const BELOW_GRID_MIN_HEIGHT: f32 = 300.0;
+/// Space above and below the call controls.
+const CONTROLS_GAP_ABOVE: f32 = 20.0;
+const CONTROLS_GAP_BELOW: f32 = 8.0;
+/// Space between the divider and the chat heading.
+const SPLIT_GAP_BELOW: f32 = 2.0;
+/// Height of the grab area between the call controls and the chat.
+const SPLIT_HANDLE_HEIGHT: f32 = 24.0;
+/// Smallest chat the divider can shrink to: heading, composer and a sliver of
+/// history.
+const CHAT_MIN_HEIGHT: f32 = 96.0;
+/// Distance one arrow-key press moves the divider.
+const SPLIT_KEY_STEP: f32 = 24.0;
 const CONTROL_SIZE: f32 = 44.0;
+/// Avatar beside a chat message, and the send button in the composer.
+const CHAT_AVATAR: f32 = 40.0;
+/// Space between a message's avatar and its text.
+const CHAT_GAP: f32 = 12.0;
+/// Message text: softer than the sender's name, brighter than the time.
+const CHAT_TEXT: Color32 = Color32::from_rgb(205, 210, 219);
+const CHAT_SEND_SIZE: f32 = 28.0;
+/// Most messages drawn at once; older ones stay in the log.
+const CHAT_RENDER_LIMIT: usize = 200;
+/// Width of the logo in the sidebar, in points. The bitmap is resampled to
+/// exactly this many device pixels, so it is never stretched or blurred.
+const LOGO_WIDTH: f32 = 208.0;
+const LOGO: &[u8] = include_bytes!("../assets/logo.webp");
 const CONTROL_GAP: f32 = 8.0;
 /// "Convidar" (120) + gap (8) + options button (40).
 const HEADER_ACTIONS_WIDTH: f32 = 168.0;
@@ -62,7 +88,6 @@ pub struct App {
     audio: Option<AudioEvent>,
     logs: Vec<LogLine>,
     session_started: Option<Instant>,
-    logo_crop: Option<(Rect, f32)>,
 
     // Local profiles, favorites and history (see `store`).
     store: Store,
@@ -100,12 +125,18 @@ pub struct App {
 
     // Session view state.
     grid_view: bool,
+    /// Height the user gave the chat by dragging the divider. `None` keeps the
+    /// automatic layout, where the chat takes whatever the participants leave.
+    chat_height: Option<f32>,
     mic_muted: bool,
     output_muted: bool,
     chat_draft: String,
-    /// Whether the connection offers text chat. The bridge has none yet, so this
-    /// stays false and the chat area shows its "unavailable" state.
-    chat_available: bool,
+    /// Room chat history and the delivery state of what we sent.
+    chat: ChatLog,
+    /// The logo resampled for the current display scale.
+    logo: Option<LogoTexture>,
+    /// Why the last attempt to send was refused before it left, if it was.
+    chat_notice: Option<&'static str>,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
     connect_started: Option<Instant>,
@@ -115,6 +146,8 @@ pub struct App {
 
     // Settings window and diagnostics.
     show_settings: bool,
+    /// Name and photo editing inside the settings window.
+    profile_edit: settings::ProfileEdit,
     show_logs: bool,
 }
 
@@ -161,17 +194,20 @@ impl App {
             audio: None,
             logs: Vec::new(),
             session_started: None,
-            logo_crop: logo_crop(),
             address,
             password: String::new(),
             grid_view: true,
+            chat_height: None,
             mic_muted: false,
             output_muted: false,
             chat_draft: String::new(),
-            chat_available: false,
+            chat: ChatLog::default(),
+            logo: None,
+            chat_notice: None,
             connect_started: None,
             open_channels: HashMap::new(),
             show_settings: false,
+            profile_edit: settings::ProfileEdit::default(),
             show_logs: false,
         }
     }
@@ -214,6 +250,8 @@ impl App {
                     self.media_avatars.clear();
                     self.server_icon = None;
                     self.media_textures.clear();
+                    self.chat.clear();
+                    self.chat_notice = None;
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
                         self.pending = None;
@@ -263,6 +301,36 @@ impl App {
                         view.push(info);
                     }
                 }
+            }
+            BridgeEvent::Chat {
+                scope,
+                from_id,
+                from_name,
+                text,
+                from_self,
+            } => {
+                if let Some(scope) = Scope::parse(&scope) {
+                    // A channel message belongs to the channel we are in now.
+                    let channel = match scope {
+                        Scope::Channel => self.snapshot.as_ref().and_then(|s| self.own_channel(s)),
+                        _ => None,
+                    };
+                    let author = from_name.unwrap_or_else(|| "?".to_string());
+                    let message = ChatIncoming {
+                        scope,
+                        channel,
+                        from_id,
+                        author,
+                        text,
+                        mine: from_self,
+                    };
+                    self.chat
+                        .receive(message, Instant::now(), clock::local_hour_minute());
+                }
+            }
+            BridgeEvent::ChatSent => self.chat.deliver_oldest_pending(),
+            BridgeEvent::ChatFailed { code } => {
+                self.chat.fail_oldest_pending(Failure::parse(&code));
             }
             BridgeEvent::Media {
                 avatars,
@@ -383,6 +451,12 @@ impl eframe::App for App {
             // Re-enables the button when the wait times out.
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+        let now = Instant::now();
+        self.chat.expire(now);
+        if let Some(wait) = self.chat.next_expiry(now) {
+            // Marks a message as unconfirmed the moment its wait runs out.
+            ctx.request_repaint_after(wait + Duration::from_millis(50));
+        }
         if self.show_settings {
             // Keeps the microphone level meter live.
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -492,17 +566,21 @@ impl App {
         });
     }
 
-    fn logo(&self, ui: &mut egui::Ui) {
-        match self.logo_crop {
-            Some((uv, aspect)) => {
-                let width = 160.0;
-                let image = egui::Image::from_bytes("bytes://mirage-logo.webp", LOGO)
-                    .uv(uv)
-                    .fit_to_exact_size(vec2(width, width / aspect));
-                ui.add(image);
+    fn logo(&mut self, ui: &mut egui::Ui) {
+        let ppp = ui.ctx().pixels_per_point();
+        let key = (ppp * 100.0).round() as u32;
+        if self.logo.as_ref().is_none_or(|logo| logo.key != key) {
+            self.logo = LogoTexture::build(ui.ctx(), LOGO_WIDTH * ppp, key);
+        }
+        match &self.logo {
+            Some(logo) => {
+                ui.add(
+                    egui::Image::new(&logo.texture)
+                        .fit_to_exact_size(vec2(LOGO_WIDTH, LOGO_WIDTH / logo.aspect)),
+                );
             }
             None => {
-                ui.label(RichText::new(self.t.logo_fallback).size(24.0).strong());
+                ui.label(RichText::new(self.t.brand_name).size(24.0).strong());
             }
         }
     }
@@ -818,7 +896,7 @@ impl App {
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::icon_button(ui, icon::GEAR, t.settings_title, false, 32.0).clicked() {
+                if theme::glyph_button(ui, icon::GEAR, t.settings_title, 32.0, 45.0).clicked() {
                     self.show_settings = true;
                 }
             });
@@ -862,6 +940,13 @@ impl App {
             pos2(left, ui.cursor().top()),
             vec2(width, ui.available_height()),
         );
+        let below_fixed = CONTROLS_GAP_ABOVE
+            + CONTROL_SIZE
+            + CONTROLS_GAP_BELOW
+            + SPLIT_HANDLE_HEIGHT
+            + SPLIT_GAP_BELOW
+            + 4.0 * ui.spacing().item_spacing.y;
+        let mut split_room = 0.0;
         ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -876,17 +961,25 @@ impl App {
                 }
             });
             ui.add_space(12.0);
-            self.participants_area(ui, &participants);
+            // Everything from here down to the window edge: participants,
+            // controls, divider and chat. The divider splits it.
+            split_room = ui.available_height();
+            let slot = self.chat_height.map(|height| {
+                let height =
+                    height.clamp(CHAT_MIN_HEIGHT, max_chat_height(split_room, below_fixed));
+                (split_room - below_fixed - height).max(CARD_MIN_HEIGHT)
+            });
+            self.participants_area(ui, &participants, slot);
         });
 
-        ui.add_space(20.0);
+        ui.add_space(CONTROLS_GAP_ABOVE);
         self.call_controls(ui);
-        ui.add_space(16.0);
-        ui.separator();
-        ui.add_space(6.0);
+        ui.add_space(CONTROLS_GAP_BELOW);
+        self.split_handle(ui, split_room, below_fixed);
+        ui.add_space(SPLIT_GAP_BELOW);
 
         let channel_name = channel.map_or(t.no_channel, |c| c.name.as_str());
-        self.chat_section(ui, channel_name);
+        self.chat_section(ui, channel_id, channel_name);
     }
 
     /// Icon, title and description on the left; invite and options on the right.
@@ -899,8 +992,7 @@ impl App {
             .filter(|topic| {
                 let topic = topic.trim();
                 !topic.is_empty() && !topic.ends_with("has no topic")
-            })
-            .unwrap_or_else(|| t.default_topic.to_string());
+            });
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -920,7 +1012,7 @@ impl App {
                 });
                 ui.add(
                     egui::Label::new(
-                        RichText::new(t.channel_subtitle(&topic)).color(theme::TEXT_2),
+                        RichText::new(t.channel_subtitle(topic.as_deref())).color(theme::TEXT_2),
                     )
                     .truncate(),
                 );
@@ -946,8 +1038,43 @@ impl App {
     /// Grid of 16:9 cards (each row centered), or the list. The grid takes the
     /// height left after the controls and a usable chat are reserved, so the
     /// cards shrink on short windows instead of pushing the chat away.
-    fn participants_area(&mut self, ui: &mut egui::Ui, participants: &[&ClientInfo]) {
-        let room = (ui.available_height() - BELOW_GRID_MIN_HEIGHT).max(CARD_MIN_HEIGHT);
+    ///
+    /// With a `slot` (the user has set the chat height) the area fills exactly
+    /// that height and centers its content, so the divider moves in both
+    /// directions. Without one, the grid keeps its natural size.
+    fn participants_area(
+        &mut self,
+        ui: &mut egui::Ui,
+        participants: &[&ClientInfo],
+        slot: Option<f32>,
+    ) {
+        let room = slot
+            .unwrap_or_else(|| ui.available_height() - BELOW_GRID_MIN_HEIGHT)
+            .max(CARD_MIN_HEIGHT);
+        let Some(slot) = slot else {
+            self.participants_content(ui, participants, room, None);
+            return;
+        };
+        let width = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(width, slot), Layout::top_down(Align::Min), |ui| {
+            ui.set_min_height(slot);
+            self.participants_content(ui, participants, room, Some(slot));
+        });
+    }
+
+    fn participants_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        participants: &[&ClientInfo],
+        room: f32,
+        slot: Option<f32>,
+    ) {
+        // Space that centers `visible` inside the slot, when there is one.
+        let center = |ui: &mut egui::Ui, visible: f32| {
+            if let Some(slot) = slot {
+                ui.add_space(((slot - visible) / 2.0 - ui.spacing().item_spacing.y).max(0.0));
+            }
+        };
         if self.grid_view {
             let available = ui.available_width();
             let count = participants.len().max(1);
@@ -962,9 +1089,11 @@ impl App {
             let card_height = (column_width * 9.0 / 16.0).min(row_room);
             let card_width = (card_height * 16.0 / 9.0).min(column_width);
             let content = rows as f32 * card_height + (rows - 1) as f32 * CARD_GAP;
+            let visible = content.min(room.max(card_height));
+            center(ui, visible);
             egui::ScrollArea::vertical()
                 .id_salt("participants")
-                .max_height(content.min(room.max(card_height)))
+                .max_height(visible)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing = vec2(CARD_GAP, CARD_GAP);
@@ -981,9 +1110,11 @@ impl App {
                     }
                 });
         } else {
+            let visible = (participants.len() as f32 * 53.0).min(room.max(106.0));
+            center(ui, visible);
             egui::ScrollArea::vertical()
                 .id_salt("participants")
-                .max_height((participants.len() as f32 * 53.0).min(room.max(106.0)))
+                .max_height(visible)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -1133,6 +1264,93 @@ impl App {
         );
     }
 
+    /// The divider between participants and chat. Drag the grip up to give the
+    /// chat more room, down to give the participants more. Arrow keys do the
+    /// same when it has focus, and a double click restores the automatic layout.
+    fn split_handle(&mut self, ui: &mut egui::Ui, room: f32, below_fixed: f32) {
+        let t = self.t;
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), SPLIT_HANDLE_HEIGHT),
+            Sense::click_and_drag(),
+        );
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Splitter, true, t.resize_chat));
+
+        // Height of the chat as drawn now, so the first drag starts from it
+        // instead of jumping.
+        let drawn = (ui.max_rect().bottom() - rect.bottom() - SPLIT_GAP_BELOW).max(CHAT_MIN_HEIGHT);
+        let current = self.chat_height.unwrap_or(drawn);
+        let mut target = None;
+        if response.dragged() {
+            target = Some(current - response.drag_delta().y);
+        }
+        if response.has_focus() {
+            let step = ui.input(|input| {
+                f32::from(input.key_pressed(egui::Key::ArrowUp))
+                    - f32::from(input.key_pressed(egui::Key::ArrowDown))
+            });
+            if step != 0.0 {
+                target = Some(current + step * SPLIT_KEY_STEP);
+            }
+        }
+        if let Some(height) = target {
+            let max = max_chat_height(room, below_fixed);
+            self.chat_height = Some(height.clamp(CHAT_MIN_HEIGHT, max));
+            ui.ctx().request_repaint();
+        }
+        if response.double_clicked() {
+            self.chat_height = None;
+            ui.ctx().request_repaint();
+        }
+
+        let active = response.dragged();
+        let hot = active || response.hovered() || response.has_focus();
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        let painter = ui.painter();
+        let y = rect.center().y;
+        let (line, line_width) = if active {
+            (theme::ACCENT_HOVER, 2.0)
+        } else if hot {
+            (theme::TEXT_3, 1.0)
+        } else {
+            (theme::BORDER_SOFT, 1.0)
+        };
+        painter.line_segment(
+            [pos2(rect.left(), y), pos2(rect.right(), y)],
+            Stroke::new(line_width, line),
+        );
+
+        // The grip: a small pill with two rows of three dots.
+        let pill = Rect::from_center_size(rect.center(), vec2(44.0, 18.0));
+        let (fill, border) = if active {
+            (theme::SURFACE_HOVER, theme::ACCENT_HOVER)
+        } else if hot {
+            (theme::SURFACE_HOVER, theme::TEXT_3)
+        } else {
+            (theme::SURFACE_RAISED, theme::BORDER)
+        };
+        painter.rect_filled(pill, CornerRadius::same(9), fill);
+        let border_width = if response.has_focus() { 1.5 } else { 1.0 };
+        painter.rect_stroke(
+            pill,
+            CornerRadius::same(9),
+            Stroke::new(border_width, border),
+            egui::StrokeKind::Inside,
+        );
+        let dot = if hot { theme::TEXT } else { theme::TEXT_3 };
+        for row in [-3.0, 3.0] {
+            for column in [-6.0, 0.0, 6.0] {
+                painter.circle_filled(pill.center() + vec2(column, row), 1.4, dot);
+            }
+        }
+
+        if !active {
+            response.on_hover_text(t.resize_chat_hint);
+        }
+    }
+
     /// Microphone, headphones, screen share, options and hang up, centered
     /// under the participants.
     fn call_controls(&mut self, ui: &mut egui::Ui) {
@@ -1192,103 +1410,229 @@ impl App {
     }
 
     /// Chat under the participants: heading, scrolling history, composer.
-    /// While the connection has no text chat the history shows an
-    /// "unavailable" state and the composer is visibly disabled; once it does,
-    /// an empty room shows the "no messages yet" state instead.
-    fn chat_section(&mut self, ui: &mut egui::Ui, channel_name: &str) {
+    /// What we send shows as pending until the server echoes it back.
+    fn chat_section(&mut self, ui: &mut egui::Ui, channel_id: Option<u64>, channel_name: &str) {
         let t = self.t;
-        let available = self.chat_available;
         ui.label(RichText::new(t.chat_heading).font(FontId::new(16.0, theme::semibold())));
         ui.add_space(8.0);
-
-        let placeholder = if available {
-            t.chat_placeholder_in(channel_name)
-        } else {
-            t.chat_unavailable_title.to_string()
-        };
-        let (title, body) = if available {
-            (t.chat_empty_title, t.chat_empty_body)
-        } else {
-            (t.chat_unavailable_title, t.chat_unavailable_body)
-        };
-        let icon_ink = if available {
-            theme::TEXT_2
-        } else {
-            theme::TEXT_3
-        };
 
         // Added first so the composer is anchored to the bottom and the
         // history takes whatever height remains above it.
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            let frame = if available {
-                theme::input_frame()
-            } else {
-                theme::input_frame_disabled()
-            };
-            frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                // A fixed-height row with centered items, so the placeholder
-                // text and both icons share one baseline.
-                ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), 32.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.label(
-                            RichText::new(icon::PLUS)
-                                .font(FontId::new(16.0, theme::icons()))
-                                .color(icon_ink),
-                        );
-                        ui.add_enabled_ui(available, |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.chat_draft)
-                                    .hint_text(placeholder)
-                                    .frame(Frame::NONE)
-                                    .desired_width(ui.available_width() - 48.0)
-                                    .align(Align2::LEFT_CENTER)
-                                    .min_size(vec2(0.0, 32.0)),
-                            )
-                        })
-                        .inner
-                        .on_disabled_hover_text(t.chat_disabled);
-                        ui.label(
-                            RichText::new(icon::SEND)
-                                .font(FontId::new(16.0, theme::icons()))
-                                .color(icon_ink),
-                        );
-                    },
-                );
-            });
+            self.chat_composer(ui, channel_name);
+            if let Some(notice) = self.chat_notice {
+                ui.add_space(4.0);
+                ui.label(RichText::new(notice).small().color(theme::DANGER));
+            }
             ui.add_space(8.0);
 
             // The history is drawn only when there is room for it. Otherwise it
             // is skipped, so its text can never run under the composer.
-            let room = ui.available_height();
-            if room >= HISTORY_MIN_HEIGHT {
-                egui::ScrollArea::vertical()
-                    .id_salt("chat_history")
-                    .stick_to_bottom(true)
-                    .min_scrolled_height(0.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            // With little room, show the title alone.
-                            let compact = room < 56.0;
-                            ui.add_space(if compact {
-                                0.0
-                            } else {
-                                (ui.available_height() * 0.3).max(8.0)
-                            });
-                            ui.label(
-                                RichText::new(title)
-                                    .font(FontId::new(14.0, theme::medium()))
-                                    .color(theme::TEXT_2),
-                            );
-                            if !compact {
-                                ui.label(RichText::new(body).small().color(theme::TEXT_3));
-                            }
-                        });
-                    });
+            if ui.available_height() >= HISTORY_MIN_HEIGHT {
+                self.chat_history(ui, channel_id);
             }
+        });
+    }
+
+    fn chat_composer(&mut self, ui: &mut egui::Ui, channel_name: &str) {
+        let t = self.t;
+        let placeholder = t.chat_placeholder_in(channel_name);
+        let mut submit = false;
+        theme::input_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // A fixed-height row with centered items, so the placeholder text
+            // and the send button share one baseline.
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 32.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    let button = CHAT_SEND_SIZE + ui.spacing().item_spacing.x;
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_draft)
+                            .hint_text(placeholder)
+                            .frame(Frame::NONE)
+                            .char_limit(MAX_MESSAGE_BYTES)
+                            .desired_width(ui.available_width() - button)
+                            .align(Align2::LEFT_CENTER)
+                            .min_size(vec2(0.0, 32.0)),
+                    );
+                    if edit.changed() {
+                        self.chat_notice = None;
+                    }
+                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let can_send = !self.chat_draft.trim().is_empty();
+                    let clicked = ui
+                        .add_enabled_ui(can_send, |ui| {
+                            theme::icon_button(ui, icon::SEND, t.chat_send, false, CHAT_SEND_SIZE)
+                        })
+                        .inner
+                        .clicked();
+                    if (enter || clicked) && can_send {
+                        submit = true;
+                    }
+                    if enter {
+                        // Enter leaves the field; keep typing without a click.
+                        edit.request_focus();
+                    }
+                },
+            );
+        });
+        if submit {
+            self.submit_chat();
+        }
+    }
+
+    /// Hands the draft to the bridge and shows it as pending. The server's echo
+    /// is what later confirms it.
+    fn submit_chat(&mut self) {
+        let text = self.chat_draft.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if text.len() > MAX_MESSAGE_BYTES {
+            self.chat_notice = Some(self.t.chat_too_long);
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let channel = self.own_channel(snapshot);
+        let me = snapshot.clients.iter().find(|c| c.is_self);
+        let author = me.map_or_else(|| self.nickname.clone(), |c| c.name.clone());
+        let from_id = Some(snapshot.own_client_id);
+        self.chat.sent(
+            channel,
+            from_id,
+            author,
+            text.clone(),
+            Instant::now(),
+            clock::local_hour_minute(),
+        );
+        self.send(Command::Chat { text });
+        self.chat_draft.clear();
+        self.chat_notice = None;
+    }
+
+    fn chat_history(&mut self, ui: &mut egui::Ui, channel_id: Option<u64>) {
+        let t = self.t;
+        let entries = self.chat.visible(channel_id, CHAT_RENDER_LIMIT);
+        let snapshot = self.snapshot.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("chat_history")
+            .stick_to_bottom(true)
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if entries.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        // With little room, show the title alone.
+                        let compact = ui.available_height() < 56.0;
+                        ui.add_space(if compact {
+                            0.0
+                        } else {
+                            (ui.available_height() * 0.3).max(8.0)
+                        });
+                        ui.label(
+                            RichText::new(t.chat_empty_title)
+                                .font(FontId::new(14.0, theme::medium()))
+                                .color(theme::TEXT_2),
+                        );
+                        if !compact {
+                            ui.label(
+                                RichText::new(t.chat_empty_body)
+                                    .small()
+                                    .color(theme::TEXT_3),
+                            );
+                        }
+                    });
+                    return;
+                }
+                ui.spacing_mut().item_spacing.y = 3.0;
+                for (index, entry) in entries.iter().enumerate() {
+                    let grouped = index > 0 && entry.groups_with(&entries[index - 1]);
+                    if !grouped && index > 0 {
+                        ui.add_space(12.0);
+                    }
+                    self.chat_row(ui, entry, grouped, snapshot.as_ref());
+                }
+            });
+    }
+
+    /// One message in the style of a chat client: a round avatar, the sender's
+    /// nickname with the time, then the text. Messages of one sender within the
+    /// same minute share a single header. Delivery state shows only when it is
+    /// not "delivered".
+    fn chat_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        entry: &Entry,
+        grouped: bool,
+        snapshot: Option<&Snapshot>,
+    ) {
+        let t = self.t;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = CHAT_GAP;
+            if grouped {
+                ui.add_space(CHAT_AVATAR);
+            } else {
+                let client = entry
+                    .from_id
+                    .and_then(|id| snapshot?.clients.iter().find(|c| c.id == id))
+                    .cloned();
+                let photo = client.and_then(|c| self.client_photo(ui.ctx(), &c));
+                theme::avatar_or_photo(ui, &entry.author, CHAT_AVATAR, photo.as_ref());
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if !grouped {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(
+                            RichText::new(&entry.author).font(FontId::new(15.0, theme::semibold())),
+                        );
+                        let (hour, minute) = entry.time;
+                        ui.label(
+                            RichText::new(format!("{hour:02}:{minute:02}"))
+                                .font(FontId::new(12.0, theme::medium()))
+                                .color(theme::TEXT_3),
+                        );
+                        let tag = match entry.scope {
+                            Scope::Channel => None,
+                            Scope::Server => Some(t.chat_scope_server),
+                            Scope::Private => Some(t.chat_scope_private),
+                        };
+                        if let Some(tag) = tag {
+                            ui.label(RichText::new(tag).small().color(theme::TEXT_3));
+                        }
+                    });
+                }
+                let ink = match entry.delivery {
+                    Delivery::Delivered => CHAT_TEXT,
+                    _ => theme::TEXT_3,
+                };
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&entry.text)
+                            .font(FontId::proportional(14.5))
+                            .color(ink),
+                    )
+                    .wrap(),
+                );
+                match entry.delivery {
+                    Delivery::Delivered => {}
+                    Delivery::Pending(_) => {
+                        ui.label(RichText::new(t.chat_sending).small().color(theme::TEXT_3));
+                    }
+                    Delivery::Failed(failure) => {
+                        let reason = match failure {
+                            Failure::NoAnswer => t.chat_no_answer,
+                            Failure::Rejected => t.chat_rejected,
+                            Failure::Offline => t.chat_offline,
+                        };
+                        ui.label(RichText::new(reason).small().color(theme::DANGER));
+                    }
+                }
+            });
         });
     }
 }
@@ -1375,145 +1719,6 @@ impl App {
 // Settings and diagnostics -----------------------------------------------------
 
 impl App {
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let t = self.t;
-        let mut open = self.show_settings;
-        egui::Window::new(t.settings_title)
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(400.0)
-            .show(ctx, |ui| {
-                theme::section_label(ui, t.audio_section);
-                ui.add_space(6.0);
-                let level = self.audio.as_ref().and_then(|a| a.input_level_db);
-                let transmitting = self.audio.as_ref().is_some_and(|a| a.transmitting);
-                let mut threshold_changed = false;
-                let audio = &mut self.store.data.audio;
-                ui.checkbox(&mut audio.enabled, t.enable_audio);
-                ui.add_enabled_ui(audio.enabled, |ui| {
-                    device_combo(
-                        ui,
-                        t,
-                        t.input,
-                        "input",
-                        &mut audio.input_device,
-                        &self.devices.inputs,
-                    );
-                    device_combo(
-                        ui,
-                        t,
-                        t.output,
-                        "output",
-                        &mut audio.output_device,
-                        &self.devices.outputs,
-                    );
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(t.transmit_mode).small().color(theme::TEXT_2));
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut audio.mode,
-                            TransmitMode::VoiceActivation,
-                            t.mode_voice,
-                        );
-                        ui.radio_value(&mut audio.mode, TransmitMode::PushToTalk, t.mode_ptt);
-                        ui.radio_value(
-                            &mut audio.mode,
-                            TransmitMode::Continuous,
-                            t.mode_continuous,
-                        );
-                    });
-                    ui.add_space(6.0);
-                    match audio.mode {
-                        TransmitMode::VoiceActivation => {
-                            ui.label(RichText::new(t.vad_threshold).small().color(theme::TEXT_2));
-                            level_meter(ui, level, audio.threshold_db, transmitting);
-                            let slider = ui.add(
-                                egui::Slider::new(&mut audio.threshold_db, VAD_MIN_DB..=VAD_MAX_DB)
-                                    .suffix(" dB")
-                                    .step_by(1.0),
-                            );
-                            threshold_changed = slider.changed();
-                            ui.label(RichText::new(t.vad_hint).small().color(theme::TEXT_3));
-                        }
-                        TransmitMode::PushToTalk => {
-                            field(
-                                ui,
-                                t.ptt_key,
-                                egui::TextEdit::singleline(&mut audio.ptt).hint_text("F13"),
-                            );
-                            ui.label(RichText::new(t.ptt_hint).small().color(theme::TEXT_3));
-                        }
-                        TransmitMode::Continuous => {}
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(t.noise_title).small().color(theme::TEXT_2));
-                    let before = audio.noise;
-                    ui.horizontal(|ui| {
-                        ui.radio_value(&mut audio.noise, NoiseLevel::Off, t.noise_off);
-                        ui.radio_value(&mut audio.noise, NoiseLevel::Standard, t.noise_standard);
-                        ui.radio_value(&mut audio.noise, NoiseLevel::Strong, t.noise_strong);
-                    });
-                    let hint = match audio.noise {
-                        NoiseLevel::Off => t.noise_hint_off,
-                        NoiseLevel::Standard => t.noise_hint_standard,
-                        NoiseLevel::Strong => t.noise_hint_strong,
-                    };
-                    ui.label(RichText::new(hint).small().color(theme::TEXT_3));
-                    // Applies live as well: no microphone restart.
-                    threshold_changed |= audio.noise != before;
-                });
-                // The slider applies live: the engine changes the threshold
-                // without restarting the microphone.
-                if threshold_changed {
-                    self.apply_audio();
-                }
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if theme::button(ui, t.apply_audio, None, Tone::Primary, 150.0).clicked() {
-                        self.apply_audio();
-                    }
-                    if theme::button(ui, t.refresh_devices, None, Tone::Secondary, 170.0).clicked()
-                    {
-                        self.send(Command::Devices);
-                    }
-                });
-
-                ui.add_space(16.0);
-                theme::section_label(ui, t.profile_section);
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    theme::input_frame().show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.nickname)
-                                .frame(Frame::NONE)
-                                .char_limit(NICKNAME_MAX_CHARS)
-                                .desired_width(200.0),
-                        );
-                    });
-                    let can_save = self.in_session() && !self.nickname.trim().is_empty();
-                    ui.add_enabled_ui(can_save, |ui| {
-                        if theme::button(ui, t.save_nickname, None, Tone::Secondary, 140.0)
-                            .clicked()
-                        {
-                            self.send(Command::Nick {
-                                name: self.nickname.trim().to_string(),
-                            });
-                        }
-                    });
-                });
-
-                ui.add_space(16.0);
-                ui.checkbox(&mut self.show_logs, t.show_diagnostics);
-                let version = match &self.bridge_version {
-                    Some(v) => t.bridge_version(v),
-                    None => t.bridge_offline_short.to_string(),
-                };
-                ui.label(RichText::new(version).small().color(theme::TEXT_3));
-            });
-        self.show_settings = open;
-    }
-
     fn log_panel(&mut self, ui: &mut egui::Ui) {
         let t = self.t;
         ui.horizontal(|ui| {
@@ -1554,70 +1759,6 @@ impl App {
 
 // Helpers ----------------------------------------------------------------------
 
-/// Labelled text field with the app's input frame.
-fn field(ui: &mut egui::Ui, label: &str, edit: egui::TextEdit<'_>) {
-    ui.label(RichText::new(label).small().color(theme::TEXT_2));
-    ui.add_space(2.0);
-    theme::input_frame().show(ui, |ui| {
-        ui.add(edit.frame(Frame::NONE).desired_width(f32::INFINITY));
-    });
-}
-
-/// Horizontal microphone level bar with the voice activation threshold marked.
-/// Green while transmitting, so the user sees exactly when voice goes out.
-fn level_meter(ui: &mut egui::Ui, level_db: Option<f32>, threshold_db: f32, transmitting: bool) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(3), theme::SURFACE_RAISED);
-    let span = VAD_MAX_DB - VAD_MIN_DB + 10.0;
-    let to_x = |db: f32| rect.left() + rect.width() * ((db - VAD_MIN_DB) / span).clamp(0.0, 1.0);
-    if let Some(level) = level_db {
-        let fill = Rect::from_min_max(rect.left_top(), pos2(to_x(level), rect.bottom()));
-        let color = if transmitting {
-            theme::SUCCESS
-        } else {
-            theme::TEXT_3
-        };
-        painter.rect_filled(fill, CornerRadius::same(3), color);
-    }
-    let x = to_x(threshold_db);
-    painter.line_segment(
-        [pos2(x, rect.top() - 3.0), pos2(x, rect.bottom() + 3.0)],
-        Stroke::new(2.0, theme::TEXT),
-    );
-}
-
-fn device_combo(
-    ui: &mut egui::Ui,
-    t: &Strings,
-    label: &str,
-    salt: &str,
-    selected: &mut String,
-    devices: &[Device],
-) {
-    ui.horizontal(|ui| {
-        // Same label width for every device row, so both selectors line up.
-        ui.add_sized(
-            vec2(84.0, 24.0),
-            egui::Label::new(RichText::new(label).color(theme::TEXT_2)),
-        );
-        let shown = if selected.is_empty() {
-            t.system_default.to_string()
-        } else {
-            selected.clone()
-        };
-        egui::ComboBox::from_id_salt(salt)
-            .selected_text(shown)
-            .width(260.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(selected, String::new(), t.system_default);
-                for device in devices {
-                    ui.selectable_value(selected, device.name.clone(), &device.name);
-                }
-            });
-    });
-}
-
 /// Initial avatar, or the photo when there is one, centered at center.
 fn draw_avatar(
     ui: &egui::Ui,
@@ -1647,44 +1788,85 @@ fn non_empty(value: &str) -> Option<String> {
     }
 }
 
-/// Finds the visible part of the logo so it can be cropped and scaled
-/// without the transparent margins around it.
-fn logo_crop() -> Option<(Rect, f32)> {
-    let image = image::load_from_memory_with_format(LOGO, image::ImageFormat::WebP)
-        .ok()?
-        .to_rgba8();
-    let (width, height) = image.dimensions();
-    let (mut x0, mut y0, mut x1, mut y1) = (width, height, 0u32, 0u32);
+/// Tallest the chat may be while the participants keep a minimum-size card.
+fn max_chat_height(room: f32, below_fixed: f32) -> f32 {
+    (room - below_fixed - CARD_MIN_HEIGHT).max(CHAT_MIN_HEIGHT)
+}
+
+/// The logo cropped to its visible part and resampled to the exact pixel size
+/// it is shown at, for one display scale.
+struct LogoTexture {
+    key: u32,
+    texture: egui::TextureHandle,
+    /// Width over height of the cropped logo.
+    aspect: f32,
+}
+
+impl LogoTexture {
+    fn build(ctx: &egui::Context, pixel_width: f32, key: u32) -> Option<Self> {
+        let source = image::load_from_memory_with_format(LOGO, image::ImageFormat::WebP)
+            .ok()?
+            .to_rgba8();
+        let (x0, y0, x1, y1) = visible_bounds(&source)?;
+        let (width, height) = (x1 - x0, y1 - y0);
+        let aspect = width as f32 / height as f32;
+        let target_w = pixel_width.round().max(1.0) as u32;
+        let target_h = (pixel_width / aspect).round().max(1.0) as u32;
+
+        // Resample only the coverage channel with a high-quality filter and give
+        // every pixel the same ink color. Filtering the color of transparent
+        // pixels as well would leave dark halos around the edges.
+        let coverage = image::GrayImage::from_fn(width, height, |x, y| {
+            image::Luma([source.get_pixel(x0 + x, y0 + y)[3]])
+        });
+        let coverage = image::imageops::resize(
+            &coverage,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let ink = theme::TEXT;
+        let pixels = coverage
+            .pixels()
+            .map(|p| Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), p[0]))
+            .collect();
+        let image = egui::ColorImage::new([target_w as usize, target_h as usize], pixels);
+        let texture = ctx.load_texture("mirage-logo", image, egui::TextureOptions::LINEAR);
+        Some(Self {
+            key,
+            texture,
+            aspect,
+        })
+    }
+}
+
+/// Bounds `(x0, y0, x1, y1)` of the visible pixels, end exclusive, so the
+/// transparent margins around the logo can be cut off.
+fn visible_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
     for (x, y, pixel) in image.enumerate_pixels() {
         if pixel[3] > 16 {
             x0 = x0.min(x);
             y0 = y0.min(y);
-            x1 = x1.max(x);
-            y1 = y1.max(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
         }
     }
-    if x1 < x0 || y1 < y0 {
-        return None;
-    }
-    let uv = Rect::from_min_max(
-        pos2(x0 as f32 / width as f32, y0 as f32 / height as f32),
-        pos2(
-            (x1 + 1) as f32 / width as f32,
-            (y1 + 1) as f32 / height as f32,
-        ),
-    );
-    let aspect = (x1 + 1 - x0) as f32 / (y1 + 1 - y0) as f32;
-    Some((uv, aspect))
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::logo_crop;
+    use super::{visible_bounds, LOGO};
 
     #[test]
     fn logo_has_a_visible_crop() {
-        let (uv, aspect) = logo_crop().expect("logo should contain visible pixels");
-        assert!(uv.width() > 0.0 && uv.height() > 0.0);
+        let image = image::load_from_memory_with_format(LOGO, image::ImageFormat::WebP)
+            .expect("logo decodes")
+            .to_rgba8();
+        let (x0, y0, x1, y1) = visible_bounds(&image).expect("logo should contain visible pixels");
+        assert!(x1 > x0 && y1 > y0);
+        let aspect = (x1 - x0) as f32 / (y1 - y0) as f32;
         assert!(
             aspect > 1.0,
             "the wordmark is wider than tall, got {aspect}"

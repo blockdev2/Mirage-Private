@@ -19,6 +19,10 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 BINARY_ASSET_DIR = "client/apps/desktop/assets/"
 BINARY_ASSET_SUFFIXES = {".ttf", ".otf", ".woff2", ".webp", ".png", ".ico"}
+# Reviewed third-party neural network models, embedded in the audio crate. Each
+# comes with its license file next to it (see client/THIRD_PARTY.md).
+BINARY_MODEL_DIR = "client/crates/ts6-audio/models/"
+BINARY_MODEL_SUFFIXES = {".onnx"}
 
 
 def is_link(path: Path) -> bool:
@@ -102,6 +106,8 @@ def check() -> int:
         # Reviewed binary UI assets (fonts, images) are not text and cannot be
         # UTF-8 scanned; only this asset directory and these extensions are exempt.
         if name.startswith(BINARY_ASSET_DIR) and path.suffix.lower() in BINARY_ASSET_SUFFIXES:
+            continue
+        if name.startswith(BINARY_MODEL_DIR) and path.suffix.lower() in BINARY_MODEL_SUFFIXES:
             continue
         if path.stat().st_size > 2_000_000:
             errors.append((name, "large publishable file requires manual review"))

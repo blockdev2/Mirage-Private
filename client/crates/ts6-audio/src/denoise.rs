@@ -11,8 +11,15 @@
 //! * `Strong`: as `Standard`, and frames the network does not consider speech
 //!   are muted, which also removes keyboard clicks, mouse clicks and breathing
 //!   between words.
+//! * `Advanced`: DPDFNet, a larger neural enhancer (see [`crate::dpdfnet`]). Its
+//!   model takes a moment to load, so it loads in the background and `Standard`
+//!   is used until it is ready.
+
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use nnnoiseless::DenoiseState;
+
+use crate::dpdfnet::DpdfNet;
 
 /// RNNoise frame: 10 ms at 48 kHz.
 const RNN_FRAME: usize = DenoiseState::FRAME_SIZE;
@@ -30,6 +37,7 @@ pub enum NoiseSuppression {
     #[default]
     Standard,
     Strong,
+    Advanced,
 }
 
 impl NoiseSuppression {
@@ -37,6 +45,7 @@ impl NoiseSuppression {
         match level {
             0 => Self::Off,
             2 => Self::Strong,
+            3 => Self::Advanced,
             _ => Self::Standard,
         }
     }
@@ -46,8 +55,18 @@ impl NoiseSuppression {
             Self::Off => 0,
             Self::Standard => 1,
             Self::Strong => 2,
+            Self::Advanced => 3,
         }
     }
+}
+
+/// Where the DPDFNet model is: not asked for yet, being loaded, or usable.
+enum Advanced {
+    Unused,
+    Loading(Receiver<Result<Box<DpdfNet>, String>>),
+    Ready(Box<DpdfNet>),
+    /// Loading failed; `Advanced` falls back to `Standard` for good.
+    Failed,
 }
 
 pub struct Denoiser {
@@ -55,6 +74,10 @@ pub struct Denoiser {
     input: Vec<f32>,
     output: Vec<f32>,
     hold: u32,
+    advanced: Advanced,
+    /// Whether the previous frame went through DPDFNet, so it starts fresh
+    /// each time it is switched back on.
+    advanced_active: bool,
 }
 
 impl Default for Denoiser {
@@ -70,6 +93,43 @@ impl Denoiser {
             input: vec![0.0; RNN_FRAME],
             output: vec![0.0; RNN_FRAME],
             hold: 0,
+            advanced: Advanced::Unused,
+            advanced_active: false,
+        }
+    }
+
+    /// The DPDFNet model if it is ready, starting to load it the first time.
+    fn advanced_model(&mut self) -> Option<&mut DpdfNet> {
+        if matches!(self.advanced, Advanced::Unused) {
+            let (sender, receiver) = mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("dpdfnet-load".into())
+                .spawn(move || {
+                    let loaded = DpdfNet::new().map(Box::new).map_err(|e| format!("{e:#}"));
+                    let _ = sender.send(loaded);
+                });
+            self.advanced = match spawned {
+                Ok(_) => Advanced::Loading(receiver),
+                Err(error) => {
+                    tracing::warn!(%error, "could not start loading DPDFNet");
+                    Advanced::Failed
+                }
+            };
+        }
+        if let Advanced::Loading(receiver) = &self.advanced {
+            match receiver.try_recv() {
+                Ok(Ok(model)) => self.advanced = Advanced::Ready(model),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "DPDFNet could not be loaded; using standard noise suppression");
+                    self.advanced = Advanced::Failed;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.advanced = Advanced::Failed,
+            }
+        }
+        match &mut self.advanced {
+            Advanced::Ready(model) => Some(model),
+            _ => None,
         }
     }
 
@@ -77,8 +137,25 @@ impl Denoiser {
     /// highest speech probability seen in it (0..1).
     pub fn process(&mut self, frame: &mut [f32], mode: NoiseSuppression) -> f32 {
         if mode == NoiseSuppression::Off {
+            self.advanced_active = false;
             return 1.0;
         }
+        let mut mode = mode;
+        if mode == NoiseSuppression::Advanced {
+            let was_active = self.advanced_active;
+            if let Some(model) = self.advanced_model() {
+                if !was_active {
+                    model.reset();
+                }
+                model.process(frame);
+                self.advanced_active = true;
+                // DPDFNet reports no speech probability.
+                return 1.0;
+            }
+            // Still loading (or it failed): RNNoise covers the gap.
+            mode = NoiseSuppression::Standard;
+        }
+        self.advanced_active = false;
         let mut speech = 0.0f32;
         for chunk in frame.chunks_mut(RNN_FRAME) {
             if chunk.len() != RNN_FRAME {

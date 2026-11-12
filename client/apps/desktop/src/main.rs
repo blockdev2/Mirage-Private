@@ -8,6 +8,7 @@
 
 mod app;
 mod bridge;
+mod clock;
 mod protocol;
 mod store;
 mod strings;

@@ -10,6 +10,9 @@ First-party code uses the existing MIT license. Dependencies retain their own li
 | audiopus | Direct Rust audio dependency | ISC in installed package metadata |
 | audiopus_sys and bundled libopus | Transitive native codec build | audiopus_sys declares ISC; inspect its bundled source license notices before binary distribution |
 | cpal | Direct audio devices dependency | Apache-2.0 in installed package metadata |
+| DPDFNet model `dpdfnet2_48khz_hr.onnx` | `crates/ts6-audio/models/` (embedded in the binary), from <https://huggingface.co/Ceva-IP/DPDFNet> and <https://github.com/ceva-ip/DPDFNet> | Apache-2.0; license text kept as `crates/ts6-audio/models/LICENSE-DPDFNet`. The Rust port of its streaming loop is first-party code |
+| tract-onnx and its tract crates | Direct dependency of `ts6-audio` (runs the DPDFNet model) | MIT OR Apache-2.0 in installed package metadata |
+| nnnoiseless (RNNoise port) | Direct dependency of `ts6-audio` | BSD-3-Clause in installed package metadata; inspect before binary distribution |
 | React, React DOM | UI runtime dependencies | MIT in installed package metadata |
 | Vite, TypeScript, plugin/types packages | UI development/build dependencies | Inspect installed `node_modules/*/package.json` and retained license notices before packaging |
 

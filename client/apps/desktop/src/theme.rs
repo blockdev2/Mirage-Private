@@ -57,6 +57,7 @@ pub mod icon {
     pub const SHARE_SCREEN: &str = "\u{E58A}";
     pub const PHONE_DISCONNECT: &str = "\u{E3BC}";
     pub const GEAR: &str = "\u{E270}";
+    pub const PENCIL: &str = "\u{E3B4}";
     pub const PLUS: &str = "\u{E3D4}";
     pub const SEND: &str = "\u{E396}";
     pub const USER_PLUS: &str = "\u{E4D0}";
@@ -509,13 +510,116 @@ pub fn input_frame() -> Frame {
         .inner_margin(Margin::symmetric(12, 9))
 }
 
-/// Same field, visibly disabled: darker fill and a softer border.
-pub fn input_frame_disabled() -> Frame {
-    Frame::new()
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER_SOFT))
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::symmetric(12, 9))
+/// Bare glyph button, with no box behind it: the glyph rests in the muted text
+/// color and, on hover or focus, turns fully white while it makes a partial
+/// turn. Both ease in and out, and the motion settles by itself, so it only
+/// answers the pointer. `label` is the accessible name and the tooltip.
+/// `turn_degrees` should be a multiple of the glyph's own rotational symmetry
+/// (45 for the eight-tooth gear), or the resting hover pose looks crooked.
+pub fn glyph_button(
+    ui: &mut Ui,
+    glyph: &str,
+    label: &str,
+    size: f32,
+    turn_degrees: f32,
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let hot = response.hovered() || response.has_focus();
+    let progress = ui.ctx().animate_bool_with_time_and_easing(
+        response.id,
+        hot,
+        0.22,
+        egui::emath::easing::cubic_out,
+    );
+    let ink = lerp_color(TEXT_3, Color32::WHITE, progress);
+    // A press leans a little further into the turn.
+    let pressed = if response.is_pointer_button_down_on() {
+        8.0
+    } else {
+        0.0
+    };
+    let angle = (turn_degrees * progress + pressed).to_radians();
+
+    let galley =
+        ui.painter()
+            .layout_no_wrap(glyph.to_string(), FontId::new(size * 0.7, icons()), ink);
+    // Rotate about the glyph's own center so it spins in place.
+    let center = rect.center();
+    let half = galley.size() / 2.0;
+    let (sin, cos) = angle.sin_cos();
+    let rotated_half = vec2(half.x * cos - half.y * sin, half.x * sin + half.y * cos);
+    ui.painter()
+        .add(egui::epaint::TextShape::new(center - rotated_half, galley, ink).with_angle(angle));
+    if response.has_focus() {
+        focus_ring(ui.painter(), rect);
+    }
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
+/// Linear blend of two colors, `amount` 0 giving `from` and 1 giving `to`.
+pub fn lerp_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let mix =
+        |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount.clamp(0.0, 1.0)).round() as u8;
+    Color32::from_rgb(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+    )
+}
+
+/// On/off switch. The knob slides and the track changes color together. Returns
+/// the response; read `*on` after it for the new value.
+pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let (rect, mut response) = ui.allocate_exact_size(
+        vec2(40.0, 22.0),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, enabled, *on, label));
+    let progress = ui.ctx().animate_bool_with_time(response.id, *on, 0.16);
+    let (off_track, on_track) = if enabled {
+        (SURFACE_HOVER, ACCENT)
+    } else {
+        (SURFACE_RAISED, SURFACE_HOVER)
+    };
+    let painter = ui.painter();
+    let track = lerp_color(off_track, on_track, progress);
+    painter.rect_filled(rect, CornerRadius::same(11), track);
+    if !*on && progress < 0.5 {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(11),
+            Stroke::new(1.0, BORDER),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let travel = rect.width() - rect.height();
+    let knob_x = rect.left() + rect.height() / 2.0 + travel * progress;
+    let knob = lerp_color(TEXT_2, BG, progress);
+    painter.circle_filled(
+        pos2(knob_x, rect.center().y),
+        rect.height() / 2.0 - 4.0,
+        knob,
+    );
+    if response.has_focus() {
+        focus_ring(painter, rect);
+    }
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand)
+    } else {
+        response
+    }
 }
 
 /// Uppercase-style section label.

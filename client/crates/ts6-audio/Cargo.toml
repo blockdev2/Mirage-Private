@@ -21,6 +21,10 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 nnnoiseless = { version = "0.5", default-features = false }
+# DPDFNet (Apache-2.0) runs as an ONNX model; tract is a pure-Rust ONNX runtime,
+# so there is no native library to ship. realfft is already pulled in by RNNoise.
+tract-onnx = { version = "0.23", default-features = false }
+realfft = "3.5"
 
 [dev-dependencies]
 approx = "0.5"

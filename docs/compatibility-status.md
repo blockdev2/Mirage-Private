@@ -25,7 +25,7 @@ UI TypeScript/production build and npm audit passed (zero reported UI vulnerabil
 | Multiple voice senders | Independent decoder state regression fixed; sustained multi-user acoustic calls not verified |
 | Microphone, speakers and PTT | Implemented, partly covered by unit/historical tests; fresh acoustic end-to-end validation remains open |
 | Browser UI | Builds; HTTP/wire integration passes; full rendered interaction/accessibility validation remains open |
-| Text chat | UI disabled; delivery/integration not implemented and not claimed |
+| Text chat | Desktop client sends to and shows channel chat. A message sent from this client was seen arriving in the official client on the user's TeamSpeak 6 server (manual observation, not an automated test). The server does not echo it back to the sender, so the client treats the server accepting the command as delivery and shows a failure when it refuses or does not answer. Receiving messages from other clients is implemented but not yet verified, and the earlier beta13.1 experiment below did not observe delivery |
 | Video/screensharing and files | Not implemented |
 | Native desktop packaging | Not implemented |
 | Production security readiness | Experimental; current dependency/history remediation and remaining reporting/maintenance work are documented in PUBLICATION.md |
