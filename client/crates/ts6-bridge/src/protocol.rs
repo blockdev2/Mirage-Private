@@ -19,6 +19,13 @@ pub enum Command {
         #[serde(default)]
         server_password: Option<String>,
     },
+    Chat {
+        #[serde(default)]
+        session_id: String,
+        channel: String,
+        text: String,
+        request_id: String,
+    },
     Disconnect,
     Join {
         channel: String,
@@ -98,6 +105,7 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Connect { .. } => "Connect",
+            Self::Chat { .. } => "Chat",
             Self::Disconnect => "Disconnect",
             Self::Join { .. } => "Join",
             Self::Nick { .. } => "Nick",
@@ -147,11 +155,24 @@ pub struct DeviceLists {
 #[derive(Debug, Serialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event<'a> {
+    Chat {
+        channel: String,
+        sender: String,
+        text: String,
+        from_self: bool,
+        ts: String,
+    },
+    ChatResult {
+        request_id: String,
+        error: Option<&'a str>,
+    },
     Hello {
         version: &'a str,
+        channel_chat: bool,
         devices: DeviceLists,
     },
     Status {
+        session_id: Option<&'a str>,
         connected: bool,
         address: Option<&'a str>,
         nickname: Option<&'a str>,
@@ -238,6 +259,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_chat_command_is_supported_without_logging_content() {
+        let command: Command = serde_json::from_str(
+            r#"{"op":"chat","channel":"1","text":"private fixture text","request_id":"fixture-1"}"#,
+        )
+        .expect("channel chat command");
+        assert!(!format!("{command:?}").contains("private fixture text"));
+    }
+
+    #[test]
     fn command_diagnostics_never_include_passwords() {
         let command: Command = serde_json::from_str(
             r#"{"op":"connect","address":"example.org","server_password":"fixture-sensitive-value"}"#,
@@ -268,6 +298,7 @@ mod tests {
     #[test]
     fn events_serialize_with_a_type_tag() {
         let json = serde_json::to_string(&Event::Status {
+            session_id: None,
             connected: true,
             address: Some("127.0.0.1:9987"),
             nickname: Some("tester"),

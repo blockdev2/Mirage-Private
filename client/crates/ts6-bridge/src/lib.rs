@@ -1,4 +1,4 @@
-﻿//! `ts6-bridge` â€” owns one TS6 session and exposes it to the desktop UI over a
+//! `ts6-bridge` - owns one TS6 session and exposes it to the desktop UI over a
 //! local WebSocket.
 //!
 //! Why a bridge instead of driving the session from the UI process: the session is
@@ -118,6 +118,10 @@ pub fn default_ui_dir() -> PathBuf {
 }
 
 pub async fn serve(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
+    serve_inner(port, Some(ui_dir)).await
+}
+
+async fn serve_inner(port: u16, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let (commands, command_rx) = mpsc::channel::<Command>(32);
     let (events, _) = broadcast::channel::<String>(256);
     // The session loop also receives reports from its own transfer tasks.
@@ -138,20 +142,13 @@ pub async fn serve(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
         }
     });
 
-    let app = Router::new()
-        .route("/ws", get(ws_handler))
-        .with_state(App {
-            port,
-            commands,
-            events: events.clone(),
-        })
-        .fallback_service(ServeDir::new(&ui_dir).append_index_html_on_directories(true));
+    let serves_static_ui = ui_dir
+        .as_ref()
+        .is_some_and(|path| !path.as_os_str().is_empty());
+    let app = build_router(port, commands, events.clone(), ui_dir);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
-    println!(
-        "ts6-bridge: http://127.0.0.1:{port}  (ui: {})",
-        ui_dir.display()
-    );
+    println!("ts6-bridge: http://127.0.0.1:{port} (static UI: {serves_static_ui})");
 
     // The HTTP server runs as its own task; the protocol session stays on the thread
     // that runs this future (the connection is `!Send`). Keep the existing ownership
@@ -164,6 +161,26 @@ pub async fn serve(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
         Err(error) => tracing::warn!(%error, "http server task failed"),
     }
     Ok(())
+}
+
+fn build_router(
+    port: u16,
+    commands: mpsc::Sender<Command>,
+    events: broadcast::Sender<String>,
+    ui_dir: Option<PathBuf>,
+) -> Router {
+    let router = Router::new().route("/ws", get(ws_handler)).with_state(App {
+        port,
+        commands,
+        events,
+    });
+
+    match ui_dir.filter(|path| !path.as_os_str().is_empty()) {
+        Some(ui_dir) => {
+            router.fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
+        }
+        None => router,
+    }
 }
 
 fn browser_allowed(headers: &HeaderMap, port: u16) -> bool {
@@ -202,12 +219,19 @@ async fn ws_session(socket: WebSocket, app: App) {
     // Greeting: version plus the device lists the UI needs for its settings panel.
     let hello = Event::Hello {
         version: env!("CARGO_PKG_VERSION"),
+        channel_chat: true,
         devices: audio::device_lists(),
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if sender.send(Message::Text(json.into())).await.is_err() {
             return;
         }
+    }
+
+    // A frontend may reload while the server session remains alive.
+    // Request its current status and snapshot after subscribing to broadcasts.
+    if app.commands.send(Command::Refresh).await.is_err() {
+        return;
     }
 
     loop {
@@ -266,12 +290,28 @@ fn log(events: &broadcast::Sender<String>, level: &str, text: impl Into<String>)
 
 fn publish_state(session: &mut Session, events: &broadcast::Sender<String>) {
     match session.snapshot() {
-        Ok(snapshot) => protocol::publish(
-            events,
-            &Event::State {
-                snapshot: &snapshot,
-            },
-        ),
+        Ok(snapshot) => {
+            protocol::publish(
+                events,
+                &Event::Status {
+                    session_id: Some(session.session_id()),
+                    connected: true,
+                    address: Some(session.address()),
+                    nickname: snapshot
+                        .clients
+                        .iter()
+                        .find(|client| client.is_self)
+                        .map(|client| client.name.as_str()),
+                    error: None,
+                },
+            );
+            protocol::publish(
+                events,
+                &Event::State {
+                    snapshot: &snapshot,
+                },
+            );
+        }
         Err(error) => log(events, "error", format!("state unavailable: {error:#}")),
     }
 }
@@ -416,19 +456,38 @@ async fn session_task(
                             }
                             engine.on_audio(packet)
                         }
-                        Item::TextMessage(message) => log(
-                            &events,
-                            "text",
-                            format!(
-                                "{}: {}",
-                                message.invoker_name.as_deref().unwrap_or("?"),
-                                message.message
-                            ),
-                        ),
+                        Item::TextMessage(message) => {
+                            if matches!(message.target, ts6_core::MessageTarget::Channel) {
+                                if let Some(channel) = message.channel_id.map(|id| id.to_string()) {
+                                    protocol::publish(
+                                        &events,
+                                        &Event::Chat {
+                                            channel,
+                                            sender: message
+                                                .invoker_name
+                                                .unwrap_or_else(|| "Unknown sender".into()),
+                                            text: message.message,
+                                            from_self: message.from_self,
+                                            ts: format!("{} UTC", protocol::timestamp()),
+                                        },
+                                    );
+                                }
+                            } else {
+                                log(
+                                    &events,
+                                    "text",
+                                    format!(
+                                        "{}: {}",
+                                        message.invoker_name.as_deref().unwrap_or("?"),
+                                        message.message
+                                    ),
+                                );
+                            }
+                        }
                         Item::UnknownCommand { name, content } => {
                             tracing::debug!(%name, %content, "unknown server command");
                         }
-                        Item::Reconnecting => log(&events, "warn", "reconnectingâ€¦"),
+                        Item::Reconnecting => log(&events, "warn", "reconnecting..."),
                         Item::IdentityLevel(level) => {
                             tracing::debug!(level, "identity level increasing")
                         }
@@ -445,6 +504,7 @@ async fn session_task(
             protocol::publish(
                 &events,
                 &Event::Status {
+                    session_id: None,
                     connected: false,
                     address: None,
                     nickname: None,
@@ -531,12 +591,13 @@ async fn apply_command(
                 client_config = client_config.server_password(password);
             }
 
-            log(events, "info", format!("connecting to {address}â€¦"));
+            log(events, "info", format!("connecting to {address}..."));
             match Session::connect(client_config).await {
                 Ok(connected) => {
                     protocol::publish(
                         events,
                         &Event::Status {
+                            session_id: Some(connected.session_id()),
                             connected: true,
                             address: Some(&address),
                             nickname: Some(&nickname),
@@ -556,6 +617,7 @@ async fn apply_command(
                     protocol::publish(
                         events,
                         &Event::Status {
+                            session_id: None,
                             connected: false,
                             address: None,
                             nickname: None,
@@ -578,6 +640,7 @@ async fn apply_command(
             protocol::publish(
                 events,
                 &Event::Status {
+                    session_id: None,
                     connected: false,
                     address: None,
                     nickname: None,
@@ -596,6 +659,35 @@ async fn apply_command(
             },
             None => log(events, "warn", "not connected"),
         },
+
+        Command::Chat {
+            session_id,
+            channel,
+            text,
+            request_id,
+        } => {
+            let error = match session.as_mut() {
+                None => Some("Not connected. Your draft has been preserved."),
+                Some(active) => {
+                    if session_id != active.session_id() {
+                        Some("The server session changed. Review your draft before sending again.")
+                    } else if let Err(error) =
+                        validate_channel_chat(&channel, &text, own_channel(active).as_deref())
+                    {
+                        Some(error)
+                    } else if active
+                        .send_chat(ts6_core::ChatTarget::Channel, &text)
+                        .await
+                        .is_err()
+                    {
+                        Some("The server did not confirm the send. Check the chat before retrying.")
+                    } else {
+                        None
+                    }
+                }
+            };
+            protocol::publish(events, &Event::ChatResult { request_id, error });
+        }
 
         Command::Nick { name } => match session.as_mut() {
             Some(active) => match active.set_nickname(&name).await {
@@ -670,7 +762,7 @@ async fn apply_command(
                     "audio: enabled={} tone={} ptt={}",
                     config.enabled,
                     engine.tone,
-                    engine.ptt_binding.as_deref().unwrap_or("â€”")
+                    engine.ptt_binding.as_deref().unwrap_or("-")
                 ),
             );
             let tx_frames = session
@@ -689,7 +781,16 @@ async fn apply_command(
 
         Command::Refresh => match session.as_mut() {
             Some(active) => refresh(active, events, media, internal),
-            None => log(events, "warn", "not connected"),
+            None => protocol::publish(
+                events,
+                &Event::Status {
+                    session_id: None,
+                    connected: false,
+                    address: None,
+                    nickname: None,
+                    error: None,
+                },
+            ),
         },
 
         Command::SetAvatar { path } => match (session.as_mut(), path) {
@@ -742,10 +843,94 @@ pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
     runtime.block_on(async move { serve(port, ui_dir).await })
 }
 
+/// Runs the WebSocket bridge without serving files from the process working directory.
+/// Used by desktop clients that render their UI natively.
+pub fn serve_blocking_without_ui(port: u16) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move { serve_inner(port, None).await })
+}
+
+fn own_channel(session: &Session) -> Option<String> {
+    let snapshot = session.snapshot().ok()?;
+    snapshot
+        .clients
+        .iter()
+        .find(|client| client.is_self)
+        .map(|client| client.channel_id.to_string())
+}
+
+fn validate_channel_chat(
+    channel: &str,
+    text: &str,
+    current: Option<&str>,
+) -> Result<(), &'static str> {
+    if current != Some(channel) {
+        return Err("The channel changed. Review your draft before sending again.");
+    }
+    if text.trim().is_empty() || text.len() > 1024 || text.contains('\0') {
+        return Err("Messages must contain text, use at most 1024 UTF-8 bytes, and contain no NUL characters.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod access_tests {
     use super::*;
+    use axum::body::Body;
     use axum::http::HeaderMap;
+    use tower::ServiceExt;
+
+    #[test]
+    fn channel_chat_rejects_stale_destinations_and_invalid_text() {
+        assert!(validate_channel_chat("2", "hello", Some("1")).is_err());
+        assert!(validate_channel_chat("1", "hello", None).is_err());
+        assert!(validate_channel_chat("1", "  ", Some("1")).is_err());
+        assert!(validate_channel_chat("1", "bad\0text", Some("1")).is_err());
+        assert!(validate_channel_chat("1", &"a".repeat(1025), Some("1")).is_err());
+        assert!(validate_channel_chat("1", &"\u{1f600}".repeat(257), Some("1")).is_err());
+        assert!(validate_channel_chat("1", &"a".repeat(1024), Some("1")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn empty_ui_root_does_not_serve_files_from_the_working_directory() {
+        let marker = format!(
+            ".ts6-bridge-working-directory-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let marker_path = std::env::current_dir().unwrap().join(&marker);
+        std::fs::write(&marker_path, "private sentinel").unwrap();
+        let _cleanup = RemoveFile(marker_path);
+
+        let (commands, _) = mpsc::channel(1);
+        let (events, _) = broadcast::channel(1);
+        let app = build_router(8787, commands, events, Some(PathBuf::new()));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/{marker}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    struct RemoveFile(PathBuf);
+
+    impl Drop for RemoveFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 
     fn headers(host: &str, origin: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();

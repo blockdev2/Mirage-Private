@@ -22,3 +22,5 @@ pub use state::{ChannelInfo, ClientInfo, ConnectionInfo, ServerInfo, Snapshot};
 // Packet-level types needed to build/send voice and TS6 stream commands, so that
 // downstream crates do not have to depend on `tsproto-packets` directly.
 pub use tsproto_packets::packets::{AudioData, CodecType, InAudioBuf, OutAudio, OutPacket};
+
+pub use tsclientlib::MessageTarget;

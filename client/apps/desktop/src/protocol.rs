@@ -83,6 +83,8 @@ pub struct ConnectionInfo {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StatusEvent {
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub connected: bool,
     pub address: Option<String>,
     pub nickname: Option<String>,
@@ -118,8 +120,15 @@ pub struct LogLine {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum BridgeEvent {
+    Chat(ChatMessage),
+    ChatResult {
+        request_id: String,
+        error: Option<String>,
+    },
     Hello {
         version: String,
+        #[serde(default)]
+        channel_chat: bool,
         devices: DeviceLists,
     },
     Status(StatusEvent),
@@ -150,6 +159,12 @@ pub enum BridgeEvent {
 #[derive(Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
+    Chat {
+        session_id: String,
+        channel: String,
+        text: String,
+        request_id: String,
+    },
     Connect {
         address: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,6 +216,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_chat_events_preserve_scope_and_request_results() {
+        let event: BridgeEvent = serde_json::from_str(r#"{"ev":"chat","channel":"3","sender":"fixture","text":"hello","from_self":false,"ts":"12:00:00"}"#).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Chat(message) if message.channel == "3" && message.text == "hello")
+        );
+        let result: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"chat_result","request_id":"fixture-1","error":"stale channel"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, BridgeEvent::ChatResult { request_id, error: Some(_) } if request_id == "fixture-1")
+        );
+    }
+
+    #[test]
     fn parses_state_event() {
         let json = r#"{"ev":"state","snapshot":{"own_client_id":2,"own_uid":null,
             "server":{"name":"S","version":"6.0.0","platform":"Linux","max_clients":32,"welcome_message":""},
@@ -247,4 +277,13 @@ mod tests {
         .unwrap();
         assert_eq!(json, r#"{"op":"connect","address":"127.0.0.1:9987"}"#);
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatMessage {
+    pub channel: String,
+    pub sender: String,
+    pub text: String,
+    pub from_self: bool,
+    pub ts: String,
 }

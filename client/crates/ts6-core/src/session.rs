@@ -69,6 +69,8 @@ pub enum Item {
 
 #[derive(Debug, Clone)]
 pub struct TextMessage {
+    pub target: tsclientlib::MessageTarget,
+    pub channel_id: Option<u64>,
     pub invoker_id: Option<u16>,
     pub invoker_name: Option<String>,
     pub message: String,
@@ -87,6 +89,7 @@ pub enum Wake<T = ()> {
 }
 
 pub struct Session {
+    session_id: String,
     con: Connection,
     config: ClientConfig,
     /// Items consumed while waiting for a command result, replayed to the caller.
@@ -119,7 +122,17 @@ impl Session {
         }
 
         let con = builder.connect()?;
+        static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let session_id = format!(
+            "{:x}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let mut session = Self {
+            session_id,
             con,
             config,
             pending: VecDeque::new(),
@@ -185,7 +198,14 @@ impl Session {
             self.pending.pop_front();
         }
         match item {
-            StreamItem::BookEvents(_) => self.pending.push_back(Item::StateChanged),
+            StreamItem::BookEvents(events) => enqueue_book_items(
+                &mut self.pending,
+                book_items(
+                    events,
+                    self.con.get_state().ok().map(|state| state.own_client.0),
+                    current_channel(&self.con),
+                ),
+            ),
             StreamItem::UnknownCommand { name, content } => self
                 .pending
                 .push_back(Item::UnknownCommand { name, content }),
@@ -196,6 +216,18 @@ impl Session {
                         invoker_id,
                         invoker_name: Some(first.invoker_name.clone()),
                         message: first.message.clone(),
+                        channel_id: current_channel(&self.con),
+                        target: match first.target {
+                            tsclientlib::TextMessageTargetMode::Channel => {
+                                tsclientlib::MessageTarget::Channel
+                            }
+                            tsclientlib::TextMessageTargetMode::Server => {
+                                tsclientlib::MessageTarget::Server
+                            }
+                            _ => tsclientlib::MessageTarget::Client(
+                                first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                            ),
+                        },
                         from_self: invoker_id == self.own_id(),
                     }));
                 }
@@ -217,6 +249,15 @@ impl Session {
         &self.config
     }
 
+    /// Server destination of this live session, for local frontend resynchronization.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn address(&self) -> &str {
+        &self.config.address
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
         self.con
             .get_state()
@@ -232,7 +273,17 @@ impl Session {
         loop {
             let raw = self.con.events().next().await?;
             match raw {
-                Ok(StreamItem::BookEvents(_)) => return Some(Item::StateChanged),
+                Ok(StreamItem::BookEvents(events)) => {
+                    enqueue_book_items(
+                        &mut self.pending,
+                        book_items(
+                            events,
+                            self.con.get_state().ok().map(|state| state.own_client.0),
+                            current_channel(&self.con),
+                        ),
+                    );
+                    return self.pending.pop_front();
+                }
                 Ok(StreamItem::UnknownCommand { name, content }) => {
                     return Some(Item::UnknownCommand { name, content })
                 }
@@ -247,6 +298,18 @@ impl Session {
                         invoker_id,
                         invoker_name: Some(first.invoker_name.clone()),
                         message: first.message.clone(),
+                        channel_id: current_channel(&self.con),
+                        target: match first.target {
+                            tsclientlib::TextMessageTargetMode::Channel => {
+                                tsclientlib::MessageTarget::Channel
+                            }
+                            tsclientlib::TextMessageTargetMode::Server => {
+                                tsclientlib::MessageTarget::Server
+                            }
+                            _ => tsclientlib::MessageTarget::Client(
+                                first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                            ),
+                        },
                         from_self,
                     }));
                 }
@@ -285,7 +348,17 @@ impl Session {
     /// messages we do not surface yet).
     fn map_raw(&mut self, raw: StreamItem) -> Option<Item> {
         match raw {
-            StreamItem::BookEvents(_) => Some(Item::StateChanged),
+            StreamItem::BookEvents(events) => {
+                enqueue_book_items(
+                    &mut self.pending,
+                    book_items(
+                        events,
+                        self.con.get_state().ok().map(|state| state.own_client.0),
+                        current_channel(&self.con),
+                    ),
+                );
+                self.pending.pop_front()
+            }
             StreamItem::UnknownCommand { name, content } => {
                 Some(Item::UnknownCommand { name, content })
             }
@@ -297,6 +370,18 @@ impl Session {
                     invoker_id,
                     invoker_name: Some(first.invoker_name.clone()),
                     message: first.message.clone(),
+                    channel_id: current_channel(&self.con),
+                    target: match first.target {
+                        tsclientlib::TextMessageTargetMode::Channel => {
+                            tsclientlib::MessageTarget::Channel
+                        }
+                        tsclientlib::TextMessageTargetMode::Server => {
+                            tsclientlib::MessageTarget::Server
+                        }
+                        _ => tsclientlib::MessageTarget::Client(
+                            first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                        ),
+                    },
                     from_self,
                 }))
             }
@@ -463,7 +548,14 @@ impl Session {
                 StreamItem::MessageResult(got, result) if got == handle => {
                     return result.map_err(|err| anyhow!("server rejected `{name}`: {err}"));
                 }
-                StreamItem::BookEvents(_) => self.pending.push_back(Item::StateChanged),
+                StreamItem::BookEvents(events) => enqueue_book_items(
+                    &mut self.pending,
+                    book_items(
+                        events,
+                        self.con.get_state().ok().map(|state| state.own_client.0),
+                        current_channel(&self.con),
+                    ),
+                ),
                 StreamItem::UnknownCommand { name, content } => self
                     .pending
                     .push_back(Item::UnknownCommand { name, content }),
@@ -474,6 +566,18 @@ impl Session {
                             invoker_id,
                             invoker_name: Some(first.invoker_name.clone()),
                             message: first.message.clone(),
+                            channel_id: current_channel(&self.con),
+                            target: match first.target {
+                                tsclientlib::TextMessageTargetMode::Channel => {
+                                    tsclientlib::MessageTarget::Channel
+                                }
+                                tsclientlib::TextMessageTargetMode::Server => {
+                                    tsclientlib::MessageTarget::Server
+                                }
+                                _ => tsclientlib::MessageTarget::Client(
+                                    first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
+                                ),
+                            },
                             from_self: invoker_id == self.own_id(),
                         }));
                     }
@@ -656,5 +760,116 @@ fn bool_flag(value: bool) -> String {
         "1".to_string()
     } else {
         "0".to_string()
+    }
+}
+
+/// Keep replay bounded even when one library event contains a batch of messages.
+fn enqueue_book_items(pending: &mut VecDeque<Item>, items: Vec<Item>) {
+    for item in items {
+        if pending.len() >= 4096 {
+            pending.pop_front();
+        }
+        pending.push_back(item);
+    }
+}
+
+fn current_channel(con: &Connection) -> Option<u64> {
+    let state = con.get_state().ok()?;
+    state
+        .clients
+        .get(&state.own_client)
+        .map(|client| client.channel.0)
+}
+
+fn book_items(
+    events: Vec<tsclientlib::events::Event>,
+    own_id: Option<u16>,
+    channel_id: Option<u64>,
+) -> Vec<Item> {
+    let mut items = Vec::new();
+    for event in events {
+        if let tsclientlib::events::Event::Message {
+            invoker,
+            message,
+            target,
+        } = event
+        {
+            let invoker_id = Some(invoker.id.0);
+            items.push(Item::TextMessage(TextMessage {
+                invoker_id,
+                invoker_name: Some(invoker.name),
+                channel_id: if matches!(target, tsclientlib::MessageTarget::Channel) {
+                    channel_id
+                } else {
+                    None
+                },
+                target,
+                message,
+                from_self: invoker_id == own_id,
+            }));
+        }
+    }
+    items.push(Item::StateChanged);
+    items
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn message_batches_keep_the_replay_queue_bounded() {
+        let mut pending = VecDeque::new();
+        pending.extend((0..4096).map(|_| Item::StateChanged));
+        enqueue_book_items(
+            &mut pending,
+            vec![Item::TextMessage(TextMessage {
+                invoker_id: Some(7),
+                invoker_name: None,
+                message: "newest fixture".into(),
+                channel_id: Some(3),
+                target: tsclientlib::MessageTarget::Channel,
+                from_self: false,
+            })],
+        );
+        assert_eq!(pending.len(), 4096);
+        assert!(
+            matches!(pending.back(), Some(Item::TextMessage(msg)) if msg.message == "newest fixture")
+        );
+    }
+
+    #[test]
+    fn bookkeeping_messages_preserve_text_sender_and_self_echo() {
+        let events = [7, 9]
+            .into_iter()
+            .map(|id| tsclientlib::events::Event::Message {
+                target: tsclientlib::MessageTarget::Channel,
+                invoker: tsclientlib::Invoker {
+                    id: tsclientlib::ClientId(id),
+                    name: "fixture peer".into(),
+                    uid: None,
+                },
+                message: "Unicode: emoji \u{1f600} | slash / backslash \\ newline\n".into(),
+            })
+            .collect();
+        let items = book_items(events, Some(7), Some(3));
+        let messages: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::TextMessage(msg) => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].channel_id, Some(3));
+        assert_eq!(messages[0].invoker_id, Some(7));
+        assert_eq!(messages[0].invoker_name.as_deref(), Some("fixture peer"));
+        assert!(messages[0].from_self);
+        assert!(!messages[1].from_self);
+        assert_eq!(
+            messages[0].message,
+            "Unicode: emoji \u{1f600} | slash / backslash \\ newline\n"
+        );
+        assert!(items.iter().any(|item| matches!(item, Item::StateChanged)));
     }
 }

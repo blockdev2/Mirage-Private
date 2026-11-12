@@ -33,7 +33,7 @@ COMMANDS:
   raw    <addr> <command> [key=value ...]  send any TS command, print result
   stream <addr> [--type N] [--bitrate N] [--seconds N]
                                           TS6: setupstream + watch the notifies
-  audio-send <addr> [seconds]             send a 440 Hz Opus tone to the channel
+  audio-send <addr> [seconds]             send a 440 Hz Opus tone; Windows timer is scoped to the test
   audio-recv <addr> [seconds]             decode incoming voice and report RMS/peak
   audio-call <addr> [seconds]             full duplex with real mic/speakers
   devices                                 list input/output audio devices
@@ -393,9 +393,10 @@ async fn send_tone(session: &mut Session, seconds: u64) -> Result<()> {
     }
 
     let sender_client_id = session.snapshot()?.own_client_id;
+    let (_timer_resolution, mut ticker) = tone_frame_timer()?;
     println!("sending 440 Hz tone for {seconds}s (20 ms frames, Opus voip, 64 kbit/s; sender_client_id={sender_client_id})");
-    let mut ticker = tokio::time::interval(Duration::from_millis(20));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    #[cfg(windows)]
+    println!("timer: requested 1 ms resolution for this synthetic test; it is restored when tone generation ends");
     let start = tokio::time::Instant::now();
     let (mut frames, mut bytes) = (0u64, 0u64);
 
@@ -455,6 +456,56 @@ async fn send_tone(session: &mut Session, seconds: u64) -> Result<()> {
     };
     println!("sent {frames} frames / {bytes} bytes (~{kbps:.1} kbit/s)");
     Ok(())
+}
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+unsafe extern "system" {
+    #[link_name = "timeBeginPeriod"]
+    fn time_begin_period(period: u32) -> u32;
+    #[link_name = "timeEndPeriod"]
+    fn time_end_period(period: u32) -> u32;
+}
+
+#[cfg(windows)]
+struct TimerResolutionGuard;
+
+#[cfg(windows)]
+impl TimerResolutionGuard {
+    fn request() -> Result<Self> {
+        let status = unsafe { time_begin_period(1) };
+        if status != 0 {
+            bail!("Windows rejected the 1 ms timer resolution request (status {status})");
+        }
+        Ok(Self)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TimerResolutionGuard {
+    fn drop(&mut self) {
+        let status = unsafe { time_end_period(1) };
+        if status != 0 {
+            tracing::warn!(status, "failed to restore the Windows timer resolution");
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct TimerResolutionGuard;
+
+#[cfg(not(windows))]
+impl TimerResolutionGuard {
+    fn request() -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+fn tone_frame_timer() -> Result<(TimerResolutionGuard, tokio::time::Interval)> {
+    let resolution = TimerResolutionGuard::request()?;
+    let mut ticker = tokio::time::interval(Duration::from_millis(20));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    Ok((resolution, ticker))
 }
 
 /// Receive voice, decode it and report the measured level. This is the automated
@@ -941,4 +992,30 @@ fn parse_args(argv: &[String]) -> Result<(Vec<String>, Opts)> {
         i += 1;
     }
     Ok((positional, opts))
+}
+
+#[cfg(all(test, windows))]
+mod timer_tests {
+    use std::time::Duration;
+
+    use super::tone_frame_timer;
+    use tokio::time::Instant;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn twenty_millisecond_tone_timer_stays_near_fifty_frames_per_second() {
+        let (_timer_resolution, mut ticker) = tone_frame_timer().expect("tone timer");
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(3);
+        let mut frames = 0;
+
+        while Instant::now() < deadline {
+            ticker.tick().await;
+            frames += 1;
+        }
+
+        assert!(
+            frames >= 135,
+            "20 ms timer produced only {frames} frames in three seconds"
+        );
+    }
 }

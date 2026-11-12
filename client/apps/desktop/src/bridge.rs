@@ -7,7 +7,6 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
@@ -21,6 +20,7 @@ const BRIDGE_URL: &str = "ws://127.0.0.1:8787/ws";
 const RETRY_DELAY: Duration = Duration::from_millis(1200);
 /// Upper bound on how long a command can wait before it is written.
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketState {
@@ -67,7 +67,7 @@ fn start_embedded_bridge() {
     let started = thread::Builder::new()
         .name("ts6-bridge-host".into())
         .spawn(|| {
-            if let Err(error) = ts6_bridge::serve_blocking(BRIDGE_PORT, PathBuf::new()) {
+            if let Err(error) = ts6_bridge::serve_blocking_without_ui(BRIDGE_PORT) {
                 eprintln!("embedded ts6-bridge stopped: {error:#}");
             }
         });
@@ -107,11 +107,23 @@ fn notify(events: &Sender<Incoming>, ctx: &egui::Context, state: SocketState) ->
 
 fn connect() -> Result<WebSocket<TcpStream>, String> {
     let address = SocketAddr::from(([127, 0, 0, 1], BRIDGE_PORT));
-    let stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
+    connect_to(address, BRIDGE_URL)
+}
+
+fn connect_to(address: SocketAddr, url: &str) -> Result<WebSocket<TcpStream>, String> {
+    let stream =
+        TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|error| error.to_string())?;
+    // Bound stalled handshake reads and writes before exchanging any HTTP data.
+    stream
+        .set_read_timeout(Some(CONNECT_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(CONNECT_TIMEOUT))
+        .map_err(|error| error.to_string())?;
     stream.set_nodelay(true).ok();
     let (socket, _response) =
-        tungstenite::client(BRIDGE_URL, stream).map_err(|error| error.to_string())?;
-    // Set the timeout only after the handshake, which needs blocking reads.
+        tungstenite::client(url, stream).map_err(|error| error.to_string())?;
+    // Use a shorter read timeout after the handshake to poll UI commands.
     socket
         .get_ref()
         .set_read_timeout(Some(POLL_INTERVAL))
@@ -158,5 +170,57 @@ fn run_session(
                 if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(_) => return true,
         }
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn responsive_peer_connects_and_restores_command_polling_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, wait) = mpsc::channel::<()>();
+        let peer = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let _socket = tungstenite::accept(stream).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(4));
+        });
+        let socket = connect_to(address, &format!("ws://{address}/ws")).unwrap();
+        let _ = release.send(());
+        peer.join().unwrap();
+        assert_eq!(
+            socket.get_ref().read_timeout().unwrap(),
+            Some(POLL_INTERVAL)
+        );
+        assert_eq!(
+            socket.get_ref().write_timeout().unwrap(),
+            Some(CONNECT_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn unresponsive_peer_does_not_hold_the_handshake_open() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, wait) = mpsc::channel::<()>();
+        let peer = thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(4));
+        });
+        let started = std::time::Instant::now();
+        let result = connect_to(address, &format!("ws://{address}/ws"));
+        let _ = release.send(());
+        peer.join().unwrap();
+        assert!(
+            result.is_err(),
+            "an unresponsive peer must not complete the handshake"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "handshake did not time out before the peer closed"
+        );
     }
 }

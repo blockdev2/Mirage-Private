@@ -34,6 +34,12 @@ export default function App() {
               onJoin={(channelId) => bridge.send({ op: "join", channel: String(channelId) })}
             />
             <ChannelView
+              key={`${bridge.status.session_id ?? ""}:${bridge.snapshot.clients.find((client) => client.is_self)?.channel_id}`}
+              sessionId={bridge.status.session_id ?? ""}
+              messages={bridge.chatMessages}
+              result={bridge.chatResult}
+              enabled={bridge.channelChat && bridge.socket === "open" && bridge.status.connected}
+              send={bridge.send}
               snapshot={bridge.snapshot}
               speaking={speaking}
               pttBinding={bridge.audio?.ptt_binding ?? null}

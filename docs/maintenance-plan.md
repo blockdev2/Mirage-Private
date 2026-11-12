@@ -2,6 +2,8 @@
 
 Date: 2026-11-12. Scope: the existing repository; no publishing, pushing, history rewriting, or license change.
 
+> Historical plan: this text describes the five-crate browser-UI checkout that was reviewed before the native desktop package was added. See [current architecture](architecture.md) for the present six-package workspace and both frontends.
+
 ## Design
 
 Preserve the five-crate Rust workspace and React UI. Prefer focused hardening over a framework migration or broad refactor. Preserve third-party licenses and protocol research. Replace outdated Portuguese onboarding and historical notes with accurate English summaries; distinguish previous observations from current verification. Local artifacts are inventoried by metadata only, without opening databases, identities, binaries, or caches.

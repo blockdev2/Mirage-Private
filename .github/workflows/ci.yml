@@ -1,6 +1,7 @@
 name: Quality
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -26,9 +27,17 @@ jobs:
         run: python scripts/check_repository.py
       - name: Install the documented Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: |
+            client -> target
+            recon/probe-ts6 -> target
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Rust formatting
         working-directory: client
-        run: cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -- --check
+        run: cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -p ts6-desktop -- --check
       - name: Rust lint
         working-directory: client
         run: cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings

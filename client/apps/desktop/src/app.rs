@@ -103,8 +103,10 @@ pub struct App {
     mic_muted: bool,
     output_muted: bool,
     chat_draft: String,
-    /// Whether the connection offers text chat. The bridge has none yet, so this
-    /// stays false and the chat area shows its "unavailable" state.
+    chat_messages: Vec<crate::protocol::ChatMessage>,
+    chat_pending: Option<(String, Instant)>,
+    chat_error: Option<String>,
+    /// Capability advertised by the bridge; absent on older versions.
     chat_available: bool,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
@@ -168,6 +170,9 @@ impl App {
             mic_muted: false,
             output_muted: false,
             chat_draft: String::new(),
+            chat_messages: Vec::new(),
+            chat_pending: None,
+            chat_error: None,
             chat_available: false,
             connect_started: None,
             open_channels: HashMap::new(),
@@ -184,6 +189,9 @@ impl App {
                     self.socket = state;
                     if state != SocketState::Open {
                         self.bridge_version = None;
+                        self.chat_available = false;
+                        self.chat_messages.clear();
+                        self.chat_pending = None;
                     }
                 }
                 Incoming::Event(event) => self.apply_event(event),
@@ -193,11 +201,22 @@ impl App {
 
     fn apply_event(&mut self, event: BridgeEvent) {
         match event {
-            BridgeEvent::Hello { version, devices } => {
+            BridgeEvent::Hello {
+                version,
+                devices,
+                channel_chat,
+            } => {
+                self.chat_available = channel_chat;
                 self.bridge_version = Some(version);
                 self.devices = devices;
             }
             BridgeEvent::Status(status) => {
+                if status.connected && status.session_id != self.status.session_id {
+                    self.chat_messages.clear();
+                    self.chat_draft.clear();
+                    self.chat_pending = None;
+                    self.chat_error = None;
+                }
                 if status.connected && !self.status.connected {
                     self.session_started = Some(Instant::now());
                 }
@@ -206,6 +225,8 @@ impl App {
                         // The session ended: go back to the hub.
                         self.section = Section::Home;
                     }
+                    self.chat_messages.clear();
+                    self.chat_pending = None;
                     self.snapshot = None;
                     self.audio = None;
                     self.session_started = None;
@@ -229,6 +250,17 @@ impl App {
                 self.connect_started = None;
             }
             BridgeEvent::State { snapshot } => {
+                let channel = snapshot
+                    .clients
+                    .iter()
+                    .find(|c| c.is_self)
+                    .map(|c| c.channel_id.to_string());
+                if channel != self.chat_channel() {
+                    self.chat_messages.clear();
+                    self.chat_draft.clear();
+                    self.chat_pending = None;
+                    self.chat_error = None;
+                }
                 if self.snapshot.is_none() {
                     // First view of the server: it counts as connected.
                     self.section = Section::Voice;
@@ -247,6 +279,27 @@ impl App {
                 }
                 self.snapshot = Some(snapshot);
                 self.sync_volumes();
+            }
+            BridgeEvent::Chat(message) => {
+                if self.chat_channel().as_deref() == Some(message.channel.as_str()) {
+                    self.chat_messages.push(message);
+                    if self.chat_messages.len() > 200 {
+                        self.chat_messages.remove(0);
+                    }
+                }
+            }
+            BridgeEvent::ChatResult { request_id, error } => {
+                if self
+                    .chat_pending
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &request_id)
+                {
+                    self.chat_pending = None;
+                    if error.is_none() {
+                        self.chat_draft.clear();
+                    }
+                    self.chat_error = error;
+                }
             }
             BridgeEvent::Log(line) => {
                 self.logs.push(line);
@@ -1191,105 +1244,130 @@ impl App {
         });
     }
 
-    /// Chat under the participants: heading, scrolling history, composer.
-    /// While the connection has no text chat the history shows an
-    /// "unavailable" state and the composer is visibly disabled; once it does,
-    /// an empty room shows the "no messages yet" state instead.
+    fn chat_channel(&self) -> Option<String> {
+        self.snapshot
+            .as_ref()?
+            .clients
+            .iter()
+            .find(|client| client.is_self)
+            .map(|client| client.channel_id.to_string())
+    }
+
+    /// Channel history contains server events only; command acknowledgments never add bubbles.
     fn chat_section(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let t = self.t;
-        let available = self.chat_available;
+        if self
+            .chat_pending
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(20))
+        {
+            self.chat_pending = None;
+            self.chat_error = Some(t.chat_uncertain.into());
+        }
+        let available =
+            self.chat_available && self.status.connected && self.socket == SocketState::Open;
         ui.label(RichText::new(t.chat_heading).font(FontId::new(16.0, theme::semibold())));
         ui.add_space(8.0);
-
-        let placeholder = if available {
-            t.chat_placeholder_in(channel_name)
-        } else {
-            t.chat_unavailable_title.to_string()
-        };
-        let (title, body) = if available {
-            (t.chat_empty_title, t.chat_empty_body)
-        } else {
-            (t.chat_unavailable_title, t.chat_unavailable_body)
-        };
-        let icon_ink = if available {
-            theme::TEXT_2
-        } else {
-            theme::TEXT_3
-        };
-
-        // Added first so the composer is anchored to the bottom and the
-        // history takes whatever height remains above it.
+        let mut submit = false;
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            if self.chat_draft.len() > 1024 {
+                ui.label(t.chat_limit);
+            }
+            if let Some(error) = &self.chat_error {
+                ui.label(error);
+            }
             let frame = if available {
                 theme::input_frame()
             } else {
                 theme::input_frame_disabled()
             };
             frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                // A fixed-height row with centered items, so the placeholder
-                // text and both icons share one baseline.
-                ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), 32.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.label(
-                            RichText::new(icon::PLUS)
-                                .font(FontId::new(16.0, theme::icons()))
-                                .color(icon_ink),
-                        );
-                        ui.add_enabled_ui(available, |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.chat_draft)
-                                    .hint_text(placeholder)
-                                    .frame(Frame::NONE)
-                                    .desired_width(ui.available_width() - 48.0)
-                                    .align(Align2::LEFT_CENTER)
-                                    .min_size(vec2(0.0, 32.0)),
-                            )
-                        })
-                        .inner
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::SEND).font(FontId::new(16.0, theme::icons())));
+                    let edit = ui
+                        .add_enabled(
+                            available && self.chat_pending.is_none(),
+                            egui::TextEdit::singleline(&mut self.chat_draft)
+                                .hint_text(if available {
+                                    t.chat_placeholder_in(channel_name)
+                                } else {
+                                    t.chat_unavailable_title.into()
+                                })
+                                .desired_width((ui.available_width() - 110.0).max(0.0)),
+                        )
                         .on_disabled_hover_text(t.chat_disabled);
-                        ui.label(
-                            RichText::new(icon::SEND)
-                                .font(FontId::new(16.0, theme::icons()))
-                                .color(icon_ink),
-                        );
-                    },
-                );
+                    let valid = available
+                        && self.chat_pending.is_none()
+                        && !self.chat_draft.trim().is_empty()
+                        && self.chat_draft.len() <= 1024;
+                    let clicked = ui
+                        .add_enabled(valid, egui::Button::new(t.chat_send))
+                        .clicked();
+                    submit = valid
+                        && (clicked
+                            || (edit.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))));
+                });
             });
             ui.add_space(8.0);
-
-            // The history is drawn only when there is room for it. Otherwise it
-            // is skipped, so its text can never run under the composer.
-            let room = ui.available_height();
-            if room >= HISTORY_MIN_HEIGHT {
+            if ui.available_height() >= HISTORY_MIN_HEIGHT {
                 egui::ScrollArea::vertical()
                     .id_salt("chat_history")
                     .stick_to_bottom(true)
                     .min_scrolled_height(0.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            // With little room, show the title alone.
-                            let compact = room < 56.0;
-                            ui.add_space(if compact {
-                                0.0
+                        if self.chat_messages.is_empty() {
+                            ui.label(if available {
+                                t.chat_empty_title
                             } else {
-                                (ui.available_height() * 0.3).max(8.0)
+                                t.chat_unavailable_title
                             });
+                            ui.label(if available {
+                                t.chat_empty_body
+                            } else {
+                                t.chat_unavailable_body
+                            });
+                        }
+                        for message in &self.chat_messages {
                             ui.label(
-                                RichText::new(title)
-                                    .font(FontId::new(14.0, theme::medium()))
-                                    .color(theme::TEXT_2),
+                                RichText::new(format!("{}  {}", message.ts, message.sender))
+                                    .small()
+                                    .color(theme::TEXT_3),
                             );
-                            if !compact {
-                                ui.label(RichText::new(body).small().color(theme::TEXT_3));
-                            }
-                        });
+                            ui.label(&message.text);
+                            ui.add_space(6.0);
+                        }
                     });
             }
         });
+        if submit {
+            if let Some(channel) = self.chat_channel() {
+                let id = format!(
+                    "desktop-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                if self
+                    .bridge
+                    .outgoing
+                    .send(Command::Chat {
+                        session_id: self.status.session_id.clone().unwrap_or_default(),
+                        channel,
+                        text: self.chat_draft.clone(),
+                        request_id: id.clone(),
+                    })
+                    .is_ok()
+                {
+                    self.chat_pending = Some((id, Instant::now()));
+                    self.chat_error = None;
+                } else {
+                    self.chat_error = Some(t.chat_uncertain.into());
+                }
+            }
+        }
     }
 }
 
