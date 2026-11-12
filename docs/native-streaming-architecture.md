@@ -175,6 +175,14 @@ playback resumed cleanly at the next keyframe. Next protocol work: RTCP PLI
 for immediate recovery, NACK/congestion control, and SRTP/DTLS; then
 cross-machine and official-viewer tests.
 
+Encoder choice follow-up: users can pick backend (GPU hardware / CPU
+software / auto) and GPU (high-performance, power-saving or an index) per
+codec. Encoders are matched to adapters by LUID; an explicit GPU choice is never
+silently replaced by another GPU. Encoding on a non-capture GPU or the CPU adds
+a measured per-frame copy. Low-latency mode and zero B-frames are requested
+explicitly — without them one integrated-GPU HEVC encoder buffered ~100 ms. See
+the [probe record](../recon/probe-capture/README.md#choosing-the-encoder-gpu-integrated-gpu-or-cpu).
+
 1. Measure GPU-texture capture/ownership on an explicitly selected synthetic
    window, including resize, minimize, device loss and stopping capture.
 2. Encode synthetic GPU frames and produce bounded elementary bitstreams; record

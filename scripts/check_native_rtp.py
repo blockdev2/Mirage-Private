@@ -67,7 +67,34 @@ def validate_loss(receiver, frames):
     return [name for name, ok in checks.items() if not ok]
 
 
-def run_codec(binary, codec, frames, private_dir, drop=None):
+# Requested placement -> what the sender must report (None = no constraint).
+EXPECTED_PLACEMENT = {
+    ("hardware", "high-performance"): ("discrete", None),
+    ("hardware", "minimum-power"): ("integrated", None),
+    ("software", "auto"): ("cpu", "system_memory"),
+}
+MATRIX = [("auto", "auto"), ("hardware", "high-performance"),
+          ("hardware", "minimum-power"), ("software", "auto")]
+
+
+def placement_failures(tx, backend, adapter):
+    """Check the encoder ran where it was asked to, never silently elsewhere."""
+    expected = EXPECTED_PLACEMENT.get((backend, adapter))
+    if not expected:
+        return []
+    kind, delivery = expected
+    target = tx["target"]
+    failures = []
+    if target["adapter_kind"] != kind:
+        failures.append(f"placed on {target['adapter_kind']}, requested {kind}")
+    if delivery and target["delivery"] != delivery:
+        failures.append(f"delivery {target['delivery']}, expected {delivery}")
+    if target["delivery"] == "cross_adapter_copy" and target["adapter_is_capture_gpu"]:
+        failures.append("cross-adapter copy reported for the capture GPU")
+    return failures
+
+
+def run_codec(binary, codec, frames, private_dir, drop=None, backend="auto", adapter="auto"):
     port = free_udp_port()
     with tempfile.TemporaryDirectory(prefix=f"rtp-{codec}-", dir=private_dir) as parent:
         receiver = subprocess.Popen(
@@ -78,10 +105,16 @@ def run_codec(binary, codec, frames, private_dir, drop=None):
             if not ready.get("ready") or ready.get("port") != port:
                 raise RuntimeError("receiver did not become ready")
             sender = subprocess.run(
-                [str(binary), "--rtp-send", f"127.0.0.1:{port}", codec, str(frames)]
-                + ([str(drop)] if drop is not None else []),
+                [str(binary), "--rtp-send", f"127.0.0.1:{port}", codec, str(frames),
+                 "--backend", backend, "--adapter", adapter]
+                + (["--drop", str(drop)] if drop is not None else []),
                 capture_output=True, text=True, timeout=120, creationflags=NO_WINDOW)
             if sender.returncode:
+                if "no encoder satisfies" in sender.stderr:
+                    # A clean, explicit refusal is the correct outcome when the
+                    # machine has no encoder for this codec/placement.
+                    return {"codec": codec, "backend": backend, "adapter": adapter,
+                            "passed": True, "status": "unavailable_refused_cleanly"}
                 raise RuntimeError(f"sender failed: {sender.stderr.strip()[-300:]}")
             out, err = receiver.communicate(timeout=90)
             if receiver.returncode:
@@ -93,9 +126,14 @@ def run_codec(binary, codec, frames, private_dir, drop=None):
         rx = json.loads(out.strip().splitlines()[-1])
         tx = json.loads(sender.stdout.strip().splitlines()[-1])["streaming"]
     failures = validate(rx, tx, frames) if drop is None else validate_loss(rx, frames)
+    failures += placement_failures(tx, backend, adapter)
     return {
-        "codec": codec, "dropped_packet": drop, "passed": not failures, "failures": failures,
+        "codec": codec, "backend": backend, "adapter": adapter, "status": "streamed",
+        "target": tx["target"], "copy_ms": tx["copy_ms"],
+        "encode_latency_ms": tx["encode_latency_ms"], "dropped_packet": drop, "passed": not failures, "failures": failures,
         "encoder_kind": tx["encoder_kind"], "gop_accepted": tx["gop_accepted_by_encoder"],
+        "low_latency_accepted": tx["low_latency_accepted"],
+        "zero_b_frames_accepted": tx["zero_b_frames_accepted"],
         "units": rx["units_received"], "packets": rx["packets"], "lost": rx["lost_packets"],
         "keyframes": rx["keyframes"], "keyframe_positions": rx["keyframe_positions"],
         "media_kbps": round(rx["media_bitrate_kbps"], 1),
@@ -112,15 +150,26 @@ def main():
     parser.add_argument("--private-dir", type=Path, required=True)
     parser.add_argument("--codecs", default="h264,hevc,av1")
     parser.add_argument("--frames", type=int, default=60)
+    parser.add_argument("--backend", default="auto")
+    parser.add_argument("--adapter", default="auto")
+    parser.add_argument("--matrix", action="store_true",
+                        help="run every backend/GPU combination for each codec")
     parser.add_argument("--loss-test", action="store_true",
                         help="also drop packet 50 of an extra run per codec and check recovery")
     args = parser.parse_args()
+    if args.loss_test and args.frames < 60:
+        # Packet 50 falls after the frame-20 keyframe; recovery needs the
+        # frame-40 keyframe plus at least one more GOP to observe it.
+        parser.error("--loss-test needs --frames >= 60")
     args.private_dir.mkdir(parents=True, exist_ok=True)
-    results = [run_codec(args.binary.resolve(), codec, args.frames, args.private_dir)
-               for codec in args.codecs.split(",") if codec]
+    codecs = [codec for codec in args.codecs.split(",") if codec]
+    combos = MATRIX if args.matrix else [(args.backend, args.adapter)]
+    results = [run_codec(args.binary.resolve(), codec, args.frames, args.private_dir,
+                         backend=backend, adapter=adapter)
+               for codec in codecs for backend, adapter in combos]
     if args.loss_test:
         results += [run_codec(args.binary.resolve(), codec, args.frames, args.private_dir, drop=50)
-                    for codec in args.codecs.split(",") if codec]
+                    for codec in codecs]
     print(json.dumps({"live_rtp_check_passed": all(r["passed"] for r in results),
                       "results": results}))
     if not all(r["passed"] for r in results):

@@ -251,3 +251,67 @@ reports, congestion control), SRTP/DTLS encryption, cross-machine NAT, live
 re-capture per frame (the pattern is drawn on the captured texture), and the
 official TeamSpeak viewer. With a 1 s GOP and no PLI, worst-case recovery
 after loss is about one second.
+
+## Choosing the encoder: GPU, integrated GPU or CPU
+
+Added 2026-11-12. `--rtp-send` accepts:
+
+- `--backend auto|hardware|software` (`gpu`/`cpu` are aliases). `hardware`
+  never falls back to the CPU; `software` uses only CPU encoders; `auto` tries
+  hardware first and falls back to the CPU encoder.
+- `--adapter auto|high-performance|minimum-power|<index>` (`dgpu`/`igpu`
+  aliases). The two named choices follow **Windows' own GPU preference**
+  (`IDXGIFactory6::EnumAdapterByGpuPreference`), the same ordering Windows uses
+  for "High performance" / "Power saving" app settings; indices come from
+  `--devices`. `auto` prefers the capture GPU (zero copy), then the rest by
+  performance.
+
+`--devices` lists every adapter with its kind (discrete / integrated / software
+render), Windows' preference ranks, which one captures, and hardware encoders
+**per codec per adapter**, plus CPU encoders per codec. Encoders are matched to
+adapters with `MFTEnum2` + `MFT_ENUM_ADAPTER_LUID`; note the LUID must be passed
+as an 8-byte blob — passed as a UINT64 the filter is silently ignored and every
+adapter appears to own every encoder (this was observed and fixed).
+
+Policy (pure, unit-tested in `selection.rs`): an explicit GPU choice names
+exactly one GPU. If that GPU has no encoder for the codec, the request is
+refused (or goes to the CPU under `--backend auto`) — it is **never moved to a
+different GPU**. The first live matrix caught exactly that bug (AV1 requested on
+an integrated GPU without AV1 silently ran on the discrete GPU); the planner and
+a regression test were fixed.
+
+Data path per choice (capture always happens on the default adapter):
+
+| Encoder location | Delivery | Copies per frame |
+| --- | --- | --- |
+| Capture GPU | `zero_copy_gpu` | none (NV12 texture shared with the encoder) |
+| Another GPU | `cross_adapter_copy` | GPU → system memory → other GPU |
+| CPU | `system_memory` | GPU → system memory |
+
+Encoders are also asked for low-latency mode (`CODECAPI_AVLowLatencyMode`), no
+B-frames (`CODECAPI_AVEncMPVDefaultBPictureCount = 0`) and a 20-frame GOP; the
+sender reports which hints each encoder accepted.
+
+`scripts/check_native_rtp.py --matrix` runs backend/adapter × codec live over
+UDP and verifies the encoder ran where requested. Observed on the development
+workstation (one discrete GPU, one integrated GPU, 60 frames each):
+
+| Codec | Discrete GPU (zero copy) | Integrated GPU (cross-adapter) | CPU |
+| --- | --- | --- | --- |
+| H.264 | encode p50 ≈2 ms / p95 ≈3.5 ms | copy ≈1 ms, encode p50 ≈3.5 ms | copy ≈0.7 ms, encode p50 ≈0.6 ms |
+| HEVC | ≈2 / ≈3.6 ms | copy ≈1 ms, encode ≈3 ms | refused: no CPU encoder |
+| AV1 | ≈2.2 / ≈3.7 ms | refused: no AV1 encoder on that GPU | refused: no CPU encoder |
+
+All streamed runs delivered 60/60 frames without loss; H.264 decoded with the
+correct colour on every placement. Before the low-latency hints, HEVC on the
+integrated GPU buffered 2–3 frames (encode p50 ≈100 ms, p95 ≈151 ms); with them
+it dropped to ≈3 ms. The discrete GPU's encoders declined the explicit B-frame
+setting but already ran at low latency. CPU timings reflect a tiny 640x360
+synthetic frame and are not representative of real screen content.
+
+Product guidance: default to `auto` (zero copy on the capture GPU). Offer the
+integrated GPU as a "save the gaming GPU" option — it costs one readback and
+upload per frame (≈1 ms at 640x360, growing with resolution). The CPU is a
+compatibility fallback, H.264 only on stock Windows. Capturing *on* the chosen
+GPU (instead of copying) needs the capture device to be created on that adapter
+and is a follow-up.

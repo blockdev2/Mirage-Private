@@ -2,6 +2,7 @@
 
 pub mod bitstream;
 pub mod rtp;
+pub mod selection;
 
 /// Center BGRA pixel offset, bounded to this probe's 1024x1024 fixture policy.
 pub fn center_offset(width: u32, height: u32, row_pitch: u32) -> Option<usize> {

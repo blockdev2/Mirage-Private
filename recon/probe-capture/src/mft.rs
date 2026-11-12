@@ -2,11 +2,13 @@
 //! NV12 GPU texture into raw access units (no container, no sink writer), and
 //! decoding them back through an OS decoder for a pixel check. No FFmpeg.
 
+use crate::devices;
 use crate::encoder::{ContextProtection, Runtime, convert, media_type};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use mirage_native_capture_probe::{
     bitstream::{Codec, av1_canonical, inspect},
     rtp::{RTP_HEADER_LEN, Reassembler, annexb_canonical, depacketize, payloads, rtp_packet},
+    selection::{self, AdapterChoice, Backend, Target},
 };
 use std::{
     io::Write,
@@ -17,11 +19,12 @@ use std::{
 };
 use windows::{
     Win32::{
+        Foundation::VARIANT_BOOL,
         Graphics::Direct3D11::*,
         Media::MediaFoundation::*,
         System::{
             Com::CoTaskMemFree,
-            Variant::{VARIANT, VT_UI4},
+            Variant::{VARIANT, VT_BOOL, VT_UI4},
         },
     },
     core::{GUID, Interface},
@@ -79,6 +82,25 @@ fn enumerate(
         {
             return found;
         }
+        found = take_activates(array, count);
+    }
+    found
+}
+
+/// Take ownership of an MF-allocated activation array and free it.
+///
+/// # Safety
+/// `array` must come from `MFTEnumEx`/`MFTEnum2` with `count` elements.
+pub(crate) unsafe fn take_activates(
+    array: *mut Option<IMFActivate>,
+    count: u32,
+) -> Vec<IMFActivate> {
+    let mut found = Vec::new();
+    if array.is_null() {
+        return found;
+    }
+    // SAFETY: Each element is read exactly once, then the array is freed.
+    unsafe {
         for i in 0..count as usize {
             if let Some(activate) = std::ptr::read(array.add(i)) {
                 found.push(activate);
@@ -202,6 +224,20 @@ fn gpu_sample(texture: &ID3D11Texture2D, frame: i64) -> Result<IMFSample> {
     }
 }
 
+/// System-memory NV12 sample for CPU (software) encoders.
+fn memory_sample(data: &[u8], frame: i64) -> Result<IMFSample> {
+    // SAFETY: Lock/Unlock paired; the copy fits the allocated length.
+    unsafe {
+        let buffer = MFCreateMemoryBuffer(data.len() as u32)?;
+        let mut target = std::ptr::null_mut();
+        buffer.Lock(&mut target, None, None)?;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), target, data.len());
+        buffer.Unlock()?;
+        buffer.SetCurrentLength(data.len() as u32)?;
+        timed_sample(&buffer, frame)
+    }
+}
+
 /// Synthetic motion: a 32x32 black block moves across the top band of the
 /// captured fixture each frame. Each frame gets its own NV12 texture, so an
 /// async encoder may hold earlier samples safely.
@@ -245,7 +281,8 @@ impl<'a> Motion<'a> {
         })
     }
 
-    fn sample(&self, frame: i64) -> Result<IMFSample> {
+    /// The frame as a fresh NV12 texture on the capture device.
+    fn nv12(&self, frame: i64) -> Result<ID3D11Texture2D> {
         let x = (frame as u32 * 12) % (self.width - 32);
         let area = D3D11_BOX {
             left: x,
@@ -267,8 +304,7 @@ impl<'a> Motion<'a> {
                 0,
             );
         }
-        let nv12 = convert(self.device, self.context, &self.work)?;
-        gpu_sample(&nv12, frame)
+        convert(self.device, self.context, &self.work)
     }
 }
 
@@ -276,6 +312,22 @@ struct Configured {
     transform: IMFTransform,
     is_async: bool,
     gop_applied: bool,
+    low_latency_applied: bool,
+    zero_b_frames_applied: bool,
+}
+
+fn set_codec_bool(transform: &IMFTransform, api: &GUID, value: bool) -> bool {
+    let Ok(codec_api) = transform.cast::<ICodecAPI>() else {
+        return false;
+    };
+    let mut variant = VARIANT::default();
+    // SAFETY: A VT_BOOL VARIANT needs no cleanup; the union field matches the tag.
+    unsafe {
+        let inner = &mut *variant.Anonymous.Anonymous;
+        inner.vt = VT_BOOL;
+        inner.Anonymous.boolVal = VARIANT_BOOL(if value { -1 } else { 0 });
+        codec_api.SetValue(api, &variant).is_ok()
+    }
 }
 
 fn set_codec_u32(transform: &IMFTransform, api: &GUID, value: u32) -> bool {
@@ -320,6 +372,11 @@ fn configure_encoder(
                 .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
                 .context("encoder rejected the capture device manager")?;
         }
+        // Interactive streaming: ask for low-latency mode and no B-frames
+        // (B-frames add reordering delay). Encoders may decline; reported.
+        let low_latency_applied = set_codec_bool(&transform, &CODECAPI_AVLowLatencyMode, true);
+        let zero_b_frames_applied =
+            set_codec_u32(&transform, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
         let gop_applied =
             gop.is_some_and(|size| set_codec_u32(&transform, &CODECAPI_AVEncMPVGOPSize, size));
         let output = media_type(&subtype(codec))?;
@@ -353,6 +410,8 @@ fn configure_encoder(
             transform,
             is_async,
             gop_applied,
+            low_latency_applied,
+            zero_b_frames_applied,
         })
     }
 }
@@ -832,17 +891,278 @@ const RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x4d49_5241;
 pub const GOP_FRAMES: u32 = 20;
 
+/// The user's encoder choice: backend (GPU/CPU) and which GPU.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Preference {
+    pub backend: Backend,
+    pub adapter: AdapterChoice,
+}
+
+/// How each frame reaches the chosen encoder.
+enum Delivery {
+    /// Encoder on the capture GPU: the NV12 texture is used as is.
+    ZeroCopy,
+    /// Encoder on another GPU: GPU -> system memory -> other GPU per frame.
+    CrossAdapter {
+        device: ID3D11Device,
+        _protection: ContextProtection,
+    },
+    /// CPU encoder: GPU -> system memory per frame.
+    SystemMemory,
+}
+
+struct Pipeline {
+    // Field order is drop order: encoder before its device manager and device.
+    selected: Selected,
+    delivery: Delivery,
+    _manager: IMFDXGIDeviceManager,
+    target: Target,
+    adapter: Option<(u32, &'static str, &'static str, bool)>,
+    plan: Vec<Target>,
+    attempts: Vec<String>,
+}
+
+impl Drop for Pipeline {
+    fn drop(&mut self) {
+        // SAFETY: Release the activated encoder object once.
+        unsafe {
+            let _ = self.selected.activate.ShutdownObject();
+        }
+    }
+}
+
+fn target_name(target: Target) -> String {
+    match target {
+        Target::Gpu(index) => format!("gpu{index}"),
+        Target::Cpu => "cpu".into(),
+    }
+}
+
+impl Pipeline {
+    fn describe(&self) -> serde_json::Value {
+        let (index, kind, vendor, capture) = match self.adapter {
+            Some((index, kind, vendor, capture)) => (Some(index), kind, vendor, capture),
+            None => (None, "cpu", "cpu", false),
+        };
+        serde_json::json!({
+            "selected": target_name(self.target),
+            "adapter_index": index,
+            "adapter_kind": kind,
+            "adapter_vendor": vendor,
+            "adapter_is_capture_gpu": capture,
+            "delivery": match self.delivery {
+                Delivery::ZeroCopy => "zero_copy_gpu",
+                Delivery::CrossAdapter { .. } => "cross_adapter_copy",
+                Delivery::SystemMemory => "system_memory",
+            },
+            "plan": self.plan.iter().map(|t| target_name(*t)).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Resolve the user's preference to a configured encoder, trying planned
+/// targets in order and recording why any were skipped.
+fn build_pipeline(
+    codec: Codec,
+    device: &ID3D11Device,
+    _context: &ID3D11DeviceContext,
+    preference: Preference,
+) -> Result<Pipeline> {
+    let sub = subtype(codec);
+    let capture = devices::device_luid(device)?;
+    let gpus = devices::adapters(Some(capture), sub)?;
+    let software = enumerate(
+        MFT_CATEGORY_VIDEO_ENCODER,
+        SOFTWARE,
+        Some(MFVideoFormat_NV12),
+        Some(sub),
+    );
+    let infos: Vec<_> = gpus.iter().map(|g| g.info.clone()).collect();
+    let plan = selection::plan(
+        preference.backend,
+        preference.adapter,
+        &infos,
+        !software.is_empty(),
+    );
+    ensure!(
+        !plan.is_empty(),
+        "no encoder satisfies backend={:?} adapter={:?} for {} (GPU encoders per adapter: {:?}; CPU encoders: {})",
+        preference.backend,
+        preference.adapter,
+        codec.as_str(),
+        infos
+            .iter()
+            .map(|a| (a.index, a.kind.as_str(), a.hardware_encoders))
+            .collect::<Vec<_>>(),
+        software.len()
+    );
+    let mut attempts = Vec::new();
+    for &target in &plan {
+        match target {
+            Target::Gpu(index) => {
+                let Some(gpu) = gpus.iter().find(|g| g.info.index == index) else {
+                    continue;
+                };
+                let zero_copy = devices::luid_key(gpu.luid) == devices::luid_key(capture);
+                let built = (|| -> Result<(IMFDXGIDeviceManager, Delivery)> {
+                    if zero_copy {
+                        Ok((mf_device_manager(device)?, Delivery::ZeroCopy))
+                    } else {
+                        let (other, other_context) = devices::create_device(&gpu.adapter)?;
+                        let protection = ContextProtection::enable(&other_context)?;
+                        Ok((
+                            mf_device_manager(&other)?,
+                            Delivery::CrossAdapter {
+                                device: other,
+                                _protection: protection,
+                            },
+                        ))
+                    }
+                })();
+                let (manager, delivery) = match built {
+                    Ok(built) => built,
+                    Err(error) => {
+                        attempts.push(format!("gpu{index}: device setup failed: {error:#}"));
+                        continue;
+                    }
+                };
+                for (slot, activate) in devices::hardware_encoders_on(gpu.luid, sub)
+                    .into_iter()
+                    .enumerate()
+                {
+                    match configure_encoder(&activate, codec, &manager, true, Some(GOP_FRAMES)) {
+                        Ok(encoder) => {
+                            return Ok(Pipeline {
+                                selected: Selected {
+                                    encoder,
+                                    activate,
+                                    hardware: true,
+                                    index: slot,
+                                },
+                                delivery,
+                                _manager: manager,
+                                target,
+                                adapter: Some((
+                                    index,
+                                    gpu.info.kind.as_str(),
+                                    gpu.vendor,
+                                    zero_copy,
+                                )),
+                                plan: plan.clone(),
+                                attempts,
+                            });
+                        }
+                        Err(error) => {
+                            // SAFETY: Release the failed activation's object.
+                            unsafe {
+                                let _ = activate.ShutdownObject();
+                            }
+                            attempts.push(format!("gpu{index}#{slot}: {error:#}"));
+                        }
+                    }
+                }
+            }
+            Target::Cpu => {
+                let manager = mf_device_manager(device)?;
+                for (slot, activate) in software.iter().enumerate() {
+                    match configure_encoder(activate, codec, &manager, false, Some(GOP_FRAMES)) {
+                        Ok(encoder) => {
+                            return Ok(Pipeline {
+                                selected: Selected {
+                                    encoder,
+                                    activate: activate.clone(),
+                                    hardware: false,
+                                    index: slot,
+                                },
+                                delivery: Delivery::SystemMemory,
+                                _manager: manager,
+                                target,
+                                adapter: None,
+                                plan: plan.clone(),
+                                attempts,
+                            });
+                        }
+                        Err(error) => {
+                            // SAFETY: Release the failed activation's object.
+                            unsafe {
+                                let _ = activate.ShutdownObject();
+                            }
+                            attempts.push(format!("cpu#{slot}: {error:#}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    bail!("every planned encoder failed: {attempts:?}")
+}
+
+/// `--devices`: adapters, Windows' preference ranks and encoders per codec.
+pub fn devices_report() -> Result<serde_json::Value> {
+    let _runtime = Runtime::start()?;
+    let mut adapters: Vec<serde_json::Value> = Vec::new();
+    let mut software = serde_json::Map::new();
+    for codec in Codec::ALL {
+        let sub = subtype(codec);
+        software.insert(
+            codec.as_str().into(),
+            enumerate(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                SOFTWARE,
+                Some(MFVideoFormat_NV12),
+                Some(sub),
+            )
+            .len()
+            .into(),
+        );
+        for gpu in devices::adapters(None, sub)? {
+            let index = gpu.info.index as usize;
+            if adapters.len() <= index {
+                adapters.push(serde_json::json!({
+                    "index": gpu.info.index,
+                    "name": gpu.name,
+                    "vendor": gpu.vendor,
+                    "kind": gpu.info.kind.as_str(),
+                    "dedicated_mib": gpu.dedicated_mib,
+                    "high_performance_rank": gpu.info.high_performance_rank,
+                    "minimum_power_rank": gpu.info.minimum_power_rank,
+                    "default_capture_gpu": gpu.info.is_capture,
+                    "hardware_encoders": {},
+                }));
+            }
+            adapters[index]["hardware_encoders"][codec.as_str()] =
+                gpu.info.hardware_encoders.into();
+        }
+    }
+    Ok(serde_json::json!({"adapters": adapters, "software_encoders": software}))
+}
+
 /// Live sender: paced 20 FPS motion stream, each unit packetized and sent the
 /// moment the encoder releases it. Loopback destinations only.
+/// What to stream and where, as chosen on the command line.
+#[derive(Debug, Clone, Copy)]
+pub struct SendRequest {
+    pub destination: SocketAddr,
+    pub codec: Codec,
+    pub frames: u32,
+    /// Deliberately drop this packet index (loss-recovery test).
+    pub drop_packet: Option<u64>,
+    pub preference: Preference,
+}
+
 pub fn rtp_send(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     texture: &ID3D11Texture2D,
-    codec: Codec,
-    destination: SocketAddr,
-    frames: u32,
-    drop_packet: Option<u64>,
+    request: SendRequest,
 ) -> Result<serde_json::Value> {
+    let SendRequest {
+        destination,
+        codec,
+        frames,
+        drop_packet,
+        preference,
+    } = request;
     ensure!(
         destination.ip().is_loopback(),
         "the RTP diagnostic sends to loopback only"
@@ -850,29 +1170,56 @@ pub fn rtp_send(
     ensure!((1..=600).contains(&frames), "frames must be 1..=600");
     let _runtime = Runtime::start()?;
     let _protection = ContextProtection::enable(context)?;
-    let manager = mf_device_manager(device)?;
     let motion = Motion::new(device, context, texture)?;
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
     socket.connect(destination)?;
-    let (selected, attempts) = select_encoder(codec, &manager, Some(GOP_FRAMES));
-    let Selected {
-        encoder,
-        activate,
-        hardware,
-        ..
-    } = selected.with_context(|| format!("no usable encoder: {attempts:?}"))?;
+    let pipeline = build_pipeline(codec, device, context, preference)?;
+    let encoder = &pipeline.selected.encoder;
+    let hardware = pipeline.selected.hardware;
+    let attempts = pipeline.attempts.clone();
+    let submitted = std::cell::RefCell::new(vec![None::<Instant>; frames as usize]);
+    let mut copy_ms = Vec::new();
+    let mut latency_ms = Vec::new();
     let header = sequence_header(&encoder.transform);
     let gop_applied = encoder.gop_applied;
+    let low_latency_applied = encoder.low_latency_applied;
+    let zero_b_frames_applied = encoder.zero_b_frames_applied;
     let (mut sequence, mut packets, mut bytes, mut units, mut keyframes) =
         (0u16, 0u64, 0u64, 0u64, 0u64);
     let mut header_prepended = false;
     let started = Instant::now();
     let result = run_encoder(
-        &encoder,
+        encoder,
         i64::from(frames),
         true,
-        &mut |frame| motion.sample(frame),
+        &mut |frame| {
+            let nv12 = motion.nv12(frame)?;
+            let copy_started = Instant::now();
+            let sample = match &pipeline.delivery {
+                Delivery::ZeroCopy => gpu_sample(&nv12, frame)?,
+                Delivery::CrossAdapter { device: target, .. } => {
+                    let bytes = devices::readback_nv12(device, context, &nv12)?;
+                    let uploaded = devices::upload_nv12(target, &bytes)?;
+                    copy_ms.push(copy_started.elapsed().as_secs_f64() * 1000.0);
+                    gpu_sample(&uploaded, frame)?
+                }
+                Delivery::SystemMemory => {
+                    let bytes = devices::readback_nv12(device, context, &nv12)?;
+                    copy_ms.push(copy_started.elapsed().as_secs_f64() * 1000.0);
+                    memory_sample(&bytes, frame)?
+                }
+            };
+            if let Some(slot) = submitted.borrow_mut().get_mut(frame as usize) {
+                *slot = Some(Instant::now());
+            }
+            Ok(sample)
+        },
         &mut |mut unit, time| {
+            if time >= 0
+                && let Some(Some(at)) = submitted.borrow().get((time / FRAME_100NS) as usize)
+            {
+                latency_ms.push(at.elapsed().as_secs_f64() * 1000.0);
+            }
             let mut au = inspect(codec, &unit).context("encoder emitted a malformed unit")?;
             if units == 0
                 && !au.parameter_sets
@@ -911,16 +1258,22 @@ pub fn rtp_send(
         },
     );
     let elapsed = started.elapsed().as_secs_f64();
-    drop(encoder);
-    // SAFETY: Release the activated object after use.
-    unsafe {
-        let _ = activate.ShutdownObject();
-    }
+    let target = pipeline.describe();
+    drop(pipeline);
     result?;
+    copy_ms.sort_by(f64::total_cmp);
+    latency_ms.sort_by(f64::total_cmp);
     Ok(serde_json::json!({
         "codec": codec.as_str(),
         "encoder_kind": if hardware { "hardware" } else { "software" },
-        "skipped_candidates": attempts.len(),
+        "target": target,
+        "copy_ms": {"p50": percentile(&copy_ms, 0.5), "p95": percentile(&copy_ms, 0.95)},
+        "encode_latency_ms": {
+            "p50": percentile(&latency_ms, 0.5),
+            "p95": percentile(&latency_ms, 0.95),
+            "max": latency_ms.last().copied().unwrap_or(0.0),
+        },
+        "skipped_candidates": attempts,
         "frames_in": frames,
         "units_sent": units,
         "keyframes_sent": keyframes,
@@ -928,6 +1281,8 @@ pub fn rtp_send(
         "bytes_sent": bytes,
         "gop_requested": GOP_FRAMES,
         "gop_accepted_by_encoder": gop_applied,
+        "low_latency_accepted": low_latency_applied,
+        "zero_b_frames_accepted": zero_b_frames_applied,
         "deliberately_dropped_packet": drop_packet,
         "header_prepended_from_media_type": header_prepended,
         "elapsed_seconds": elapsed,

@@ -1,7 +1,7 @@
 import copy
 import unittest
 
-from check_native_rtp import validate, validate_loss
+from check_native_rtp import placement_failures, validate, validate_loss
 
 RECEIVER = {
     "units_received": 60, "lost_packets": 0, "dropped_units": 0,
@@ -41,6 +41,18 @@ class LiveRtpValidationTests(unittest.TestCase):
         self.assertEqual(validate_loss(rx, 60), [])
         rx["withheld_awaiting_keyframe"] = 0
         self.assertIn("frames withheld until keyframe", validate_loss(rx, 60))
+
+
+    def test_placement_must_match_request(self):
+        tx = {"target": {"adapter_kind": "integrated", "delivery": "cross_adapter_copy",
+                         "adapter_is_capture_gpu": False}}
+        self.assertEqual(placement_failures(tx, "hardware", "minimum-power"), [])
+        self.assertTrue(placement_failures(tx, "hardware", "high-performance"))
+        cpu = {"target": {"adapter_kind": "cpu", "delivery": "system_memory",
+                          "adapter_is_capture_gpu": False}}
+        self.assertEqual(placement_failures(cpu, "software", "auto"), [])
+        self.assertTrue(placement_failures(tx, "software", "auto"))
+        self.assertEqual(placement_failures(tx, "auto", "auto"), [])
 
 
 if __name__ == "__main__":
