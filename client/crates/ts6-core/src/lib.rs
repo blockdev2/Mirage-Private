@@ -14,6 +14,7 @@ pub mod identity;
 pub mod media;
 pub mod session;
 pub mod state;
+pub mod streams;
 
 pub use config::ClientConfig;
 pub use session::{ChatTarget, Item, Session, TextMessage, Wake};

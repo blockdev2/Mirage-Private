@@ -14,7 +14,17 @@ Both frontends implement current-channel text chat through the bridge. Browser s
 
 **Experimental software:** the RustCrypto advisory identified in the historical audit has been addressed by a dependency migration. Publication uses a clean source import; unsafe local historical commits are excluded. Private security reporting and production readiness still require follow-up. See [publication verification](docs/PUBLICATION.md) and the [historical audit](docs/AUDIT.md).
 
-Fresh local-server results and the remaining feature gaps are tracked in [compatibility status](docs/compatibility-status.md).
+Local-server results and remaining feature gaps are tracked in [compatibility status](docs/compatibility-status.md). Later tests of the integrated backend against an owner-provided remote server, including chat and synthetic voice in both connection orders, are recorded in [integrated live validation](docs/live-validation-integrated.md).
+
+Manual stream-control and synthetic WebRTC diagnostics now exercise signaling
+and decoded video fixtures. These are not a native screen-sharing feature;
+end-user capture, hardware codecs and official-viewer video remain unverified. A
+standalone [owned-window capture probe](recon/probe-capture/README.md) validates
+WGC, resizing and a GPU texture copy with one final readback. Its optional H.264
+file diagnostic also passed independent decoding of a repeated synthetic frame;
+actual encoder hardware and native live streaming remain unverified. See
+[streaming research](docs/persistent-chat-and-streaming-research.md) and the
+[native pipeline direction](docs/native-streaming-architecture.md).
 
 ## Requirements
 

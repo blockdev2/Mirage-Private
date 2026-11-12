@@ -50,6 +50,11 @@ messages in memory and is not restored after page/application reload.
 
 ## Verification
 
+For the integrated revision's later live checks, including connection-stage
+failures across repeated runs, see [integrated live validation](live-validation-integrated.md).
+The historical results below do not establish a consistently passing integrated
+connection/reconnect sequence.
+
 Against an isolated loopback TeamSpeak Server 6.0.0-beta13.1 instance:
 
 - `scripts/check_channel_chat.py` exercised two independent bridge identities,
