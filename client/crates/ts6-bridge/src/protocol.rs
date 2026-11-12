@@ -19,6 +19,13 @@ pub enum Command {
         #[serde(default)]
         server_password: Option<String>,
     },
+    Chat {
+        #[serde(default)]
+        session_id: String,
+        channel: String,
+        text: String,
+        request_id: String,
+    },
     Disconnect,
     Join {
         channel: String,
@@ -76,11 +83,6 @@ pub enum Command {
         #[serde(default)]
         path: Option<String>,
     },
-    /// Send a text message to the channel we are in. Delivery is proven only
-    /// by the server echoing it back as a [`Event::Chat`] from ourselves.
-    Chat {
-        text: String,
-    },
     /// Internal: a file download finished (sent by the bridge's own tasks).
     #[serde(skip)]
     MediaDone {
@@ -103,6 +105,7 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Connect { .. } => "Connect",
+            Self::Chat { .. } => "Chat",
             Self::Disconnect => "Disconnect",
             Self::Join { .. } => "Join",
             Self::Nick { .. } => "Nick",
@@ -116,7 +119,6 @@ impl std::fmt::Debug for Command {
             Self::Tick => "Tick",
             Self::Volume { .. } => "Volume",
             Self::ConnectionInfo { .. } => "ConnectionInfo",
-            Self::Chat { .. } => "Chat",
         })
     }
 }
@@ -153,11 +155,29 @@ pub struct DeviceLists {
 #[derive(Debug, Serialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event<'a> {
+    Chat {
+        channel: String,
+        sender: String,
+        text: String,
+        from_self: bool,
+        ts: String,
+    },
+    /// Answer to one `chat` command. `error` is human-readable English;
+    /// `code` is the stable machine-readable reason (`not_connected`,
+    /// `stale_session`, `stale_channel`, `invalid` or `not_confirmed`). A
+    /// `not_confirmed` send may still have reached the server.
+    ChatResult {
+        request_id: String,
+        error: Option<&'a str>,
+        code: Option<&'a str>,
+    },
     Hello {
         version: &'a str,
+        channel_chat: bool,
         devices: DeviceLists,
     },
     Status {
+        session_id: Option<&'a str>,
         connected: bool,
         address: Option<&'a str>,
         nickname: Option<&'a str>,
@@ -192,23 +212,6 @@ pub enum Event<'a> {
     ConnectionInfo {
         client: u16,
         info: Option<&'a ts6_core::ConnectionInfo>,
-    },
-    /// A text message received from the server (or echoed back after we sent
-    /// one). `scope` is `channel`, `server` or `private`.
-    Chat {
-        scope: &'a str,
-        from_id: Option<u16>,
-        from_name: Option<&'a str>,
-        text: &'a str,
-        from_self: bool,
-    },
-    /// The server accepted the oldest message we sent. TeamSpeak does not echo
-    /// a message back to its sender, so this is the delivery confirmation.
-    ChatSent,
-    /// A message we tried to send did not leave. `code` is one of
-    /// `not_connected`, `empty`, `too_long` or `rejected`.
-    ChatFailed {
-        code: &'a str,
     },
     /// Cached avatar files by client uid and the server icon file, as local
     /// paths (images are too large for a WebSocket message).
@@ -261,6 +264,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_chat_command_is_supported_without_logging_content() {
+        let command: Command = serde_json::from_str(
+            r#"{"op":"chat","channel":"1","text":"private fixture text","request_id":"fixture-1"}"#,
+        )
+        .expect("channel chat command");
+        assert!(!format!("{command:?}").contains("private fixture text"));
+    }
+
+    #[test]
     fn command_diagnostics_never_include_passwords() {
         let command: Command = serde_json::from_str(
             r#"{"op":"connect","address":"example.org","server_password":"fixture-sensitive-value"}"#,
@@ -289,34 +301,9 @@ mod tests {
     }
 
     #[test]
-    fn chat_command_parses_and_hides_its_text() {
-        let command: Command =
-            serde_json::from_str(r#"{"op":"chat","text":"fixture-private-text"}"#).unwrap();
-        assert!(matches!(&command, Command::Chat { text } if text == "fixture-private-text"));
-        assert!(!format!("{command:?}").contains("fixture-private-text"));
-    }
-
-    #[test]
-    fn chat_events_serialize_with_a_type_tag() {
-        let json = serde_json::to_string(&Event::Chat {
-            scope: "channel",
-            from_id: Some(4),
-            from_name: Some("ana"),
-            text: "oi",
-            from_self: false,
-        })
-        .unwrap();
-        assert!(json.contains(r#""ev":"chat""#), "{json}");
-        assert!(json.contains(r#""scope":"channel""#));
-        let json = serde_json::to_string(&Event::ChatSent).unwrap();
-        assert!(json.contains(r#""ev":"chat_sent""#), "{json}");
-        let json = serde_json::to_string(&Event::ChatFailed { code: "rejected" }).unwrap();
-        assert!(json.contains(r#""ev":"chat_failed""#), "{json}");
-    }
-
-    #[test]
     fn events_serialize_with_a_type_tag() {
         let json = serde_json::to_string(&Event::Status {
+            session_id: None,
             connected: true,
             address: Some("127.0.0.1:9987"),
             nickname: Some("tester"),

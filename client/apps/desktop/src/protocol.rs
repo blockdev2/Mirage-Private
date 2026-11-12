@@ -83,6 +83,8 @@ pub struct ConnectionInfo {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StatusEvent {
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub connected: bool,
     pub address: Option<String>,
     pub nickname: Option<String>,
@@ -118,8 +120,18 @@ pub struct LogLine {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum BridgeEvent {
+    Chat(ChatMessage),
+    /// Answer to one `chat` command; `code` is absent on older bridges.
+    ChatResult {
+        request_id: String,
+        error: Option<String>,
+        #[serde(default)]
+        code: Option<String>,
+    },
     Hello {
         version: String,
+        #[serde(default)]
+        channel_chat: bool,
         devices: DeviceLists,
     },
     Status(StatusEvent),
@@ -134,24 +146,6 @@ pub enum BridgeEvent {
     ConnectionInfo {
         client: u16,
         info: Option<ConnectionInfo>,
-    },
-    /// A text message from the server, or the echo of one we sent. `scope` is
-    /// `channel`, `server` or `private`.
-    Chat {
-        scope: String,
-        #[serde(default)]
-        from_id: Option<u16>,
-        #[serde(default)]
-        from_name: Option<String>,
-        text: String,
-        from_self: bool,
-    },
-    /// The server accepted the oldest message we sent.
-    ChatSent,
-    /// A message we sent did not leave. `code` is `not_connected`, `empty`,
-    /// `too_long` or `rejected`.
-    ChatFailed {
-        code: String,
     },
     /// Local paths of cached avatars (by client uid) and of the server icon.
     Media {
@@ -168,6 +162,12 @@ pub enum BridgeEvent {
 #[derive(Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
+    Chat {
+        session_id: String,
+        channel: String,
+        text: String,
+        request_id: String,
+    },
     Connect {
         address: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,15 +212,26 @@ pub enum Command {
     SetAvatar {
         path: Option<String>,
     },
-    /// Send a message to the channel we are in.
-    Chat {
-        text: String,
-    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_chat_events_preserve_scope_and_request_results() {
+        let event: BridgeEvent = serde_json::from_str(r#"{"ev":"chat","channel":"3","sender":"fixture","text":"hello","from_self":false,"ts":"12:00:00"}"#).unwrap();
+        assert!(
+            matches!(event, BridgeEvent::Chat(message) if message.channel == "3" && message.text == "hello")
+        );
+        let result: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"chat_result","request_id":"fixture-1","error":"stale channel"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, BridgeEvent::ChatResult { request_id, error: Some(_), .. } if request_id == "fixture-1")
+        );
+    }
 
     #[test]
     fn parses_state_event() {
@@ -253,27 +264,30 @@ mod tests {
     }
 
     #[test]
-    fn parses_chat_events() {
-        let chat: BridgeEvent = serde_json::from_str(
-            r#"{"ev":"chat","scope":"channel","from_id":4,"from_name":"ana","text":"oi","from_self":false}"#,
+    fn serializes_the_correlated_chat_command() {
+        let json = serde_json::to_string(&Command::Chat {
+            session_id: "s1".into(),
+            channel: "3".into(),
+            text: "oi".into(),
+            request_id: "r1".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"op":"chat","session_id":"s1","channel":"3","text":"oi","request_id":"r1"}"#
+        );
+        let result: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"chat_result","request_id":"r1","error":null,"code":null}"#,
         )
         .unwrap();
         assert!(matches!(
-            chat,
-            BridgeEvent::Chat {
-                from_id: Some(4),
+            result,
+            BridgeEvent::ChatResult {
+                error: None,
+                code: None,
                 ..
             }
         ));
-        let failed: BridgeEvent =
-            serde_json::from_str(r#"{"ev":"chat_failed","code":"rejected"}"#).unwrap();
-        assert!(matches!(failed, BridgeEvent::ChatFailed { code } if code == "rejected"));
-    }
-
-    #[test]
-    fn serializes_the_chat_command() {
-        let json = serde_json::to_string(&Command::Chat { text: "oi".into() }).unwrap();
-        assert_eq!(json, r#"{"op":"chat","text":"oi"}"#);
     }
 
     #[test]
@@ -293,4 +307,13 @@ mod tests {
         .unwrap();
         assert_eq!(json, r#"{"op":"connect","address":"127.0.0.1:9987"}"#);
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatMessage {
+    pub channel: String,
+    pub sender: String,
+    pub text: String,
+    pub from_self: bool,
+    pub ts: String,
 }

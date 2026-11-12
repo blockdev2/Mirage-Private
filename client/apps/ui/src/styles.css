@@ -680,3 +680,7 @@ select:focus-visible,
 *::-webkit-scrollbar-track {
   background: transparent;
 }
+
+.chat-history { max-height: 240px; overflow-y: auto; padding: 0 20px; }
+.chat-message { margin: 10px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-message small { color: var(--muted); }

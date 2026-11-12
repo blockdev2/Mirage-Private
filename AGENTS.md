@@ -4,6 +4,17 @@
 
 Read this file, [README.md](README.md), [architecture](docs/architecture.md), and the affected source and dependency manifests before editing. Use [development](docs/DEVELOPMENT.md) for commands. [CLAUDE.md](CLAUDE.md) adds orientation, not a second policy.
 
+Read ignored `AGENTS.local.md`, when present, for this checkout's local assignment. Never publish its private content.
+
+If an ignored `AGENTS.local.md` exists in this checkout, read it for local task
+context. Never publish its workstation-specific content. The shared
+[team integration policy](docs/TEAM_INTEGRATION.md) requires topic branches and
+pull requests; never update main directly or consolidate competing team work
+without the owner's explicit integration authorization.
+
+Protocol research references and their evidence limits are recorded in
+[the TeamSpeak Go review](docs/protocol-reference-teamspeak-go.md).
+
 ## Required workflow
 
 **Inspect → Understand → Plan → Implement → Test → Review → Document → Report.**
@@ -36,12 +47,12 @@ Do not push, publish, release, rewrite history, or perform destructive operation
 - An invalid PTT binding must disable transmission. Never fall back to a continuously transmitting microphone.
 - Preserve identities and fail visibly on malformed identity files. Keep POSIX mode 0600; Windows storage requires a user-protected directory ACL.
 - Follow [UPSTREAM.md](client/UPSTREAM.md) for vendored changes; retain licenses and record patches without reproducing secrets.
-- Matrix/WebRTC/S3 and Tauri packaging are not implemented. No non-Windows compatibility claim is established.
+- Matrix/WebRTC/S3 and installer/release packaging are not implemented. The native frontend uses eframe/egui, not Tauri. No non-Windows compatibility claim is established.
 
 ## Verification
 
 From the repository root: `python scripts/check_repository.py`.
-From `client`: `./scripts/build.ps1 test --locked --workspace`, `cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -- --check`, and `cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings`.
+From `client`: `./scripts/build.ps1 test --locked --workspace`, `cargo fmt -p ts6-core -p ts6-audio -p ts6-input -p ts6-cli -p ts6-bridge -p ts6-desktop -- --check`, and `cargo clippy --locked --workspace --all-targets --no-deps -- -D warnings`.
 From `client/apps/ui`: `npm ci --ignore-scripts`, `npm run build`, and `npm audit`.
 For dependency changes run `cargo audit --file client/Cargo.lock` from the root. See [AUDIT.md](docs/AUDIT.md) for known blockers; do not add advisory ignores to produce a green result.
 Live server/audio claims require a separately authorized local experiment and a sanitized record of server version, ordering, command, and result.

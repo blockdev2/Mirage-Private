@@ -4,7 +4,11 @@ This is an experimental Windows client. Start with the [README](README.md), [arc
 
 ## Language and evidence
 
-Write all first-party content in English, including comments, tests, logs, UI text, issues, pull requests, and commit messages. Preserve protocol identifiers and third-party legal notices. Every technical claim needs code, configuration, an official source, or an executed check. Describe uncertainty explicitly. AI-assisted contributions follow [AGENTS.md](AGENTS.md); contributors remain responsible for every submitted line.
+Write first-party comments, tests, logs, documentation, issues, pull requests, and commit messages in English. Native desktop end-user text may use professional Brazilian Portuguese, consistently with AGENTS.md. Preserve protocol identifiers and third-party legal notices. Every technical claim needs code, configuration, an official source, or an executed check. Describe uncertainty explicitly. AI-assisted contributions follow [AGENTS.md](AGENTS.md); contributors remain responsible for every submitted line.
+
+Follow [team integration](docs/TEAM_INTEGRATION.md): changes enter main through
+pull requests, and cross-branch consolidation requires explicit owner direction.
+Inspect current remote work first; colleagues may also have unpushed changes.
 
 ## Work and submit
 
