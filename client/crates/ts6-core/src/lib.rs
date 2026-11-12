@@ -9,11 +9,13 @@
 //! are sent through [`Session::send_command`], the same raw path the type-safe
 //! commands use, so the TS6 layer can live entirely in this crate.
 
+pub mod attachments;
 pub mod config;
 pub mod identity;
 pub mod media;
 pub mod session;
 pub mod state;
+pub mod streams;
 
 pub use config::ClientConfig;
 pub use session::{ChatTarget, Item, Session, TextMessage, Wake};

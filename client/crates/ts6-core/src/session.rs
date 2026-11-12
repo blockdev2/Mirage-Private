@@ -570,6 +570,40 @@ impl Session {
         Ok(handle.0)
     }
 
+    /// Upload `size` bytes to `path` in a channel's file transfer (chat
+    /// attachments). Never overwrites: attachment names are unique.
+    pub fn request_channel_upload(
+        &mut self,
+        channel_id: u64,
+        path: &str,
+        size: u64,
+    ) -> Result<u16> {
+        let handle = self.con.upload_file(
+            tsclientlib::ChannelId(channel_id),
+            path,
+            None,
+            size,
+            false,
+            false,
+        )?;
+        Ok(handle.0)
+    }
+
+    /// Download `path` from a channel's file transfer (chat attachments).
+    pub fn request_channel_download(&mut self, channel_id: u64, path: &str) -> Result<u16> {
+        let handle =
+            self.con
+                .download_file(tsclientlib::ChannelId(channel_id), path, None, None)?;
+        Ok(handle.0)
+    }
+
+    /// The connected server's unique identifier (derived from its public
+    /// key, as TeamSpeak clients do), used in `ts3file://` links.
+    pub fn server_unique_id(&self) -> Option<String> {
+        let state = self.con.get_state().ok()?;
+        Some(state.server.public_key.get_uid())
+    }
+
     /// Ask the server for a client's connection statistics. Does not wait: the
     /// answer updates the bookkeeping and arrives as [`Item::StateChanged`];
     /// read it with [`Session::connection_info`].

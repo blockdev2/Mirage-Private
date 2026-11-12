@@ -4,6 +4,12 @@ Date: 2026-11-12. This client is intended to connect directly to official TeamSp
 
 ## Fresh verification
 
+For later checks of the integrated backend against local and owner-authorized
+remote beta13.1 servers, see [integrated live validation](live-validation-integrated.md).
+That record includes independently received chat, synthetic voice in both
+connection orders, and unresolved local connection refusals. The historical
+measurements below retain their original scope.
+
 The local server identified itself through the client snapshot as **6.0.0-beta13.1**. A fresh CLI handshake succeeded, returned one channel and included the connecting client. Version reporting establishes the responding software's self-identification, not an independent binary authenticity proof.
 
 The rebuilt bridge was launched on a separate local port using its own ignored profile. The actual UI JSON protocol successfully exercised connect, snapshot, nickname change, input/output mute and unmute, refresh, and disconnect against that server. No microphone or playback source was enabled. `scripts/check_ts6_bridge.py` reproduces this integration and stops only its own bridge process. The ordinary smoke test also passed HTTP assets, permitted/hostile WebSocket access, and oversized message rejection. These are service/wire tests, not a rendered-browser interaction or accessibility audit.

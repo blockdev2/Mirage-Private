@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::protocol::Command;
+use ts6_core::attachments::{self, ChannelFile, ServerRef, MAX_ATTACHMENT_BYTES};
 use ts6_core::media::{avatar_flag, avatar_path, icon_path, MAX_MEDIA_BYTES};
 use ts6_core::{Session, Snapshot};
 
@@ -65,6 +66,50 @@ pub struct Media {
     attempted: HashSet<Target>,
     /// Bytes waiting for the server to accept an upload, by handle.
     uploads: HashMap<u16, (Vec<u8>, String)>,
+    /// Chat attachments waiting for the server to accept their upload.
+    chat_uploads: HashMap<u16, PendingAttachment>,
+    /// Chat attachment downloads in flight: (channel, server path, cache file).
+    chat_downloads: HashMap<u16, (u64, String, PathBuf)>,
+}
+
+/// An outgoing chat attachment between the upload request and the message.
+struct PendingAttachment {
+    bytes: Vec<u8>,
+    request_id: String,
+    channel: u64,
+    message: String,
+}
+
+/// Why the server refused an attachment upload. Default servers give the
+/// guest group download power but no upload power, so a permission refusal
+/// is common and deserves its own explanation.
+pub fn upload_refusal(error: &str) -> (&'static str, &'static str) {
+    if error.contains("Permission") {
+        (
+            "upload_permission",
+            "This server does not let you upload files to this channel. Ask an admin for upload permission.",
+        )
+    } else {
+        (
+            "upload_refused",
+            "The server refused the file (quota, size limit or file transfer disabled).",
+        )
+    }
+}
+
+/// Which outstanding request a failed transfer belonged to.
+pub enum Failed {
+    Avatar(String),
+    Attachment {
+        request_id: String,
+        /// Stable code and English message for `chat_result`.
+        refusal: (&'static str, &'static str),
+    },
+    ChatFile {
+        channel: u64,
+        path: String,
+    },
+    Unknown,
 }
 
 impl Media {
@@ -83,6 +128,8 @@ impl Media {
             in_flight: HashMap::new(),
             attempted: HashSet::new(),
             uploads: HashMap::new(),
+            chat_uploads: HashMap::new(),
+            chat_downloads: HashMap::new(),
         }
     }
 
@@ -93,6 +140,8 @@ impl Media {
         self.in_flight.clear();
         self.attempted.clear();
         self.uploads.clear();
+        self.chat_uploads.clear();
+        self.chat_downloads.clear();
     }
 
     pub fn avatars(&self) -> HashMap<String, String> {
@@ -219,6 +268,27 @@ impl Media {
         stream: tokio::net::TcpStream,
         done: &mpsc::Sender<Command>,
     ) {
+        if let Some((channel, path, cache)) = self.chat_downloads.remove(&handle) {
+            let done = done.clone();
+            tokio::spawn(async move {
+                let saved = tokio::time::timeout(
+                    TRANSFER_TIMEOUT,
+                    receive(stream, size, MAX_ATTACHMENT_BYTES, &cache),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(|()| cache.display().to_string());
+                let _ = done
+                    .send(Command::ChatFileDone {
+                        channel,
+                        path,
+                        file: saved,
+                    })
+                    .await;
+            });
+            return;
+        }
         let Some(target) = self.in_flight.remove(&handle) else {
             return;
         };
@@ -228,11 +298,14 @@ impl Media {
         let done = done.clone();
         tokio::spawn(async move {
             let path = dir.join(name);
-            let saved = tokio::time::timeout(TRANSFER_TIMEOUT, receive(stream, size, &path))
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .map(|()| path.display().to_string());
+            let saved = tokio::time::timeout(
+                TRANSFER_TIMEOUT,
+                receive(stream, size, MAX_MEDIA_BYTES, &path),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|()| path.display().to_string());
             let _ = done
                 .send(Command::MediaDone {
                     target,
@@ -242,14 +315,26 @@ impl Media {
         });
     }
 
-    pub fn on_failed(&mut self, handle: u16, error: &str) -> Option<String> {
+    pub fn on_failed(&mut self, handle: u16, error: &str) -> Failed {
         if let Some(target) = self.in_flight.remove(&handle) {
             tracing::debug!(?target, %error, "file download failed");
-            return None;
+            return Failed::Unknown;
         }
-        self.uploads
-            .remove(&handle)
-            .map(|_| format!("avatar upload failed: {error}"))
+        if let Some(pending) = self.chat_uploads.remove(&handle) {
+            tracing::debug!(%error, "chat attachment upload refused");
+            return Failed::Attachment {
+                request_id: pending.request_id,
+                refusal: upload_refusal(error),
+            };
+        }
+        if let Some((channel, path, _)) = self.chat_downloads.remove(&handle) {
+            tracing::debug!(%error, "chat attachment download refused");
+            return Failed::ChatFile { channel, path };
+        }
+        match self.uploads.remove(&handle) {
+            Some(_) => Failed::Avatar(format!("avatar upload failed: {error}")),
+            None => Failed::Unknown,
+        }
     }
 
     /// A finished download, reported by the reading task.
@@ -278,6 +363,98 @@ impl Media {
         Ok(())
     }
 
+    /// Starts sending a chat attachment: uploads it to the channel's file
+    /// transfer, then (in `on_upload`) asks the loop to post the message.
+    pub fn start_attachment(
+        &mut self,
+        session: &mut Session,
+        channel: u64,
+        file: &Path,
+        request_id: String,
+    ) -> anyhow::Result<()> {
+        let size = std::fs::metadata(file)?.len();
+        if size == 0 || size > MAX_ATTACHMENT_BYTES {
+            anyhow::bail!("attachments must be between 1 byte and 5 MB");
+        }
+        let bytes = std::fs::read(file)?;
+        if bytes.len() as u64 != size {
+            anyhow::bail!("file changed while it was being read");
+        }
+        let (kind, _) = attachments::sniff(&bytes);
+        let display = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = attachments::upload_name(&unique_token(), &display)
+            .ok_or_else(|| anyhow::anyhow!("unusable file name"))?;
+        let target = ChannelFile {
+            channel_id: channel,
+            dir: "/".into(),
+            name,
+            size: Some(size),
+        };
+        let (host, port) = split_address(session.address());
+        let server = ServerRef {
+            host,
+            port,
+            unique_id: session.server_unique_id().unwrap_or_default(),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let message = attachments::compose(kind, &target, &server, now);
+        let handle = session.request_channel_upload(channel, &target.path(), size)?;
+        self.chat_uploads.insert(
+            handle,
+            PendingAttachment {
+                bytes,
+                request_id,
+                channel,
+                message,
+            },
+        );
+        Ok(())
+    }
+
+    /// Fetches a chat attachment into the cache. Returns the cached file at
+    /// once when it is already there; otherwise the result arrives later as
+    /// `Command::ChatFileDone`.
+    pub fn fetch_chat_file(
+        &mut self,
+        session: &mut Session,
+        file: &ChannelFile,
+    ) -> anyhow::Result<Option<String>> {
+        let dir = self
+            .dir
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no cache directory"))?;
+        let path = file.path();
+        // Keyed by server, channel and path, so equal names on two servers
+        // never collide. Only hex reaches the file system.
+        let key = format!(
+            "{}|{}|{path}",
+            session.server_unique_id().unwrap_or_default(),
+            file.channel_id
+        );
+        let cache = dir.join(format!("chat_{}", avatar_flag(key.as_bytes())));
+        if cache.is_file() {
+            return Ok(Some(cache.display().to_string()));
+        }
+        let already = self
+            .chat_downloads
+            .values()
+            .any(|(channel, p, _)| *channel == file.channel_id && *p == path);
+        if !already {
+            if self.chat_downloads.len() >= MAX_IN_FLIGHT * 2 {
+                anyhow::bail!("too many attachment downloads in flight");
+            }
+            let handle = session.request_channel_download(file.channel_id, &path)?;
+            self.chat_downloads
+                .insert(handle, (file.channel_id, path, cache));
+        }
+        Ok(None)
+    }
+
     /// The server accepted an upload: write it in a task that reports back.
     pub fn on_upload(
         &mut self,
@@ -285,6 +462,25 @@ impl Media {
         mut stream: tokio::net::TcpStream,
         done: &mpsc::Sender<Command>,
     ) {
+        if let Some(pending) = self.chat_uploads.remove(&handle) {
+            let done = done.clone();
+            tokio::spawn(async move {
+                let sent = tokio::time::timeout(TRANSFER_TIMEOUT, async {
+                    stream.write_all(&pending.bytes).await?;
+                    stream.shutdown().await
+                })
+                .await
+                .is_ok_and(|result| result.is_ok());
+                let _ = done
+                    .send(Command::AttachmentSent {
+                        request_id: pending.request_id,
+                        channel: pending.channel,
+                        message: sent.then_some(pending.message),
+                    })
+                    .await;
+            });
+            return;
+        }
         let Some((bytes, flag)) = self.uploads.remove(&handle) else {
             return;
         };
@@ -305,9 +501,40 @@ impl Media {
     }
 }
 
+/// A short unique token for attachment names (time plus a process counter).
+fn unique_token() -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let counter = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}{counter:x}", nanos & 0xffff_ffff_ffff)
+}
+
+/// `host:port` (or `[v6]:port`); TeamSpeak's default voice port otherwise.
+fn split_address(address: &str) -> (String, u16) {
+    if let Some(rest) = address.strip_prefix('[') {
+        if let Some((host, tail)) = rest.split_once(']') {
+            let port = tail.strip_prefix(':').and_then(|p| p.parse().ok());
+            return (host.to_string(), port.unwrap_or(9987));
+        }
+    }
+    match address.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => {
+            (host.to_string(), port.parse().unwrap_or(9987))
+        }
+        _ => (address.to_string(), 9987),
+    }
+}
+
 /// Reads exactly `size` bytes into `path` through a temporary file.
-async fn receive(mut stream: tokio::net::TcpStream, size: u64, path: &Path) -> std::io::Result<()> {
-    if size == 0 || size > MAX_MEDIA_BYTES {
+async fn receive(
+    mut stream: tokio::net::TcpStream,
+    size: u64,
+    limit: u64,
+    path: &Path,
+) -> std::io::Result<()> {
+    if size == 0 || size > limit {
         return Err(std::io::Error::other("unexpected media size"));
     }
     let mut bytes = Vec::with_capacity(size as usize);
@@ -419,5 +646,35 @@ mod tests {
             Target::ServerIcon(1234).file_name().as_deref(),
             Some("icon_1234")
         );
+    }
+
+    #[test]
+    fn classifies_upload_refusals() {
+        // A default server gives guests download but no upload power.
+        assert_eq!(
+            upload_refusal("PermissionsClientInsufficient").0,
+            "upload_permission"
+        );
+        assert_eq!(
+            upload_refusal("PermissionsInsufficientGroupPower").0,
+            "upload_permission"
+        );
+        assert_eq!(
+            upload_refusal("FileTransferQuotaExceeded").0,
+            "upload_refused"
+        );
+        assert_eq!(upload_refusal("").0, "upload_refused");
+    }
+
+    #[test]
+    fn splits_server_addresses() {
+        assert_eq!(
+            split_address("voice.test:9988"),
+            ("voice.test".into(), 9988)
+        );
+        assert_eq!(split_address("voice.test"), ("voice.test".into(), 9987));
+        assert_eq!(split_address("[::1]:1234"), ("::1".into(), 1234));
+        assert_eq!(split_address("::1"), ("::1".into(), 9987));
+        assert_ne!(unique_token(), unique_token());
     }
 }

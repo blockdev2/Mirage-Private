@@ -48,7 +48,51 @@ This is not an exactly-once or offline-delivery guarantee. Switching channel or
 session resets the composer. Frontend history is limited to 200 received
 messages in memory and is not restored after page/application reload.
 
+## Attachments and emoji
+
+The native frontend sends photos, GIFs and other files of up to 5 MB (at most
+10 per message, matching the official client's limits). Mirage uses only the
+classic, account-free TeamSpeak mechanisms, so no myTS account is needed:
+
+1. `chat_attach` names an absolute local path (the native app picks the file;
+   the 16 KiB WebSocket limit rules out sending bytes over the wire). The bridge
+   reads and sniffs the file by content, never by name, and uploads it to the
+   current channel's file transfer under a unique `mirage-<token>-<name>` name
+   without overwriting anything.
+2. After the upload completes, the bridge posts a legacy BBCode message that
+   references it: `[IMG]ts3image://…?channel=…&path=…[/IMG]` for pictures and
+   `[URL=ts3file://…]name[/URL]` for other files. If the user changed channel
+   meanwhile, nothing is posted (`stale_channel`).
+3. Every `chat` event carries `attachments` parsed from the text (`picture`,
+   `file`, `web_picture`, `link`); text-only frontends can ignore it. `chat_fetch`
+   downloads a referenced file into the bridge cache and answers with
+   `chat_file` (`file` is a local path or `null`; `kind` comes from content).
+   Repeated fetches are served from the cache.
+
+`chat_result` codes added for attachments: `upload_permission` (the server
+denies upload power; default servers give the guest group download power but
+no `i_ft_file_upload_power`), `upload_refused` (quota, size or file transfer
+disabled) and `upload_failed` (the transfer broke). The desktop shows
+pictures inline (animated GIFs play), files as a save button, and web pictures
+and links as links. Web pictures are never fetched automatically, since that
+would reveal the user's address to whoever posted the URL.
+
+Common `:shortcode:` emoji (for example `:fire:`, `:thumbsup:`, `:joy:`) are
+expanded to Unicode before validation, so the 1024-byte limit applies to what
+is sent; shortcodes inside BBCode URLs are left alone. Unicode emoji pass
+through unchanged.
+
+The current official TS6 client sends its own attachments through the myTS
+central service and Matrix rooms, which need an account. Mirage does not
+implement that path yet; whether that client renders the legacy BBCode
+references above has not been checked.
+
 ## Verification
+
+For the integrated revision's later live checks, including connection-stage
+failures across repeated runs, see [integrated live validation](live-validation-integrated.md).
+The historical results below do not establish a consistently passing integrated
+connection/reconnect sequence.
 
 Against an isolated loopback TeamSpeak Server 6.0.0-beta13.1 instance:
 
@@ -66,6 +110,15 @@ The browser test used `scripts/check_chat_browser.py` with the installed Python
 Playwright/Chromium runtime because no Browser plugin was available. Private profiles and captures remain under ignored `.audit-local`.
 Do not publish those identities or raw captures. No official-client equivalence,
 long-running load, arbitrary server-version support, or acoustic test is claimed.
+
+`scripts/check_chat_attachments.py` checks attachments end to end with two
+bridges: emoji expansion, a PNG, an animated GIF and a Unicode-named text file
+each received as an attachment, fetched byte-identical and then served from the
+cache, plus refusal of oversized, missing and relative paths and stale
+sessions. On an isolated loopback TS6 server whose guest group was granted
+upload power, every case passed. On a default-permission server the uploads
+are refused with `upload_permission` and the check exits 2 (unverified)
+instead of passing.
 
 Reproduce the rendered check with a trusted server already running:
 

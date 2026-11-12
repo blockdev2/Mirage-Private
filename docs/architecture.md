@@ -68,7 +68,8 @@ Both frontends consume structured channel-message events and send a correlated
 `chat` command through the existing session owner. The bridge advertises the
 capability in `hello`. It validates the expected session and current channel,
 rejects blank/NUL/oversized content, and reports command acceptance separately
-from received messages. Frontends render received server events only and bound
-their in-memory history to 200 messages. No chat history is persisted. Private,
+from received messages. The browser renders received server events; the native
+frontend also tracks pending local sends and deduplicates matching echoes.
+Both bound their in-memory history to 200 messages. No chat history is persisted. Private,
 server, and poke messages retain their scope in the core and are not rendered
 as channel messages. See [channel chat](channel-chat.md) for verification limits.

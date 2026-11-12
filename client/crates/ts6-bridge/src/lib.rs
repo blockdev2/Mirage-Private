@@ -13,6 +13,9 @@ mod media;
 mod probe;
 mod protocol;
 
+/// Chat attachment parsing, shared with the native frontend.
+pub use ts6_core::attachments;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -481,11 +484,18 @@ async fn session_task(
                         Item::FileUpload { handle, stream } => {
                             media.on_upload(handle, stream, &internal)
                         }
-                        Item::FileFailed { handle, error } => {
-                            if let Some(text) = media.on_failed(handle, &error) {
-                                log(&events, "warn", text);
+                        Item::FileFailed { handle, error } => match media.on_failed(handle, &error)
+                        {
+                            media::Failed::Avatar(text) => log(&events, "warn", text),
+                            media::Failed::Attachment {
+                                request_id,
+                                refusal,
+                            } => publish_chat_result(&events, request_id, Some(refusal)),
+                            media::Failed::ChatFile { channel, path } => {
+                                publish_chat_file(&events, channel, path, None)
                             }
-                        }
+                            media::Failed::Unknown => {}
+                        },
                         Item::Audio(packet) => {
                             audio_items += 1;
                             if audio_items <= 3 || audio_items.is_multiple_of(100) {
@@ -499,6 +509,8 @@ async fn session_task(
                         Item::TextMessage(message) => {
                             if matches!(message.target, ts6_core::MessageTarget::Channel) {
                                 if let Some(channel) = message.channel_id.map(|id| id.to_string()) {
+                                    let attachments =
+                                        protocol::Attachment::from_text(&message.message);
                                     protocol::publish(
                                         &events,
                                         &Event::Chat {
@@ -506,6 +518,7 @@ async fn session_task(
                                             sender: message
                                                 .invoker_name
                                                 .unwrap_or_else(|| "Unknown sender".into()),
+                                            attachments,
                                             text: message.message,
                                             from_self: message.from_self,
                                             ts: format!("{} UTC", protocol::timestamp()),
@@ -710,6 +723,7 @@ async fn apply_command(
             text,
             request_id,
         } => {
+            let text = ts6_core::attachments::expand_shortcodes(&text);
             let failure = match session.as_mut() {
                 None => Some((
                     "not_connected",
@@ -749,6 +763,113 @@ async fn apply_command(
                 },
             );
         }
+
+        Command::ChatAttach {
+            session_id,
+            channel,
+            path,
+            request_id,
+        } => {
+            let failure = match session.as_mut() {
+                None => Some(("not_connected", "Not connected.")),
+                Some(_) if !std::path::Path::new(&path).is_absolute() => {
+                    Some(("invalid", "Attachments need an absolute file path."))
+                }
+                Some(active) if session_id != active.session_id() => Some((
+                    "stale_session",
+                    "The server session changed. Choose the file again.",
+                )),
+                Some(active) if own_channel(active).as_deref() != Some(channel.as_str()) => Some((
+                    "stale_channel",
+                    "The channel changed. Choose the file again.",
+                )),
+                Some(active) => match channel.parse::<u64>() {
+                    Err(_) => Some(("invalid", "Unknown channel.")),
+                    Ok(id) => match media.start_attachment(
+                        active,
+                        id,
+                        std::path::Path::new(&path),
+                        request_id.clone(),
+                    ) {
+                        // The result follows when the upload ends.
+                        Ok(()) => return,
+                        Err(error) => {
+                            tracing::debug!(%error, "attachment rejected locally");
+                            Some((
+                                "invalid",
+                                "The file could not be sent: it must exist, be readable and be at most 5 MB.",
+                            ))
+                        }
+                    },
+                },
+            };
+            publish_chat_result(events, request_id, failure);
+        }
+
+        Command::ChatFetch { channel, path } => {
+            let file = channel
+                .parse::<u64>()
+                .ok()
+                .and_then(|id| ts6_core::attachments::ChannelFile::from_path(id, &path));
+            match (session.as_mut(), file) {
+                (Some(active), Some(file)) => match media.fetch_chat_file(active, &file) {
+                    Ok(Some(cached)) => {
+                        publish_chat_file(events, file.channel_id, path, Some(cached))
+                    }
+                    Ok(None) => {} // `ChatFileDone` follows.
+                    Err(error) => {
+                        tracing::debug!(%error, "attachment fetch failed");
+                        publish_chat_file(events, file.channel_id, path, None)
+                    }
+                },
+                (_, file) => {
+                    publish_chat_file(events, file.map_or(0, |f| f.channel_id), path, None)
+                }
+            }
+        }
+
+        Command::AttachmentSent {
+            request_id,
+            channel,
+            message,
+        } => {
+            let failure = match (session.as_mut(), message) {
+                (None, _) => Some(("not_connected", "Disconnected before the file was posted.")),
+                (Some(_), None) => Some((
+                    "upload_failed",
+                    "The file upload did not complete. Try again.",
+                )),
+                (Some(active), Some(_))
+                    if own_channel(active).as_deref() != Some(channel.to_string().as_str()) =>
+                {
+                    // The file is in the old channel; posting it elsewhere
+                    // would point people at a channel they may not see.
+                    Some((
+                        "stale_channel",
+                        "You changed channel while the file was uploading; it was not posted.",
+                    ))
+                }
+                (Some(active), Some(message)) => {
+                    match active
+                        .send_chat(ts6_core::ChatTarget::Channel, &message)
+                        .await
+                    {
+                        Ok(()) => None,
+                        Err(_) => Some((
+                            "not_confirmed",
+                            "The server did not confirm the message. Check the chat before retrying.",
+                        )),
+                    }
+                }
+            };
+            publish_chat_result(events, request_id, failure);
+        }
+
+        Command::ChatFileDone {
+            channel,
+            path,
+            file,
+        } => publish_chat_file(events, channel, path, file),
 
         Command::Nick { name } => match session.as_mut() {
             Some(active) => match active.set_nickname(&name).await {
@@ -933,6 +1054,47 @@ pub fn serve_blocking_without_ui(port: u16) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async move { serve_inner(port, None).await })
+}
+
+fn publish_chat_result(
+    events: &broadcast::Sender<String>,
+    request_id: String,
+    failure: Option<(&'static str, &'static str)>,
+) {
+    protocol::publish(
+        events,
+        &Event::ChatResult {
+            request_id,
+            error: failure.map(|(_, message)| message),
+            code: failure.map(|(code, _)| code),
+        },
+    );
+}
+
+/// Publishes a fetched attachment, typed by its content (never its name).
+fn publish_chat_file(
+    events: &broadcast::Sender<String>,
+    channel: u64,
+    path: String,
+    file: Option<String>,
+) {
+    let kind = file.as_ref().and_then(|file| {
+        use std::io::Read;
+        let mut head = [0u8; 16];
+        let read = std::fs::File::open(file)
+            .and_then(|mut f| f.read(&mut head))
+            .ok()?;
+        Some(ts6_core::attachments::sniff(&head[..read]).0.as_str())
+    });
+    protocol::publish(
+        events,
+        &Event::ChatFile {
+            channel: channel.to_string(),
+            path,
+            file,
+            kind,
+        },
+    );
 }
 
 fn own_channel(session: &Session) -> Option<String> {

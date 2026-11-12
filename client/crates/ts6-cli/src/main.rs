@@ -19,6 +19,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use ts6_core::{ChatTarget, ClientConfig, Item, Session};
 
+mod stream_check;
+mod stream_media;
+
 const HELP: &str = "\
 ts6-cli — diagnostic client for the TeamSpeak 6 core
 
@@ -33,6 +36,10 @@ COMMANDS:
   raw    <addr> <command> [key=value ...]  send any TS command, print result
   stream <addr> [--type N] [--bitrate N] [--seconds N]
                                           TS6: setupstream + watch the notifies
+  stream-check <addr> <private-directory> --channel <test-channel>
+                                          two-peer control test, no screen capture
+  stream-media-check <addr> <private-directory> --channel <test-channel>
+                                          optional Chromium synthetic video test
   audio-send <addr> [seconds]             send a 440 Hz Opus tone; Windows timer is scoped to the test
   audio-recv <addr> [seconds]             decode incoming voice and report RMS/peak
   audio-call <addr> [seconds]             full duplex with real mic/speakers
@@ -139,6 +146,16 @@ async fn main() -> Result<()> {
 
     let addr = positional.next().context("missing server address")?;
     let cfg = opts.config(&addr);
+    if command == "stream-check" || command == "stream-media-check" {
+        let directory = positional
+            .next()
+            .context("missing private test directory")?;
+        return if command == "stream-check" {
+            stream_check::run(cfg, directory.into()).await
+        } else {
+            stream_media::run(cfg, directory.into()).await
+        };
+    }
     let mut session = Session::connect(cfg).await?;
 
     // Run the command inside an async block so that an early `?`/`bail!` still

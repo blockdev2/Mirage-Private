@@ -70,6 +70,8 @@ join <address> <channel>
 nick <address> <nickname>
 raw <address> <command> [key=value ...]
 stream <address> [--type 2] [--bitrate 2500] [--seconds 6]
+stream-check <address> <private-directory> --channel <test-channel>
+stream-media-check <address> <private-directory> --channel <test-channel>
 audio-send <address> [seconds]
 audio-recv <address> [seconds]
 audio-call <address> [seconds] [--tone] [--ptt F13]
@@ -82,6 +84,34 @@ Inspect `crates/ts6-cli/src/main.rs` for diagnostic-only modes including `duplex
 On Windows, the manual `audio-send` diagnostic temporarily requests 1 ms timer resolution so its 20 ms synthetic frames are paced accurately; an RAII guard pairs the request with restoration when generation ends. This does not change the real microphone path, which is driven by the audio device. Windows timer requests can increase wakeups and power use, and before Windows 10 version 2004 the setting is system-wide; run only this bounded diagnostic when needed. See Microsoft's [`timeBeginPeriod` documentation](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod).
 
 Bridge session-only diagnostics: `cargo run --locked -p ts6-bridge -- --probe 127.0.0.1:9987 --seconds 20`. `--no-tone`, `--no-commands`, and `--current-thread` vary that diagnostic. These modes connect to a server and may transmit synthetic audio; ordinary offline verification does not run them.
+
+`stream-check` starts two continuously polled Rust sessions with separate
+identities under the supplied private directory. Protect that directory with a
+user-only ACL on Windows and keep it ignored. An explicit test channel is
+required and verified in each snapshot; verbose protocol logging is rejected.
+The check announces a stream, independently observes it, requests its info,
+requests viewer admission, observes the publisher's refusal, and explicitly
+stops the announcement. It prints a sanitized JSON summary and never captures
+the screen or transmits media. The directory argument selects its diagnostic
+identities instead of the common `--identity` option. Run only against a server
+you control or have permission to test. A failed check may reflect permissions
+or connection admission, not a video-codec defect.
+
+`stream-media-check` optionally uses installed Python Playwright/Chromium via
+`scripts/stream_webrtc_controller.py`. No runtime is downloaded automatically.
+Two private browser peers generate a 320x180 canvas fixture, relay SDP/ICE
+through the two Rust TeamSpeak sessions, and require decoded video with a matching
+fixture pixel. It uses no screen, microphone, camera, account profile or STUN
+service. Both media peers run on this machine; it does not test cross-machine
+NAT traversal or the official viewer. A synthetic received-video PNG is written
+under `<private-directory>/browser-runtime/received-fixture.png`.
+
+The browser controller's pipe carries SDP/ICE and must not be attached to a
+terminal or ordinary logs. The Rust diagnostic prints only a sanitized summary.
+Frames are limited to 32 KiB; the stream parser's local input limit is 16 KiB.
+A failed or cancelled browser pipe is not reused. The optional script is
+resolved relative to the source checkout at build time, so a relocated binary
+alone is insufficient; this is not a packaged product feature.
 
 ## Manual server/hardware testing
 
@@ -112,7 +142,7 @@ Repository files do not configure hosted settings. Before public launch, the own
 5. Add practical labels (`bug`, `enhancement`, `documentation`, `maintenance`, `good first issue`); do not put private vulnerabilities in public labels/issues.
 6. Resolve known advisories and review all resolved/native dependency licenses before distributing binaries. Define release tags, verified platforms/server versions, and release approval separately; no release workflow is supplied.
 
-The CI includes Windows build/test/lint/format, UI build/audit, repository policy checks, and Rust dependency audits. It has no deployment credentials or publishing steps. Gitleaks is a local pre-publication requirement; hosted secret scanning requires administrator setup. Hosted CI has not been executed merely by adding workflow files.
+The CI includes Windows build/test/lint/format, native capture probe lint/tests, harness unit tests, UI build/audit, repository policy checks, and Rust dependency audits for all three lockfiles. It has no deployment credentials or publishing steps. Gitleaks is a local pre-publication requirement; hosted secret scanning requires administrator setup. Hosted CI has not been executed merely by adding workflow files.
 
 ## Live voice progress regression
 
@@ -139,9 +169,12 @@ optimization over build throughput and remains unchanged.
 
 The GitHub workflow runs for pull requests and pushes to main, avoiding duplicate
 push and pull-request runs for the same feature branch. Its SHA-pinned Rust cache
-restores dependency artifacts for both workspaces. Only successful pushes to main
-save this cache; pull requests can restore but cannot populate the shared cache.
-Cargo binaries are excluded. CI uses GitHub-hosted runners and does not consume
+restores dependency artifacts for the client workspace and both standalone
+probes. Only successful pushes to main save these caches; pull requests can
+restore but cannot populate them. Cargo binaries are excluded from the build
+cache; the dependency-audit job caches only the pinned `cargo-audit` binary
+(keyed by its version), so it is no longer compiled from source on every run.
+npm downloads are cached by `setup-node` from the lockfile. CI uses GitHub-hosted runners and does not consume
 the developer machine's CPU. Cache effectiveness depends on the runner and key;
 measure hosted runs before claiming a speedup.
 
@@ -159,3 +192,10 @@ For the frontend wire contract, with a trusted loopback server already running:
 This starts two isolated bridges and does not enable audio. Build browser assets
 first. It verifies independent delivery, sender echoes, and validation failures.
 See [channel chat](channel-chat.md) for the current frontend scope.
+
+For chat attachments and emoji, with a trusted server whose guest group may
+upload files: `python scripts/check_chat_attachments.py --binary .audit-local/full-audit-target/debug/ts6-bridge.exe --server 127.0.0.1:19987`
+(add `--channel <name>` for a dedicated test channel). Fixtures stay under
+ignored `.audit-local/chat-attachments`. Exit code 2 means the server denied
+uploads, so the success path was not verified. Unit tests for the harnesses
+run with `python -m unittest discover -s scripts -p "test_*.py"`.

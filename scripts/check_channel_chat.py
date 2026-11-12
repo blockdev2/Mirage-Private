@@ -17,6 +17,20 @@ from smoke_bridge import handshake, frame, send
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class ConnectionFailure(RuntimeError):
+    """A sanitized diagnostic category, never the server-controlled error text."""
+
+    def __init__(self, error):
+        text = str(error).lower()
+        if "handshake" in text and "connection failed, you are banned" in text:
+            category = "handshake_banned"
+        elif "handshake" in text:
+            category = "handshake_failed"
+        else:
+            category = "connection_failed"
+        super().__init__(category)
+
+
 class Peer:
     def __init__(self, binary, name, children):
         with socket.socket() as reservation:
@@ -67,6 +81,9 @@ class Peer:
                 raise RuntimeError("unexpected bridge frame")
             event = json.loads(payload)
             self.history.append(event)
+            if (event.get("ev") == "status" and event.get("connected") is False
+                    and event.get("error")):
+                raise ConnectionFailure(event["error"])
             if predicate(event):
                 return event
         raise RuntimeError("expected bridge event deadline exceeded")
@@ -137,6 +154,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except ConnectionFailure as error:
+        print(f"FAIL: channel-chat connection: {error}; private output withheld")
+        raise SystemExit(1) from None
     except (OSError, RuntimeError, AssertionError, subprocess.TimeoutExpired):
         print("FAIL: channel-chat verification failed; private output withheld")
         raise SystemExit(1) from None
