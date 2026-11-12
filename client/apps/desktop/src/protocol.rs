@@ -1,0 +1,250 @@
+#![allow(dead_code)] // Wire mirror: not every field is read yet.
+//! Wire types for the `ts6-bridge` JSON protocol.
+//!
+//! These mirror `client/crates/ts6-bridge/src/protocol.rs` and
+//! `client/apps/ui/src/types.ts`. The bridge serializes `ts6-core` types that
+//! only implement `Serialize`, so the desktop client keeps its own owned copies.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Device {
+    pub name: String,
+    pub is_default: bool,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub sample_format: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeviceLists {
+    pub inputs: Vec<Device>,
+    pub outputs: Vec<Device>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelInfo {
+    pub id: u64,
+    pub parent: u64,
+    pub name: String,
+    pub topic: Option<String>,
+    pub codec: String,
+    pub clients: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClientInfo {
+    pub id: u16,
+    pub channel_id: u64,
+    pub name: String,
+    pub uid: Option<String>,
+    pub input_muted: bool,
+    pub output_muted: bool,
+    pub is_self: bool,
+    /// Avatar flag; older bridges do not send it.
+    #[serde(default)]
+    pub avatar_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerInfo {
+    pub name: String,
+    pub version: String,
+    pub platform: String,
+    pub max_clients: u16,
+    pub welcome_message: String,
+    #[serde(default)]
+    pub icon_id: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Snapshot {
+    pub own_client_id: u16,
+    pub own_uid: Option<String>,
+    pub server: ServerInfo,
+    pub channels: Vec<ChannelInfo>,
+    pub clients: Vec<ClientInfo>,
+}
+
+/// Connection statistics of one client (TeamSpeak's connection info).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConnectionInfo {
+    pub client_id: u16,
+    pub ping_ms: Option<f64>,
+    pub ping_deviation_ms: Option<f64>,
+    pub loss_incoming: Option<f32>,
+    pub loss_outgoing: f32,
+    pub idle_secs: u64,
+    pub connected_secs: Option<u64>,
+    pub bytes_received: u64,
+    pub bytes_sent: u64,
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StatusEvent {
+    pub connected: bool,
+    pub address: Option<String>,
+    pub nickname: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AudioEvent {
+    pub rx_packets: u64,
+    pub tx_frames: u64,
+    pub ptt_down: bool,
+    pub speaking: Vec<u16>,
+    /// Whether our own voice is going out. Older bridges do not send it.
+    #[serde(default)]
+    pub transmitting: bool,
+    /// Microphone level in dBFS.
+    #[serde(default)]
+    pub input_level_db: Option<f32>,
+    pub capture: Option<String>,
+    pub playback: Option<String>,
+    pub tone: bool,
+    pub ptt_binding: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogLine {
+    pub level: String,
+    pub text: String,
+    pub ts: String,
+}
+
+/// Events pushed by the bridge. The `ev` field is the discriminant.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "ev", rename_all = "snake_case")]
+pub enum BridgeEvent {
+    Hello {
+        version: String,
+        devices: DeviceLists,
+    },
+    Status(StatusEvent),
+    State {
+        snapshot: Snapshot,
+    },
+    Log(LogLine),
+    Audio(AudioEvent),
+    Devices {
+        devices: DeviceLists,
+    },
+    ConnectionInfo {
+        client: u16,
+        info: Option<ConnectionInfo>,
+    },
+    /// Local paths of cached avatars (by client uid) and of the server icon.
+    Media {
+        #[serde(default)]
+        avatars: std::collections::HashMap<String, String>,
+        #[serde(default)]
+        server_icon: Option<String>,
+    },
+}
+
+/// Commands sent to the bridge. The `op` field is the discriminant.
+///
+/// No `Debug` derive on purpose: `Connect` carries a server password.
+#[derive(Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Command {
+    Connect {
+        address: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nickname: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_password: Option<String>,
+    },
+    Disconnect,
+    Join {
+        channel: String,
+    },
+    Nick {
+        name: String,
+    },
+    /// The bridge treats an omitted field as `false`, so callers should send both.
+    Mute {
+        input: bool,
+        output: bool,
+    },
+    Audio {
+        enabled: bool,
+        tone: bool,
+        ptt: String,
+        input_device: String,
+        output_device: String,
+        voice_activation: bool,
+        vad_threshold: f32,
+        noise_suppression: u8,
+    },
+    Devices,
+    Refresh,
+    /// Playback volume of one client: 1.0 unchanged, up to 4.0.
+    Volume {
+        client: u16,
+        volume: f32,
+    },
+    /// Watch a client's connection statistics; None stops.
+    ConnectionInfo {
+        client: Option<u16>,
+    },
+    /// Publish a local image file as our avatar; None removes it.
+    SetAvatar {
+        path: Option<String>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_state_event() {
+        let json = r#"{"ev":"state","snapshot":{"own_client_id":2,"own_uid":null,
+            "server":{"name":"S","version":"6.0.0","platform":"Linux","max_clients":32,"welcome_message":""},
+            "channels":[{"id":1,"parent":0,"name":"Default","topic":null,"codec":"OpusVoice","clients":1}],
+            "clients":[{"id":2,"channel_id":1,"name":"me","uid":null,"input_muted":false,"output_muted":false,"is_self":true}]}}"#;
+        match serde_json::from_str::<BridgeEvent>(json).unwrap() {
+            BridgeEvent::State { snapshot } => {
+                assert_eq!(snapshot.channels[0].name, "Default");
+                assert!(snapshot.clients[0].is_self);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_status_and_audio_events() {
+        let status: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"status","connected":false,"address":null,"nickname":null,"error":"boom"}"#,
+        )
+        .unwrap();
+        assert!(matches!(status, BridgeEvent::Status(s) if s.error.as_deref() == Some("boom")));
+
+        let audio: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"audio","rx_packets":1,"tx_frames":2,"ptt_down":true,"speaking":[3],"capture":null,"playback":null,"tone":false,"ptt_binding":"F13"}"#,
+        )
+        .unwrap();
+        assert!(matches!(audio, BridgeEvent::Audio(a) if a.speaking == vec![3]));
+    }
+
+    #[test]
+    fn serializes_commands_with_op_tag() {
+        let json = serde_json::to_string(&Command::Mute {
+            input: true,
+            output: false,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"op":"mute","input":true,"output":false}"#);
+
+        let json = serde_json::to_string(&Command::Connect {
+            address: "127.0.0.1:9987".into(),
+            nickname: None,
+            server_password: None,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"op":"connect","address":"127.0.0.1:9987"}"#);
+    }
+}

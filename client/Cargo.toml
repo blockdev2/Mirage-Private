@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ts6-core",
+    "crates/ts6-audio",
+    "crates/ts6-input",
+    "crates/ts6-cli",
+    "crates/ts6-bridge",
+    "apps/desktop",
+]
+# Vendored upstream code lives in its own workspace and must not be a member here.
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/3d2faebf4bca96cacf2aa10dc002bf42/Mirage"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Real-time audio DSP must keep up with 48 kHz even in debug builds: the
+# RNNoise denoiser and its FFT are far slower than real time unoptimized.
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
