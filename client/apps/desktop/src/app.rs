@@ -238,6 +238,16 @@ impl App {
                 Incoming::Event(event) => self.apply_event(event),
             }
         }
+        let meter = self
+            .bridge
+            .audio
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        // A meter read before a disconnect must not revive the call view.
+        if let Some(meter) = meter.filter(|_| self.status.connected) {
+            self.apply_event(BridgeEvent::Audio(meter));
+        }
     }
 
     fn apply_event(&mut self, event: BridgeEvent) {
