@@ -87,6 +87,8 @@ pub mod icon {
     pub const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
+    pub const EYE: &str = "\u{E220}";
+    pub const EYE_SLASH: &str = "\u{E224}";
 }
 
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
@@ -557,6 +559,51 @@ pub fn glyph_button(
     response
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(label)
+}
+
+/// Draws a server address that can be hidden. `reveal` runs from 0 (fully
+/// censored) to 1 (readable) and the two states cross-fade. The censor bar is
+/// exactly as wide as the text it covers, so nothing moves when it toggles,
+/// and its hatching keeps it reading as a deliberate redaction, not a glitch.
+/// `lift` (0 to 1) brightens the bar, for a hover. Returns the area taken.
+pub fn masked_text(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+    color: Color32,
+    reveal: f32,
+    lift: f32,
+) -> egui::Rect {
+    let rect = egui::Rect::from_min_size(pos, galley.size());
+    let reveal = reveal.clamp(0.0, 1.0);
+    if reveal > 0.0 {
+        painter.galley_with_override_text_color(pos, galley, color.gamma_multiply(reveal));
+    }
+    let hidden = 1.0 - reveal;
+    if hidden > 0.0 {
+        let bar = rect.expand2(vec2(4.0, -1.0));
+        let fill = lerp_color(SURFACE_RAISED, SURFACE_HOVER, lift);
+        painter.rect_filled(bar, CornerRadius::same(5), fill.gamma_multiply(hidden));
+        painter.rect_stroke(
+            bar,
+            CornerRadius::same(5),
+            Stroke::new(1.0, BORDER.gamma_multiply(hidden)),
+            egui::StrokeKind::Inside,
+        );
+        // Fine diagonal hatching, kept inside the bar.
+        let clip = painter.with_clip_rect(bar.shrink(1.5));
+        let ink = lerp_color(BORDER, TEXT_3, 0.35 + 0.35 * lift).gamma_multiply(hidden);
+        let step = 5.0;
+        let mut x = bar.left() - bar.height();
+        while x < bar.right() {
+            clip.line_segment(
+                [pos2(x, bar.bottom()), pos2(x + bar.height(), bar.top())],
+                Stroke::new(1.0, ink),
+            );
+            x += step;
+        }
+    }
+    rect
 }
 
 /// Linear blend of two colors, `amount` 0 giving `from` and 1 giving `to`.

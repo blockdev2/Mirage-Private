@@ -146,6 +146,10 @@ pub struct App {
 
     // Settings window and diagnostics.
     show_settings: bool,
+    /// Server addresses are censored until the user reveals them.
+    show_addresses: bool,
+    /// The quick-connect address field has keyboard focus.
+    address_focused: bool,
     /// Name and photo editing inside the settings window.
     profile_edit: settings::ProfileEdit,
     show_logs: bool,
@@ -207,6 +211,8 @@ impl App {
             connect_started: None,
             open_channels: HashMap::new(),
             show_settings: false,
+            show_addresses: false,
+            address_focused: false,
             profile_edit: settings::ProfileEdit::default(),
             show_logs: false,
         }

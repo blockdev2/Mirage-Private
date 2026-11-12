@@ -110,6 +110,8 @@ struct RowSpec<'a> {
     flat: bool,
     /// Hairline above the row, between rows of a shared container.
     separator: bool,
+    /// How readable the address is, 0 (censored) to 1.
+    reveal: f32,
     connect_enabled: bool,
     menu: Vec<(RowAction, &'a str)>,
     connect_label: &'a str,
@@ -263,7 +265,14 @@ fn list_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> RowOutcome {
             theme::TEXT_3,
             room,
         );
-        painter.galley(pos2(text_x, rect.center().y + 1.0), address, theme::TEXT_3);
+        theme::masked_text(
+            &painter,
+            pos2(text_x, rect.center().y + 1.0),
+            address,
+            theme::TEXT_3,
+            spec.reveal,
+            0.0,
+        );
 
         if let Some(connect_rect) = connect_rect {
             let clicked = ui
@@ -458,6 +467,16 @@ impl App {
         });
     }
 
+    /// 0 while server addresses are censored, 1 once shown; eases between.
+    fn address_reveal(&self, ctx: &egui::Context) -> f32 {
+        ctx.animate_bool_with_time_and_easing(
+            egui::Id::unique("address-reveal"),
+            self.show_addresses,
+            0.22,
+            egui::emath::easing::cubic_out,
+        )
+    }
+
     fn favorite_row(&mut self, ui: &mut egui::Ui, favorite: &Favorite) {
         let t = self.t;
         let selected = self.selected_favorite.as_deref() == Some(favorite.id.as_str());
@@ -471,6 +490,7 @@ impl App {
             compact: true,
             flat: false,
             separator: false,
+            reveal: self.address_reveal(ui.ctx()),
             connect_enabled: self.can_connect(),
             menu: vec![
                 (RowAction::Connect, t.menu_connect),
@@ -825,6 +845,7 @@ impl App {
             compact: false,
             flat: scope == "recent",
             separator,
+            reveal: self.address_reveal(ui.ctx()),
             connect_enabled: self.can_connect(),
             menu,
             connect_label: t.menu_connect,
@@ -892,7 +913,61 @@ impl App {
                 theme::TEXT_2,
                 room,
             );
-            painter.galley(pos2(text_x, top + 34.0), address, theme::TEXT_2);
+            // Censored by default; the address or the eye next to it toggles it.
+            let reveal = self.address_reveal(ui.ctx());
+            let address_pos = pos2(text_x, top + 34.0);
+            let address_size = address.size();
+            let toggle_rect = Rect::from_min_size(
+                address_pos - vec2(6.0, 4.0),
+                address_size + vec2(12.0 + 30.0, 8.0),
+            );
+            let toggle = ui.interact(
+                toggle_rect,
+                ui.scope_id().with("address-toggle"),
+                Sense::click(),
+            );
+            let lift = ui.ctx().animate_bool_with_time(
+                toggle.id.with("lift"),
+                toggle.hovered() || toggle.has_focus(),
+                0.12,
+            );
+            toggle.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::Role::Button,
+                    true,
+                    if self.show_addresses {
+                        t.hide_address
+                    } else {
+                        t.show_address
+                    },
+                )
+            });
+            theme::masked_text(&painter, address_pos, address, theme::TEXT_2, reveal, lift);
+            painter.text(
+                pos2(
+                    address_pos.x + address_size.x + 16.0,
+                    address_pos.y + address_size.y / 2.0,
+                ),
+                Align2::LEFT_CENTER,
+                if self.show_addresses {
+                    icon::EYE_SLASH
+                } else {
+                    icon::EYE
+                },
+                FontId::new(16.0, theme::icons()),
+                theme::lerp_color(theme::TEXT_3, Color32::WHITE, lift),
+            );
+            if toggle.clicked() {
+                self.show_addresses = !self.show_addresses;
+            }
+            let toggle = toggle
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(if self.show_addresses {
+                    t.hide_address
+                } else {
+                    t.show_address
+                });
+            let _ = toggle;
 
             let access_text = t.last_access(ago);
             if wide {
@@ -1010,14 +1085,17 @@ impl App {
 
             // Address.
             let before = self.address.clone();
-            labeled_input(
+            // Hidden like every other address, but readable while it is edited.
+            let conceal = !self.show_addresses && !self.address_focused;
+            let address_field = labeled_input(
                 ui,
                 t.server_address,
                 &mut self.address,
                 t.address_hint,
                 255,
-                false,
+                conceal,
             );
+            self.address_focused = address_field.has_focus();
             if self.address != before {
                 self.address_problem = None;
                 self.selected_favorite =
