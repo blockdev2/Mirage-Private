@@ -90,3 +90,35 @@ Existing dependency PR #1 is not merged here. Runtime code and frontend adapter
 changes should be reviewed together because their command/event schema is
 shared. Resolve overlaps on an owner-authorized integration branch and rerun
 checks on that combined result. Never update main directly.
+
+## Concurrent main advancement observed during publication
+
+While the contribution branch was being verified, remote main advanced from
+`66cf4a9fa875a8d41e893e7382fb0bdd01e100dd` to
+`79469dfce780366f4953ca10b90a4d79db8acc3d` (chat sending, redesigned settings,
+and DPDFNet noise suppression). Our publication used only a normal push to its
+topic branch; it did not update main. The tests above apply to our contribution
+based on 66cf4a9, not to an integration with the newer main revision.
+
+A read-only comparison identified concrete semantic overlaps:
+
+- Core message projection: both revisions change session chat events; the newer
+  main introduces TextScope while this branch preserves MessageTarget and
+  captured channel context. Reconcile the model and all consumers together.
+- Wire commands: newer main accepts chat with text alone; this branch requires
+  session/channel/request correlation. Dropping those checks could route queued
+  text to a replacement session or a channel the user did not select.
+- Wire events: newer main uses scope/from_id/from_name and chat_sent/chat_failed;
+  this branch uses channel/sender/timestamp plus correlated chat_result. Native
+  and browser mirrors must use the selected contract consistently.
+- Confirmation semantics: comments on the newer branch differ about sender
+  echoes. Our isolated beta13.1 tests observed sender echoes and independent
+  receiver delivery; command acceptance alone must not be called delivery.
+- Native chat/settings, strings, manifests/lockfile, audio dependencies and
+  compatibility documentation overlap. This review did not execute the new
+  main's code, validate its model binary, or assess its license/dependencies.
+
+These observations identify review points, not a decision that one contribution
+should replace the other. No automatic merge/rebase or cherry-pick was done.
+The owner should compare both pinned revisions, preserve the frontend work and
+security properties, and test a separately authorized combined implementation.
