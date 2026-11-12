@@ -49,8 +49,8 @@ Windows/MSVC, Rust 1.99.0, Node 22, CMake 3.31 (Visual Studio build tools) with
   reconnects, channel changes and shutdown remain to be checked by hand.
 - DPDFNet: model checksum against upstream, CPU/memory cost and audio quality
   were not measured. Loading failure falls back to RNNoise by design.
-- Native link channels (`std::sync::mpsc`) remain unbounded; see
-  BACKEND_HANDOFF.md. Not changed here to avoid UI/network deadlock risk.
+- Native link channels were unbounded at merge time; bounded in the follow-up
+  below.
 
 ## Migration notes for contributors
 
@@ -59,3 +59,56 @@ Windows/MSVC, Rust 1.99.0, Node 22, CMake 3.31 (Visual Studio build tools) with
 - `chat_sent`/`chat_failed` events are gone; use `chat_result.code`.
 - `ts6_core::TextScope` is gone; use `TextMessage::target` and `channel_id`.
 - Rollback: revert the integration merge commit on main with `git revert -m 1`.
+
+## Follow-up verification (same day, after merge `dcf37b3`)
+
+Tooling: Gitleaks 8.30.1 (release checksum verified), cargo-audit, Playwright
+1.49.1 with its Chromium in an isolated virtual environment.
+
+- Gitleaks with redaction: no leaks in all history (14 commits) or in the
+  `git archive` of the published tree.
+- `cargo audit --file client/Cargo.lock`: 0 vulnerabilities; six
+  unmaintained-crate warnings (audiopus_sys, pin-utils, ttf-parser, zbus_names,
+  zvariant, zvariant_derive), unchanged, no ignores added.
+- DPDFNet: the committed `dpdfnet2_48khz_hr.onnx` SHA-256 equals the upstream
+  Hugging Face LFS object for `Ceva-IP/DPDFNet` (`7f0575a5...91dc14b`), whose
+  model card declares Apache-2.0. Release build, synthetic noise, one machine:
+  136 ms load, 60 s of audio in 7.9 s (about 13% of one core), worst 20 ms frame
+  6 ms, about 54 MB peak working set for the measuring process. Audio quality
+  and debug-build cost were not assessed.
+- Native link queues: events now use a 4096-item queue that drops on overflow
+  without blocking the socket reader and then requests a refresh; UI commands
+  use a 256-item queue with `try_send`. Two regression tests added.
+
+### Live checks
+
+Official TeamSpeak Server 6.0.0-beta13.1 (build 1790080330, win-x64 release
+asset, SHA-256 verified), started for these tests on 127.0.0.1 voice port
+19987 and file transfer port 30133. Query, metrics and S3 stayed at their
+disabled defaults; WebRTC was disabled. Test identities lived under the ignored
+`.audit-local`. No microphone was enabled. The server was stopped afterwards
+and its data directory deleted.
+
+1. `check_channel_chat.py`: passed (round trip, one sender echo, Unicode and
+   escaping, stale/empty/large/offline and previous-session rejection).
+2. `check_chat_delivery.py` immediately afterwards: failed with
+   `ConnectFailedBanned`. The server's connection flood protection had banned
+   127.0.0.1 after the bridge suite's connections. This explains the
+   back-to-back failure PR #2 recorded as unexplained. After a server restart
+   it passed: channel and direct reception, both sender echoes.
+3. `check_chat_browser.py`: passed (rendered round trip, literal markup, Enter,
+   oversize draft retained, reload resynchronization, 0 page errors).
+
+Run suites against a freshly started server, or wait out the ban.
+
+### teamspeak-go comparison (pinned `e7fd092`)
+
+teamspeak-go treats `ConnectFailedBanned` as terminal and disconnects without
+retrying. Mirage's vendored library reconnects only after timeouts, and the
+desktop shows a ban message, so the behavior agrees. No code was copied.
+
+### Still not verified
+
+The native desktop chat was not driven automatically (no screen-control tool
+was available in this session); it was built and opened for manual testing.
+Real microphone/speaker calls and long-running load remain open.

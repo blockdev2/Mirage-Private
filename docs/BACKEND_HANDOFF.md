@@ -168,4 +168,6 @@ Do not infer their state on a future combined branch from this record alone.
 
 The integration recorded in [INTEGRATION_RECORD.md](INTEGRATION_RECORD.md)
 bounded the `wait_result` replay paths and reduced unknown-command logging to
-name and size. Native link channels remain unbounded and are still open.
+name and size. A follow-up bounded the native link channels, and the
+unexplained combined-run CLI failure was traced to the server banning
+127.0.0.1 for connection flooding.

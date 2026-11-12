@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: client/apps/ui/.node-version
+          cache: npm
+          cache-dependency-path: client/apps/ui/package-lock.json
       - name: Repository policy checks
         run: python scripts/check_repository.py
       - name: Install the documented Rust toolchain
@@ -55,8 +57,28 @@ jobs:
       - name: UI type check and build
         working-directory: client/apps/ui
         run: npm run build
+      # The smoke test serves the built UI, so the UI is also built here.
       - name: HTTP and WebSocket security smoke test
         run: python scripts/smoke_bridge.py --binary client/target/debug/ts6-bridge.exe
+  ui:
+    name: UI checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: client/apps/ui/.node-version
+          cache: npm
+          cache-dependency-path: client/apps/ui/package-lock.json
+      - name: Reproducible UI installation
+        working-directory: client/apps/ui
+        run: npm ci --ignore-scripts
+      - name: UI type check and build
+        working-directory: client/apps/ui
+        run: npm run build
       - name: UI dependency audit
         working-directory: client/apps/ui
         run: npm audit
