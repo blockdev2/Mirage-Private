@@ -29,5 +29,5 @@ pub use codec::{VoiceDecoder, VoiceEncoder, FRAME_SAMPLES, MAX_OPUS_FRAME, SAMPL
 pub use devices::DeviceInfo;
 pub use meter::RmsMeter;
 pub use mixer::Mixer;
-pub use playback::{start_playback, Playback};
+pub use playback::{start_playback, Monitor, Playback};
 pub use tone::ToneSource;

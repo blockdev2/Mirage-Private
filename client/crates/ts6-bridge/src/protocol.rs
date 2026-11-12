@@ -62,6 +62,9 @@ pub enum Command {
         /// Noise suppression: 0 off, 1 standard, 2 strong.
         #[serde(default)]
         noise_suppression: Option<u8>,
+        /// Hear our own processed microphone locally.
+        #[serde(default)]
+        monitor: Option<bool>,
     },
     /// Ask for the device lists again (after plugging a headset, for example).
     Devices,
@@ -204,6 +207,10 @@ pub enum Event<'a> {
         playback: Option<String>,
         tone: bool,
         ptt_binding: Option<String>,
+        /// Our round-trip time to the server, when the server has reported it.
+        ping_ms: Option<f64>,
+        /// Our packet loss towards the server, 0..1.
+        loss_out: Option<f32>,
     },
     Devices {
         devices: DeviceLists,
@@ -327,6 +334,8 @@ mod tests {
             playback: Some("Speakers".into()),
             tone: false,
             ptt_binding: Some("F13".into()),
+            ping_ms: None,
+            loss_out: None,
         })
         .unwrap();
         assert!(json.contains(r#""speaking":[3,5]"#), "{json}");

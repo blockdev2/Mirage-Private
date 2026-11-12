@@ -72,15 +72,8 @@ pub mod icon {
     pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const LOCK_SIMPLE: &str = "\u{E308}";
     pub const SPEAKER_LOW: &str = "\u{E44C}";
-    pub const ARROW_DOWN: &str = "\u{E03E}";
-    pub const ARROW_UP: &str = "\u{E08E}";
-    pub const CHECK: &str = "\u{E182}";
-    pub const CLOCK: &str = "\u{E19A}";
-    pub const HOURGLASS: &str = "\u{E2B2}";
-    pub const PULSE: &str = "\u{E000}";
     pub const SPEAKER_SLASH: &str = "\u{E45A}";
     pub const INFO: &str = "\u{E2CE}";
-    pub const COPY: &str = "\u{E1CA}";
     pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
     pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const BOOKMARK_SIMPLE: &str = "\u{E0EA}";
@@ -88,6 +81,7 @@ pub mod icon {
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
     pub const EYE: &str = "\u{E220}";
+    pub const IMAGE: &str = "\u{E2CA}";
     pub const EYE_SLASH: &str = "\u{E224}";
 }
 

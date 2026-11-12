@@ -112,6 +112,9 @@ pub struct App {
     volumes_dirty: bool,
     /// Open connection info window, if any.
     info_view: Option<peer::InfoView>,
+    /// Our own ping, one sample a second, for the status bar graph.
+    ping_history: std::collections::VecDeque<f32>,
+    ping_sampled: Option<std::time::Instant>,
     /// Cached server-side avatars by client uid, and the server icon (local paths).
     media_avatars: HashMap<String, String>,
     server_icon: Option<String>,
@@ -131,6 +134,8 @@ pub struct App {
     mic_muted: bool,
     output_muted: bool,
     chat_draft: String,
+    /// The message being answered: author and its first line.
+    chat_reply: Option<(String, String)>,
     /// Room chat history and the delivery state of what we sent.
     chat: ChatLog,
     /// Whether the bridge advertised the correlated channel-chat contract.
@@ -187,6 +192,8 @@ impl App {
             volumes_sent: HashMap::new(),
             volumes_dirty: false,
             info_view: None,
+            ping_history: Default::default(),
+            ping_sampled: None,
             media_avatars: HashMap::new(),
             server_icon: None,
             media_textures: HashMap::new(),
@@ -209,6 +216,7 @@ impl App {
             mic_muted: false,
             output_muted: false,
             chat_draft: String::new(),
+            chat_reply: None,
             chat: ChatLog::default(),
             channel_chat: false,
             next_chat_request: 0,
@@ -321,7 +329,19 @@ impl App {
                     self.logs.drain(..excess);
                 }
             }
-            BridgeEvent::Audio(audio) => self.audio = Some(audio),
+            BridgeEvent::Audio(audio) => {
+                if let Some(ping) = audio.ping_ms.filter(|_| {
+                    self.ping_sampled
+                        .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+                }) {
+                    if self.ping_history.len() >= peer::HISTORY {
+                        self.ping_history.pop_front();
+                    }
+                    self.ping_history.push_back(ping as f32);
+                    self.ping_sampled = Some(std::time::Instant::now());
+                }
+                self.audio = Some(audio);
+            }
             BridgeEvent::Devices { devices } => self.devices = devices,
             BridgeEvent::ConnectionInfo { client, info } => {
                 if let (Some(view), Some(info)) = (self.info_view.as_mut(), info) {
@@ -437,6 +457,7 @@ impl App {
             voice_activation: audio.mode == TransmitMode::VoiceActivation,
             vad_threshold: audio.threshold_db,
             noise_suppression: audio.noise.level(),
+            monitor: audio.monitor,
         });
         self.store.save();
     }
@@ -1482,6 +1503,27 @@ impl App {
         let mut submit = false;
         theme::input_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
+            if let Some((author, _)) = self.chat_reply.clone() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(t.chat_replying_to(&author))
+                            .small()
+                            .color(theme::TEXT_2),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("✕").small().color(theme::TEXT_3))
+                                    .frame(false),
+                            )
+                            .on_hover_text(t.chat_cancel_reply)
+                            .clicked()
+                        {
+                            self.chat_reply = None;
+                        }
+                    });
+                });
+            }
             // A fixed-height row with centered items, so the placeholder text
             // and the send button share one baseline.
             ui.allocate_ui_with_layout(
@@ -1527,9 +1569,15 @@ impl App {
     /// Hands the draft to the bridge, correlated with this session and channel,
     /// and shows it as pending until its `chat_result` (or an echo) arrives.
     fn submit_chat(&mut self) {
-        let text = self.chat_draft.trim().to_string();
+        let mut text = self.chat_draft.trim().to_string();
         if text.is_empty() {
             return;
+        }
+        // shortcut: TS6 replies are Matrix relations; this sends a plain
+        // "> author: line" quote, which every client shows as text. Upgrade
+        // with the Matrix chat client.
+        if let Some((author, line)) = &self.chat_reply {
+            text = format!("> {author}: {line}\n{text}");
         }
         if text.len() > MAX_MESSAGE_BYTES {
             self.chat_notice = Some(self.t.chat_too_long);
@@ -1568,6 +1616,7 @@ impl App {
             request_id,
         });
         self.chat_draft.clear();
+        self.chat_reply = None;
         self.chat_notice = None;
     }
 
@@ -1605,14 +1654,18 @@ impl App {
                     });
                     return;
                 }
-                ui.spacing_mut().item_spacing.y = 3.0;
-                for (index, entry) in entries.iter().enumerate() {
-                    let grouped = index > 0 && entry.groups_with(&entries[index - 1]);
-                    if !grouped && index > 0 {
-                        ui.add_space(12.0);
+                // Top-down here: the scroll area inherits the bottom-up layout
+                // of the chat section, which stacked messages out of order.
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for (index, entry) in entries.iter().enumerate() {
+                        let grouped = index > 0 && entry.groups_with(&entries[index - 1]);
+                        if !grouped && index > 0 {
+                            ui.add_space(12.0);
+                        }
+                        self.chat_row(ui, entry, grouped, snapshot.as_ref());
                     }
-                    self.chat_row(ui, entry, grouped, snapshot.as_ref());
-                }
+                });
             });
     }
 
@@ -1628,14 +1681,23 @@ impl App {
         snapshot: Option<&Snapshot>,
     ) {
         let t = self.t;
-        ui.horizontal_top(|ui| {
+        let (quote, body) = split_quote(&entry.text);
+        // Reserved under the row, filled once we know it is hovered.
+        let highlight = ui.painter().add(egui::Shape::Noop);
+        let row = ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CHAT_GAP;
             if grouped {
                 ui.add_space(CHAT_AVATAR);
             } else {
-                let client = entry
-                    .from_id
-                    .and_then(|id| snapshot?.clients.iter().find(|c| c.id == id))
+                // Received messages carry only the sender's name, so fall
+                // back to it when there is no client id.
+                let client = snapshot
+                    .and_then(|s| {
+                        s.clients.iter().find(|c| match entry.from_id {
+                            Some(id) => c.id == id,
+                            None => (entry.mine && c.is_self) || c.name == entry.author,
+                        })
+                    })
                     .cloned();
                 let photo = client.and_then(|c| self.client_photo(ui.ctx(), &c));
                 theme::avatar_or_photo(ui, &entry.author, CHAT_AVATAR, photo.as_ref());
@@ -1668,13 +1730,26 @@ impl App {
                     Delivery::Delivered => CHAT_TEXT,
                     _ => theme::TEXT_3,
                 };
+                if let Some(quote) = quote {
+                    let line = ui.add(
+                        egui::Label::new(RichText::new(quote).small().color(theme::TEXT_3))
+                            .truncate(),
+                    );
+                    ui.painter().vline(
+                        line.rect.left() - 7.0,
+                        line.rect.y_range(),
+                        Stroke::new(2.0, theme::BORDER),
+                    );
+                }
                 ui.add(
                     egui::Label::new(
-                        RichText::new(&entry.text)
+                        RichText::new(body)
                             .font(FontId::proportional(14.5))
                             .color(ink),
                     )
-                    .wrap(),
+                    .wrap()
+                    // Not selectable, so a right-click reaches the row menu.
+                    .selectable(false),
                 );
                 match entry.delivery {
                     Delivery::Delivered => {}
@@ -1692,6 +1767,49 @@ impl App {
                 }
             });
         });
+        let menu_id = ui.scope_id().with((
+            "chat-row",
+            entry.from_id,
+            &entry.author,
+            entry.time,
+            &entry.text,
+        ));
+        // The whole line, edge to edge and into half the gap around it, is
+        // one target, as in Discord.
+        let full = ui.max_rect();
+        let area = Rect::from_x_y_ranges(
+            full.left() - 8.0..=full.right(),
+            row.response.rect.top() - 5.0..=row.response.rect.bottom() + 5.0,
+        );
+        let response = ui.interact(area, menu_id, Sense::click());
+        if response.hovered() || response.context_menu_opened() {
+            ui.painter().set(
+                highlight,
+                egui::Shape::rect_filled(area, CornerRadius::same(6), theme::SURFACE),
+            );
+        }
+        response.context_menu(|ui| {
+            if ui.button(t.chat_reply).clicked() {
+                let line: String = body.lines().next().unwrap_or("").chars().take(80).collect();
+                self.chat_reply = Some((entry.author.clone(), line));
+                ui.close();
+            }
+            if ui.button(t.chat_copy_text).clicked() {
+                ui.ctx().copy_text(body.to_string());
+                ui.close();
+            }
+        });
+    }
+}
+
+/// Splits a leading "> quote" line off a message, as sent by replies.
+fn split_quote(text: &str) -> (Option<&str>, &str) {
+    match text
+        .strip_prefix("> ")
+        .and_then(|rest| rest.split_once('\n'))
+    {
+        Some((quote, body)) => (Some(quote), body),
+        None => (None, text),
     }
 }
 
@@ -1699,7 +1817,7 @@ impl App {
 
 impl App {
     /// Connection state, server and session time on the left; the push-to-talk
-    /// key on the right. Latency is not exposed by the bridge, so it is absent.
+    /// key on the right.
     fn status_bar(&self, ui: &mut egui::Ui) {
         let t = self.t;
         let in_session = self.in_session();
@@ -1757,6 +1875,10 @@ impl App {
                         .font(FontId::new(12.0, egui::FontFamily::Monospace))
                         .color(theme::TEXT_3),
                 );
+                if let Some(audio) = self.audio.as_ref().filter(|a| a.ping_ms.is_some()) {
+                    ui.separator();
+                    self.ping_badge(ui, &snapshot.server.name, audio);
+                }
             }
 
             let binding = self
@@ -1772,6 +1894,87 @@ impl App {
             }
         });
     }
+}
+
+impl App {
+    /// The ping, colored by quality; a click opens its graph and details.
+    fn ping_badge(&self, ui: &mut egui::Ui, server: &str, audio: &crate::protocol::AudioEvent) {
+        let t = self.t;
+        let ping = audio.ping_ms.unwrap_or(0.0).round() as u32;
+        let color = peer::ping_color(ping as f32);
+        let badge = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(t.ping_label(ping))
+                        .font(FontId::new(12.0, egui::FontFamily::Monospace))
+                        .color(color),
+                )
+                .frame(false),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(t.ping_hint);
+        egui::Popup::from_toggle_button_response(&badge)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_width(300.0);
+                ui.label(
+                    RichText::new(t.connection_title)
+                        .strong()
+                        .color(theme::TEXT),
+                );
+                ui.add_space(6.0);
+                let (area, _) = ui.allocate_exact_size(vec2(300.0, 90.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(area, CornerRadius::same(6), theme::SURFACE_RAISED);
+                let values: Vec<f32> = self.ping_history.iter().copied().collect();
+                peer::sparkline(ui.painter(), area.shrink(8.0), &values, peer::ping_color);
+                if let Some(max) = values.iter().copied().reduce(f32::max) {
+                    ui.painter().text(
+                        area.right_top() + vec2(-6.0, 4.0),
+                        Align2::RIGHT_TOP,
+                        format!("{max:.0}"),
+                        FontId::new(10.0, egui::FontFamily::Monospace),
+                        theme::TEXT_3,
+                    );
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(server).strong().color(theme::TEXT));
+                ui.add_space(2.0);
+                let average = if values.is_empty() {
+                    ping as f32
+                } else {
+                    values.iter().sum::<f32>() / values.len() as f32
+                };
+                let row = |ui: &mut egui::Ui, label: &str, value: String| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(label).color(theme::TEXT_2));
+                        ui.label(RichText::new(value).strong().color(theme::TEXT));
+                    })
+                    .response
+                };
+                row(ui, t.ping_average, format!("{average:.0} ms"));
+                row(ui, t.ping_last, format!("{ping} ms"));
+                row(
+                    ui,
+                    t.ping_loss_out,
+                    format!("{:.1}%", audio.loss_out.unwrap_or(0.0) * 100.0),
+                );
+                row(
+                    ui,
+                    t.ping_voice_delay,
+                    format!("~{} ms", voice_delay_ms(ping)),
+                )
+                .on_hover_text(t.voice_delay_hint);
+            });
+    }
+}
+
+/// Rough mouth-to-ear delay in a call, from our ping to the server.
+/// shortcut: assumes the other person has the same ping and a fixed local
+/// pipeline (20 ms capture frame, about 60 ms of jitter and device buffers);
+/// upgrade by measuring the live jitter buffer depth if precision matters.
+fn voice_delay_ms(ping_ms: u32) -> u32 {
+    ping_ms + 80
 }
 
 // Settings and diagnostics -----------------------------------------------------
@@ -1929,5 +2132,17 @@ mod tests {
             aspect > 1.0,
             "the wordmark is wider than tall, got {aspect}"
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::split_quote;
+
+    #[test]
+    fn quotes_split_from_the_body() {
+        assert_eq!(split_quote("> ana: oi\nolá"), (Some("ana: oi"), "olá"));
+        assert_eq!(split_quote("> sem corpo"), (None, "> sem corpo"));
+        assert_eq!(split_quote("texto"), (None, "texto"));
     }
 }

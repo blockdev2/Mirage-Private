@@ -125,24 +125,37 @@ pub enum AvatarError {
 /// Loads any supported image, crops it to a centered square and scales it to
 /// [`AVATAR_SIZE`]. Nothing is written to disk here.
 pub fn prepare_avatar(path: &std::path::Path) -> Result<image::RgbaImage, AvatarError> {
+    Ok(square_avatar(&load_avatar_source(path)?))
+}
+
+/// Loads any supported image for the crop editor, refusing huge files.
+pub fn load_avatar_source(path: &std::path::Path) -> Result<image::DynamicImage, AvatarError> {
     let size = fs::metadata(path)
         .map_err(|_| AvatarError::Unreadable)?
         .len();
     if size > AVATAR_MAX_BYTES {
         return Err(AvatarError::TooLarge);
     }
-    let image = image::ImageReader::open(path)
+    image::ImageReader::open(path)
         .and_then(|reader| reader.with_guessed_format())
         .map_err(|_| AvatarError::Unreadable)?
         .decode()
-        .map_err(|_| AvatarError::Unreadable)?;
-    Ok(square_avatar(&image))
+        .map_err(|_| AvatarError::Unreadable)
 }
 
 fn square_avatar(image: &image::DynamicImage) -> image::RgbaImage {
     let (width, height) = (image.width(), image.height());
     let side = width.min(height).max(1);
-    let square = image.crop_imm((width - side) / 2, (height - side) / 2, side, side);
+    crop_avatar(image, (width - side) / 2, (height - side) / 2, side)
+}
+
+/// Cuts the `side` square at (`x`, `y`) out of `image` (clamped to fit) and
+/// scales it to [`AVATAR_SIZE`].
+pub fn crop_avatar(image: &image::DynamicImage, x: u32, y: u32, side: u32) -> image::RgbaImage {
+    let side = side.clamp(1, image.width().min(image.height()).max(1));
+    let x = x.min(image.width().saturating_sub(side));
+    let y = y.min(image.height().saturating_sub(side));
+    let square = image.crop_imm(x, y, side, side);
     let target = AVATAR_SIZE.min(side);
     square
         .resize_exact(target, target, image::imageops::FilterType::Lanczos3)
@@ -233,6 +246,9 @@ pub struct AudioSettings {
     pub ptt: String,
     pub input_device: String,
     pub output_device: String,
+    /// Not saved: hearing yourself is a quick check, never a startup surprise.
+    #[serde(skip)]
+    pub monitor: bool,
 }
 
 impl Default for AudioSettings {
@@ -245,6 +261,7 @@ impl Default for AudioSettings {
             ptt: String::new(),
             input_device: String::new(),
             output_device: String::new(),
+            monitor: false,
         }
     }
 }
@@ -644,6 +661,14 @@ mod tests {
         fs::write(&junk, b"not an image").unwrap();
         assert_eq!(prepare_avatar(&junk), Err(AvatarError::Unreadable));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn crop_avatar_clamps_to_the_image() {
+        let image = image::DynamicImage::new_rgba8(400, 300);
+        // A square that would run off the bottom-right is pulled back inside.
+        let photo = crop_avatar(&image, 350, 250, 1000);
+        assert_eq!(photo.dimensions(), (AVATAR_SIZE, AVATAR_SIZE));
     }
 
     fn temp_file() -> PathBuf {

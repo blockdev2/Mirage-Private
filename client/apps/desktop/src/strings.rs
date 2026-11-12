@@ -53,6 +53,15 @@ pub struct Strings {
     pub use_saved_profile: &'static str,
     pub server_address: &'static str,
     pub show_address: &'static str,
+    pub ping_hint: &'static str,
+    pub voice_delay_hint: &'static str,
+    pub connection_title: &'static str,
+    pub ping_average: &'static str,
+    pub ping_last: &'static str,
+    pub ping_loss_out: &'static str,
+    pub ping_voice_delay: &'static str,
+    pub monitor_title: &'static str,
+    pub monitor_hint: &'static str,
     pub hide_address: &'static str,
     pub address_hint: &'static str,
     pub address_empty: &'static str,
@@ -91,6 +100,10 @@ pub struct Strings {
     pub choose_photo: &'static str,
     pub change_photo: &'static str,
     pub remove_photo: &'static str,
+    pub crop_title: &'static str,
+    pub crop_hint: &'static str,
+    pub crop_zoom: &'static str,
+    pub crop_apply: &'static str,
     pub photo_hint: &'static str,
     pub photo_picker_title: &'static str,
     pub photo_filter: &'static str,
@@ -135,6 +148,9 @@ pub struct Strings {
     pub chat_placeholder_prefix: &'static str,
     pub chat_send: &'static str,
     pub chat_sending: &'static str,
+    pub chat_reply: &'static str,
+    pub chat_copy_text: &'static str,
+    pub chat_cancel_reply: &'static str,
     pub chat_no_answer: &'static str,
     pub chat_rejected: &'static str,
     pub chat_offline: &'static str,
@@ -226,6 +242,14 @@ impl Strings {
     }
 
     /// "Voice channel", followed by "• topic" only when the server set a topic.
+    pub fn ping_label(&self, ms: u32) -> String {
+        format!("{ms} ms")
+    }
+
+    pub fn chat_replying_to(&self, author: &str) -> String {
+        format!("Respondendo a {author}")
+    }
+
     pub fn channel_subtitle(&self, topic: Option<&str>) -> String {
         match topic {
             Some(topic) => format!("{} • {topic}", self.channel_kind),
@@ -327,6 +351,15 @@ pub const PT: Strings = Strings {
     use_saved_profile: "Usar o perfil salvo",
     server_address: "Endereço do servidor",
     show_address: "Mostrar endereço",
+    ping_hint: "Tempo de ida e volta até o servidor. Clique para detalhes",
+    voice_delay_hint: "Atraso estimado entre alguém falar e você ouvir (e vice-versa)",
+    connection_title: "Conexão",
+    ping_average: "Ping médio:",
+    ping_last: "Último ping:",
+    ping_loss_out: "Perda de pacotes enviados:",
+    ping_voice_delay: "Atraso de voz estimado:",
+    monitor_title: "Ouvir meu microfone",
+    monitor_hint: "Toca sua voz já processada nos fones. Use fones para evitar eco.",
     hide_address: "Ocultar endereço",
     address_hint: "servidor.exemplo.com",
     address_empty: "Informe o endereço do servidor.",
@@ -368,6 +401,10 @@ pub const PT: Strings = Strings {
     choose_photo: "Escolher foto",
     change_photo: "Trocar foto",
     remove_photo: "Remover foto",
+    crop_title: "Ajustar foto",
+    crop_hint: "Arraste para posicionar e use a roda do mouse ou a barra para o zoom.",
+    crop_zoom: "Zoom",
+    crop_apply: "Aplicar foto",
     photo_hint: "PNG, JPG, GIF, BMP, WEBP, TIFF ou ICO. Fica salva só neste computador.",
     photo_picker_title: "Escolher foto de perfil",
     photo_filter: "Imagens",
@@ -412,6 +449,9 @@ pub const PT: Strings = Strings {
     chat_placeholder_prefix: "Conversar em",
     chat_send: "Enviar mensagem",
     chat_sending: "Enviando…",
+    chat_reply: "Responder",
+    chat_copy_text: "Copiar texto",
+    chat_cancel_reply: "Cancelar resposta",
     chat_no_answer: "O servidor não respondeu. A mensagem pode não ter chegado.",
     chat_rejected: "O servidor recusou a mensagem.",
     chat_offline: "Sem conexão com o servidor.",

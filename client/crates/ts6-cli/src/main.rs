@@ -640,7 +640,7 @@ async fn audio_call(session: &mut Session, opts: &Opts, seconds: u64) -> Result<
     use ts6_core::Wake;
 
     // Playback is optional: a machine may have no output device.
-    let playback = match ts6_audio::start_playback(opts.output_device.clone()) {
+    let playback = match ts6_audio::start_playback(opts.output_device.clone(), Default::default()) {
         Ok(playback) => {
             println!(
                 "playback: {} ({} ch @ {} Hz)",
@@ -689,6 +689,7 @@ async fn audio_call(session: &mut Session, opts: &Opts, seconds: u64) -> Result<
                 voice_activation: false,
                 threshold_db: ts6_audio::vad::DEFAULT_THRESHOLD_DB,
                 noise_suppression: ts6_audio::denoise::NoiseSuppression::Off,
+                monitor: Default::default(),
             },
             feed_tx,
         ) {

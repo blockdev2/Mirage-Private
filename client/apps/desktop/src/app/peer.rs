@@ -12,9 +12,9 @@ use crate::store::MAX_PEER_VOLUME;
 use crate::theme::{self, icon};
 
 /// Samples kept for the sparklines (one per second).
-const HISTORY: usize = 60;
+pub(super) const HISTORY: usize = 60;
 const MENU_WIDTH: f32 = 272.0;
-const INFO_WIDTH: f32 = 340.0;
+const INFO_WIDTH: f32 = 320.0;
 /// Around 100% the slider snaps, so "back to normal" is easy to hit.
 const SNAP: f32 = 0.04;
 
@@ -44,7 +44,7 @@ impl InfoView {
         let sample = [
             info.loss_incoming.unwrap_or(0.0),
             info.loss_outgoing,
-            info.ping_ms.unwrap_or(0.0) as f32,
+            info.ping_ms.map_or(f32::NAN, |p| p as f32),
         ];
         if self.history.len() >= HISTORY {
             self.history.pop_front();
@@ -225,109 +225,176 @@ impl App {
         }
     }
 
-    /// TeamSpeak-style connection info window for one participant.
+    /// Connection info window for one participant: the ping graph is the
+    /// one picture, everything else is a quiet list of label and value.
     pub(super) fn connection_window(&mut self, ctx: &egui::Context) {
         let t = self.t;
+        let show_addresses = self.show_addresses;
         let Some(view) = self.info_view.as_mut() else {
             return;
         };
         let mut open = true;
-        let title = format!("{} · {}", t.user_connection_info, view.name);
-        egui::Window::new(title)
+        let frame = egui::Frame::new()
+            .fill(theme::SIDEBAR)
+            .stroke(Stroke::new(1.0, theme::BORDER))
+            .corner_radius(CornerRadius::same(14))
+            .shadow(egui::Shadow {
+                offset: [0, 18],
+                blur: 48,
+                spread: 0,
+                color: Color32::from_black_alpha(150),
+            })
+            .inner_margin(egui::Margin::same(20));
+        egui::Window::new(t.user_connection_info)
             .id(egui::Id::unique("connection-info"))
-            .open(&mut open)
-            .collapsible(false)
+            .title_bar(false)
+            .frame(frame)
             .resizable(false)
-            .default_width(INFO_WIDTH)
+            .fixed_size(vec2(INFO_WIDTH, 0.0))
             .show(ctx, |ui| {
-                ui.set_width(INFO_WIDTH);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // Header: who, then what this is.
+                let (head, _) = ui.allocate_exact_size(vec2(INFO_WIDTH, 40.0), Sense::hover());
+                ui.painter().text(
+                    head.left_top(),
+                    Align2::LEFT_TOP,
+                    &view.name,
+                    FontId::new(17.0, theme::semibold()),
+                    theme::TEXT,
+                );
+                ui.painter().text(
+                    head.left_top() + vec2(0.0, 23.0),
+                    Align2::LEFT_TOP,
+                    t.user_connection_info,
+                    FontId::new(12.0, egui::FontFamily::Proportional),
+                    theme::TEXT_3,
+                );
+                let close =
+                    Rect::from_min_size(head.right_top() - vec2(30.0, 2.0), vec2(32.0, 32.0));
+                if ui
+                    .put(close, |ui: &mut egui::Ui| {
+                        super::settings::close_button(ui, t.close)
+                    })
+                    .clicked()
+                {
+                    open = false;
+                }
+                ui.add_space(14.0);
+
                 let Some(info) = view.info.clone() else {
                     ui.label(RichText::new(t.info_waiting).color(theme::TEXT_3));
                     return;
                 };
-                let percent = |v: f32| format!("{:.1} %", v * 100.0);
-                let series =
-                    |index: usize| -> Vec<f32> { view.history.iter().map(|s| s[index]).collect() };
-                info_row(
-                    ui,
-                    icon::ARROW_DOWN,
-                    t.info_loss_in,
-                    &info.loss_incoming.map_or("—".into(), percent),
-                    Some((&series(0), loss_color)),
-                );
-                info_row(
-                    ui,
-                    icon::ARROW_UP,
-                    t.info_loss_out,
-                    &percent(info.loss_outgoing),
-                    Some((&series(1), loss_color)),
-                );
-                let ping = match (info.ping_ms, info.ping_deviation_ms) {
-                    (Some(p), Some(d)) => format!("{p:.0} ms ± {d:.1}"),
-                    (Some(p), None) => format!("{p:.0} ms"),
-                    _ => "—".into(),
-                };
-                info_row(
-                    ui,
-                    icon::PULSE,
-                    t.info_ping,
-                    &ping,
-                    Some((&series(2), ping_color)),
-                );
-                ui.add_space(4.0);
-                info_row(
-                    ui,
-                    icon::HOURGLASS,
-                    t.info_idle,
-                    &clock(info.idle_secs),
-                    None,
-                );
-                info_row(
-                    ui,
-                    icon::CLOCK,
-                    t.info_connected,
-                    &info.connected_secs.map_or("—".into(), clock),
-                    None,
-                );
-                info_row(
-                    ui,
-                    icon::ARROW_DOWN,
-                    t.info_bytes_in,
-                    &bytes(info.bytes_received),
-                    None,
-                );
-                info_row(
-                    ui,
-                    icon::ARROW_UP,
-                    t.info_bytes_out,
-                    &bytes(info.bytes_sent),
-                    None,
-                );
 
-                ui.add_space(6.0);
-                ui.separator();
-                ui.label(RichText::new(t.info_address).small().color(theme::TEXT_3));
-                ui.horizontal(|ui| match &info.address {
-                    Some(address) => {
-                        ui.label(
-                            RichText::new(address)
-                                .font(FontId::new(14.0, egui::FontFamily::Monospace)),
+                // The ping graph, with the reading set into its corner.
+                let (graph, _) = ui.allocate_exact_size(vec2(INFO_WIDTH, 108.0), Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(graph, CornerRadius::same(10), theme::SURFACE);
+                let (reading, color) = match info.ping_ms {
+                    Some(p) => (format!("{p:.0}"), ping_color(p as f32)),
+                    None => ("—".into(), theme::TEXT_3),
+                };
+                let number = painter.text(
+                    graph.left_top() + vec2(14.0, 10.0),
+                    Align2::LEFT_TOP,
+                    reading,
+                    FontId::new(26.0, theme::semibold()),
+                    color,
+                );
+                let unit = match info.ping_deviation_ms {
+                    Some(d) => format!("ms  ±{d:.1}"),
+                    None => "ms".into(),
+                };
+                painter.text(
+                    pos2(number.right() + 5.0, number.bottom() - 5.0),
+                    Align2::LEFT_BOTTOM,
+                    unit,
+                    FontId::new(12.0, egui::FontFamily::Proportional),
+                    theme::TEXT_3,
+                );
+                painter.text(
+                    graph.right_top() + vec2(-14.0, 14.0),
+                    Align2::RIGHT_TOP,
+                    t.info_ping,
+                    FontId::new(12.0, egui::FontFamily::Proportional),
+                    theme::TEXT_3,
+                );
+                let pings: Vec<f32> = view.history.iter().map(|s| s[2]).collect();
+                sparkline(
+                    painter,
+                    Rect::from_min_max(
+                        graph.left_top() + vec2(14.0, 52.0),
+                        graph.right_bottom() - vec2(14.0, 12.0),
+                    ),
+                    &pings,
+                    ping_color,
+                );
+                ui.add_space(10.0);
+
+                // Everything else: a plain list, hairlines between rows.
+                let percent = |v: f32| format!("{:.1}%", v * 100.0);
+                let loss = |v: Option<f32>| match v {
+                    Some(v) => (
+                        percent(v),
+                        if v > 0.0 { loss_color(v) } else { theme::TEXT },
+                    ),
+                    None => ("—".into(), theme::TEXT_3),
+                };
+                let address = match &info.address {
+                    Some(a) if show_addresses => (a.clone(), theme::TEXT),
+                    Some(a) => ("•".repeat(a.len().min(15)), theme::TEXT_2),
+                    None => (t.info_hidden.to_string(), theme::TEXT_3),
+                };
+                let rows = [
+                    (t.info_loss_in, loss(info.loss_incoming)),
+                    (t.info_loss_out, loss(Some(info.loss_outgoing))),
+                    (
+                        t.info_connected,
+                        (info.connected_secs.map_or("—".into(), clock), theme::TEXT),
+                    ),
+                    (t.info_idle, (clock(info.idle_secs), theme::TEXT)),
+                    (t.info_bytes_in, (bytes(info.bytes_received), theme::TEXT)),
+                    (t.info_bytes_out, (bytes(info.bytes_sent), theme::TEXT)),
+                    (t.info_address, address),
+                ];
+                for (i, (label, (value, color))) in rows.into_iter().enumerate() {
+                    let (row, response) =
+                        ui.allocate_exact_size(vec2(INFO_WIDTH, 34.0), Sense::click());
+                    let painter = ui.painter();
+                    if i > 0 {
+                        painter.line_segment(
+                            [row.left_top(), row.right_top()],
+                            Stroke::new(1.0, theme::BORDER_SOFT),
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let copied = view
-                                .copied
-                                .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
-                            let glyph = if copied { icon::CHECK } else { icon::COPY };
-                            if theme::icon_button(ui, glyph, t.info_copy, false, 28.0).clicked() {
-                                ui.ctx().copy_text(address.clone());
-                                view.copied = Some(Instant::now());
-                            }
-                        });
                     }
-                    None => {
-                        ui.label(RichText::new(t.info_hidden).color(theme::TEXT_3));
+                    painter.text(
+                        row.left_center(),
+                        Align2::LEFT_CENTER,
+                        label,
+                        FontId::new(13.0, egui::FontFamily::Proportional),
+                        theme::TEXT_2,
+                    );
+                    painter.text(
+                        row.right_center(),
+                        Align2::RIGHT_CENTER,
+                        value,
+                        FontId::new(13.0, theme::medium()),
+                        color,
+                    );
+                    // The address row copies the address on click.
+                    if let (Some(addr), true) = (&info.address, label == t.info_address) {
+                        let copied = view
+                            .copied
+                            .is_some_and(|at| at.elapsed() < Duration::from_secs(2));
+                        let response = response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(if copied { "✓" } else { t.info_copy });
+                        if response.clicked() {
+                            ui.ctx().copy_text(addr.clone());
+                            view.copied = Some(Instant::now());
+                        }
                     }
-                });
+                }
             });
         if !open {
             self.info_view = None;
@@ -571,72 +638,60 @@ fn chip_button(ui: &mut egui::Ui, glyph: &str, label: &str, active: bool) -> egu
 }
 
 /// Values of a sparkline and the color for its latest value.
-type Spark<'a> = (&'a [f32], fn(f32) -> Color32);
-
-/// One statistic: icon, label, value, and optionally a sparkline under it.
-fn info_row(ui: &mut egui::Ui, glyph: &str, label: &str, value: &str, spark: Option<Spark<'_>>) {
-    let height = if spark.is_some() { 44.0 } else { 26.0 };
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    let painter = ui.painter();
-    let line_y = rect.top() + 12.0;
-    painter.text(
-        pos2(rect.left() + 8.0, line_y),
-        Align2::CENTER_CENTER,
-        glyph,
-        FontId::new(14.0, theme::icons()),
-        theme::TEXT_3,
-    );
-    painter.text(
-        pos2(rect.left() + 24.0, line_y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::new(13.0, egui::FontFamily::Proportional),
-        theme::TEXT_2,
-    );
-    painter.text(
-        pos2(rect.right(), line_y),
-        Align2::RIGHT_CENTER,
-        value,
-        FontId::new(13.0, egui::FontFamily::Monospace),
-        theme::TEXT,
-    );
-    if let Some((values, color)) = spark {
-        let area = Rect::from_min_max(
-            pos2(rect.left() + 24.0, rect.top() + 26.0),
-            pos2(rect.right(), rect.bottom() - 4.0),
-        );
-        sparkline(painter, area, values, color);
-    }
-}
-
-/// Small line graph; the newest value is on the right.
-fn sparkline(painter: &egui::Painter, area: Rect, values: &[f32], color: fn(f32) -> Color32) {
+/// Small area graph; the newest value is on the right. Missing samples (NaN)
+/// leave gaps. The scale spans the recent range with some headroom, so a
+/// steady value sits mid-height instead of hugging the top or the floor.
+pub(super) fn sparkline(
+    painter: &egui::Painter,
+    area: Rect,
+    values: &[f32],
+    color: fn(f32) -> Color32,
+) {
     painter.line_segment(
         [area.left_bottom(), area.right_bottom()],
         Stroke::new(1.0, theme::BORDER_SOFT),
     );
-    if values.len() < 2 {
+    let known = || values.iter().copied().filter(|v| v.is_finite());
+    let Some(last) = values.iter().rev().copied().find(|v| v.is_finite()) else {
         return;
+    };
+    let max = known().fold(f32::MIN, f32::max);
+    let min = known().fold(f32::MAX, f32::min);
+    let top = (max * 1.5).max(min + 1e-3).max(f32::EPSILON);
+    let step = area.width() / (values.len().clamp(20, HISTORY) - 1) as f32;
+    let start = area.right() - step * (values.len().saturating_sub(1)) as f32;
+    let ink = color(last);
+    let y = |v: f32| area.bottom() - (v / top).clamp(0.0, 1.0) * area.height();
+    let mut run: Vec<egui::Pos2> = Vec::new();
+    let flush = |run: &mut Vec<egui::Pos2>| {
+        if run.len() >= 2 {
+            // Filled column by column: egui only fills convex polygons.
+            for pair in run.windows(2) {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        pair[0],
+                        pair[1],
+                        pos2(pair[1].x, area.bottom()),
+                        pos2(pair[0].x, area.bottom()),
+                    ],
+                    ink.gamma_multiply(0.14),
+                    Stroke::NONE,
+                ));
+            }
+            painter.add(egui::Shape::line(run.clone(), Stroke::new(1.5, ink)));
+        } else if let [point] = run[..] {
+            painter.circle_filled(point, 2.0, ink);
+        }
+        run.clear();
+    };
+    for (i, v) in values.iter().enumerate() {
+        if v.is_finite() {
+            run.push(pos2(start + step * i as f32, y(*v)));
+        } else {
+            flush(&mut run);
+        }
     }
-    let max = values
-        .iter()
-        .copied()
-        .fold(0.0f32, f32::max)
-        .max(f32::EPSILON);
-    let step = area.width() / (HISTORY - 1) as f32;
-    let start = area.right() - step * (values.len() - 1) as f32;
-    let points: Vec<_> = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            pos2(
-                start + step * i as f32,
-                area.bottom() - (v / max).clamp(0.0, 1.0) * area.height(),
-            )
-        })
-        .collect();
-    let last = *values.last().unwrap_or(&0.0);
-    painter.add(egui::Shape::line(points, Stroke::new(1.5, color(last))));
+    flush(&mut run);
 }
 
 fn loss_color(loss: f32) -> Color32 {
@@ -649,7 +704,7 @@ fn loss_color(loss: f32) -> Color32 {
     }
 }
 
-fn ping_color(ping_ms: f32) -> Color32 {
+pub(super) fn ping_color(ping_ms: f32) -> Color32 {
     if ping_ms < 80.0 {
         theme::SUCCESS
     } else if ping_ms < 160.0 {

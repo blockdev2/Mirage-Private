@@ -31,7 +31,24 @@ pub struct ProfileEdit {
     /// Focus the name field on its first frame.
     pub focus: bool,
     pub photo_error: Option<AvatarError>,
+    /// A chosen photo waiting to be framed and confirmed.
+    pub crop: Option<PhotoCrop>,
 }
+
+/// The crop editor's state: the full image (cropped from on apply), a
+/// preview texture, and how the user framed it.
+pub struct PhotoCrop {
+    image: image::DynamicImage,
+    texture: egui::TextureHandle,
+    /// 1 = the short side exactly fills the circle.
+    zoom: f32,
+    /// Image center relative to the circle center, in points on screen.
+    offset: egui::Vec2,
+}
+
+const CROP_STAGE: f32 = 420.0;
+const CROP_CIRCLE: f32 = 360.0;
+const CROP_MAX_ZOOM: f32 = 4.0;
 
 impl App {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
@@ -54,6 +71,22 @@ impl App {
                 color: Color32::from_black_alpha(150),
             })
             .inner_margin(Margin::symmetric(24, 22));
+
+        // Framing a new photo gets its own, larger window in place of the
+        // settings, so the scroll wheel zooms instead of scrolling the list.
+        if self.profile_edit.crop.is_some() {
+            let modal = egui::Modal::new(Id::unique("photo-crop"))
+                .frame(frame)
+                .backdrop_color(Color32::from_black_alpha(140))
+                .show(ctx, |ui| {
+                    ui.set_width(CROP_STAGE);
+                    self.crop_editor(ui);
+                });
+            if modal.should_close() {
+                self.profile_edit.crop = None;
+            }
+            return;
+        }
 
         let modal = egui::Modal::new(Id::unique("settings"))
             .frame(frame)
@@ -232,21 +265,158 @@ impl App {
         else {
             return;
         };
-        match crate::store::prepare_avatar(&path) {
+        let _ = id;
+        match crate::store::load_avatar_source(&path) {
             Ok(image) => {
-                if self.store.set_avatar(&id, &image) {
-                    self.store.save();
-                    self.profile_edit.photo_error = None;
-                    if self.in_session() {
-                        self.publish_avatar(Some(&id));
-                    }
-                } else {
-                    self.profile_edit.photo_error = Some(AvatarError::Unreadable);
-                }
+                // The preview only needs screen resolution; the crop uses the original.
+                let preview = image.thumbnail(1024, 1024).to_rgba8();
+                let size = [preview.width() as usize, preview.height() as usize];
+                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, preview.as_raw());
+                let texture = ctx.load_texture("avatar-crop", pixels, egui::TextureOptions::LINEAR);
+                self.profile_edit.photo_error = None;
+                self.profile_edit.crop = Some(PhotoCrop {
+                    image,
+                    texture,
+                    zoom: 1.0,
+                    offset: egui::Vec2::ZERO,
+                });
             }
             Err(error) => self.profile_edit.photo_error = Some(error),
         }
         ctx.request_repaint();
+    }
+
+    /// Saves the framed square as the profile photo.
+    fn apply_crop(&mut self) {
+        let Some(crop) = self.profile_edit.crop.take() else {
+            return;
+        };
+        let Some(id) = self.store.active_profile_id() else {
+            return;
+        };
+        let (width, height) = (crop.image.width() as f32, crop.image.height() as f32);
+        let scale = crop_scale(&crop);
+        let side = CROP_CIRCLE / scale;
+        let center_x = width / 2.0 - crop.offset.x / scale;
+        let center_y = height / 2.0 - crop.offset.y / scale;
+        let photo = crate::store::crop_avatar(
+            &crop.image,
+            (center_x - side / 2.0).max(0.0).round() as u32,
+            (center_y - side / 2.0).max(0.0).round() as u32,
+            side.round() as u32,
+        );
+        if self.store.set_avatar(&id, &photo) {
+            self.store.save();
+            if self.in_session() {
+                self.publish_avatar(Some(&id));
+            }
+        } else {
+            self.profile_edit.photo_error = Some(AvatarError::Unreadable);
+        }
+    }
+
+    /// The framing step after a photo is chosen: drag to move, scroll or the
+    /// slider to zoom; nothing changes until "Aplicar foto".
+    fn crop_editor(&mut self, ui: &mut Ui) {
+        let t = self.t;
+        let Some(crop) = self.profile_edit.crop.as_mut() else {
+            return;
+        };
+        ui.label(RichText::new(t.crop_title).font(FontId::new(22.0, theme::semibold())));
+        ui.label(RichText::new(t.crop_hint).small().color(theme::TEXT_3));
+        ui.add_space(14.0);
+
+        let mut apply = false;
+        let mut cancel = false;
+        ui.vertical_centered(|ui| {
+            let (stage, response) =
+                ui.allocate_exact_size(vec2(CROP_STAGE, CROP_STAGE), Sense::drag());
+            if response.dragged() {
+                crop.offset += response.drag_delta();
+            }
+            if response.hovered() {
+                // Taken from the input, so nothing behind also scrolls.
+                let scroll = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta).y);
+                if scroll != 0.0 {
+                    crop.zoom = (crop.zoom * (1.0 + scroll * 0.002)).clamp(1.0, CROP_MAX_ZOOM);
+                }
+            }
+            clamp_offset(crop);
+            let grabbing = response.dragged();
+            response.on_hover_cursor(if grabbing {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+
+            let painter = ui.painter_at(stage);
+            painter.rect_filled(stage, CornerRadius::same(12), theme::SURFACE_RAISED);
+            let scale = crop_scale(crop);
+            let size = vec2(crop.image.width() as f32, crop.image.height() as f32) * scale;
+            let image_rect = Rect::from_center_size(stage.center() + crop.offset, size);
+            painter.image(
+                crop.texture.id(),
+                image_rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            dim_outside_circle(&painter, stage, CROP_CIRCLE / 2.0);
+            painter.circle_stroke(
+                stage.center(),
+                CROP_CIRCLE / 2.0,
+                Stroke::new(2.0, Color32::from_white_alpha(220)),
+            );
+
+            ui.add_space(14.0);
+            // Zoom: a small and a large photo glyph either side of the slider.
+            ui.allocate_ui_with_layout(
+                vec2(CROP_STAGE, 24.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.label(
+                        RichText::new(icon::IMAGE)
+                            .font(FontId::new(13.0, theme::icons()))
+                            .color(theme::TEXT_3),
+                    );
+                    ui.spacing_mut().slider_width = CROP_STAGE - 60.0;
+                    ui.add(
+                        egui::Slider::new(&mut crop.zoom, 1.0..=CROP_MAX_ZOOM)
+                            .show_value(false)
+                            .logarithmic(true),
+                    )
+                    .on_hover_text(t.crop_zoom);
+                    ui.label(
+                        RichText::new(icon::IMAGE)
+                            .font(FontId::new(19.0, theme::icons()))
+                            .color(theme::TEXT_3),
+                    );
+                },
+            );
+            clamp_offset(crop);
+            ui.add_space(16.0);
+            ui.allocate_ui_with_layout(
+                vec2(CROP_STAGE, 40.0),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if theme::button(ui, t.crop_apply, None, Tone::Primary, 136.0).clicked() {
+                        apply = true;
+                    }
+                    if theme::button(ui, t.cancel, None, Tone::Ghost, 100.0).clicked() {
+                        cancel = true;
+                    }
+                },
+            );
+        });
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            apply = true;
+        }
+        if apply {
+            self.apply_crop();
+        } else if cancel {
+            self.profile_edit.crop = None;
+        }
     }
 
     fn remove_photo(&mut self) {
@@ -348,6 +518,18 @@ impl App {
             noise_choices(ui, t, &mut audio.noise);
             // Applies live as well: no microphone restart.
             changed_live |= audio.noise != before;
+
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(t.monitor_title).color(theme::TEXT));
+                    ui.label(RichText::new(t.monitor_hint).small().color(theme::TEXT_3));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    changed_live |=
+                        theme::toggle(ui, &mut audio.monitor, t.monitor_title).changed();
+                });
+            });
         });
 
         if changed_live {
@@ -383,6 +565,42 @@ impl App {
 }
 
 // Pieces --------------------------------------------------------------------
+
+/// Screen points per image pixel for the current zoom.
+fn crop_scale(crop: &PhotoCrop) -> f32 {
+    let short = crop.image.width().min(crop.image.height()).max(1) as f32;
+    CROP_CIRCLE / short * crop.zoom
+}
+
+/// Keeps the circle covered by the image, so the photo never has empty edges.
+fn clamp_offset(crop: &mut PhotoCrop) {
+    let scale = crop_scale(crop);
+    let room = |len: u32| ((len as f32 * scale - CROP_CIRCLE) / 2.0).max(0.0);
+    let (x, y) = (room(crop.image.width()), room(crop.image.height()));
+    crop.offset = vec2(crop.offset.x.clamp(-x, x), crop.offset.y.clamp(-y, y));
+}
+
+/// Darkens the stage outside the circle: a ring of quads from the circle out
+/// to the stage edge (egui has no inverse fill).
+fn dim_outside_circle(painter: &egui::Painter, stage: Rect, radius: f32) {
+    let shade = Color32::from_black_alpha(150);
+    let center = stage.center();
+    let reach = stage.width().max(stage.height());
+    let steps = 96;
+    let mut mesh = egui::Mesh::default();
+    for i in 0..=steps {
+        let angle = i as f32 / steps as f32 * std::f32::consts::TAU;
+        let dir = vec2(angle.cos(), angle.sin());
+        mesh.colored_vertex(center + dir * radius, shade);
+        mesh.colored_vertex(center + dir * reach, shade);
+        if i > 0 {
+            let base = (i as u32 - 1) * 2;
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base + 1, base + 3, base + 2);
+        }
+    }
+    painter.add(mesh);
+}
 
 /// One block of the window: the same card as the app's content blocks, with a
 /// slightly rounder corner because the window around it is larger.
@@ -432,7 +650,7 @@ fn sub_heading(ui: &mut Ui, text: &str) {
 
 /// A plain X, painted so it does not depend on an icon font. Shows a soft
 /// round highlight under the pointer.
-fn close_button(ui: &mut Ui, label: &str) -> egui::Response {
+pub(super) fn close_button(ui: &mut Ui, label: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     let hot = response.hovered() || response.has_focus();

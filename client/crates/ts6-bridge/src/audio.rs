@@ -31,6 +31,8 @@ pub struct AudioConfig {
     pub voice_activation: bool,
     pub threshold_db: f32,
     pub noise_suppression: ts6_audio::denoise::NoiseSuppression,
+    /// Play our own processed microphone back locally.
+    pub monitor: bool,
 }
 
 impl Default for AudioConfig {
@@ -44,6 +46,7 @@ impl Default for AudioConfig {
             voice_activation: true,
             threshold_db: ts6_audio::vad::DEFAULT_THRESHOLD_DB,
             noise_suppression: ts6_audio::denoise::NoiseSuppression::Standard,
+            monitor: false,
         }
     }
 }
@@ -66,6 +69,7 @@ pub struct AudioEngine {
     applied: Option<AudioConfig>,
     /// Per-client playback volume, reapplied when playback restarts.
     volumes: std::collections::HashMap<u16, f32>,
+    monitor: ts6_audio::Monitor,
 }
 
 impl AudioEngine {
@@ -90,6 +94,7 @@ impl AudioEngine {
             last_publish: Instant::now(),
             applied: None,
             volumes: Default::default(),
+            monitor: Default::default(),
         }
     }
 
@@ -129,17 +134,20 @@ impl AudioEngine {
             let same = AudioConfig {
                 threshold_db: config.threshold_db,
                 noise_suppression: config.noise_suppression,
+                monitor: config.monitor,
                 ..applied.clone()
             };
             if &same == config {
                 capture.set_threshold_db(config.threshold_db);
                 capture.set_noise_suppression(config.noise_suppression);
+                self.monitor.set_enabled(config.monitor);
                 self.applied = Some(config.clone());
                 return;
             }
         }
         self.teardown_input();
         self.applied = Some(config.clone());
+        self.monitor.set_enabled(config.enabled && config.monitor);
 
         if !config.enabled {
             if let Some(playback) = self.playback.take() {
@@ -176,7 +184,7 @@ impl AudioEngine {
 
         // Playback (receiving voice).
         if self.playback.is_none() {
-            match ts6_audio::start_playback(config.output_device.clone()) {
+            match ts6_audio::start_playback(config.output_device.clone(), self.monitor.clone()) {
                 Ok(playback) => {
                     for (client, volume) in &self.volumes {
                         playback.set_volume(*client, *volume);
@@ -205,6 +213,7 @@ impl AudioEngine {
                     voice_activation: self.ptt.is_none() && config.voice_activation,
                     threshold_db: config.threshold_db,
                     noise_suppression: config.noise_suppression,
+                    monitor: self.monitor.clone(),
                 },
                 target,
             ) {

@@ -355,6 +355,7 @@ fn publish_audio(
     engine: &mut audio::AudioEngine,
     events: &broadcast::Sender<String>,
     tx_frames: u64,
+    own: Option<(f64, f32)>,
 ) {
     let counters = engine.counters();
     protocol::publish(
@@ -370,6 +371,8 @@ fn publish_audio(
             playback: counters.playback,
             tone: counters.tone,
             ptt_binding: counters.ptt_binding,
+            ping_ms: own.map(|(ping, _)| ping),
+            loss_out: own.map(|(_, loss)| loss),
         },
     );
 }
@@ -554,7 +557,8 @@ async fn session_task(
                 .as_ref()
                 .map(|active| active.audio_frames_sent())
                 .unwrap_or(0);
-            publish_audio(&mut engine, &events, tx_frames);
+            let own = session.as_ref().and_then(|active| active.own_network());
+            publish_audio(&mut engine, &events, tx_frames, own);
             engine.mark_published();
         }
     }
@@ -748,7 +752,11 @@ async fn apply_command(
             voice_activation,
             vad_threshold,
             noise_suppression,
+            monitor,
         } => {
+            if let Some(monitor) = monitor {
+                config.monitor = monitor;
+            }
             if let Some(level) = noise_suppression {
                 config.noise_suppression = ts6_audio::denoise::NoiseSuppression::from_level(level);
             }
@@ -788,7 +796,8 @@ async fn apply_command(
                 .as_ref()
                 .map(|active| active.audio_frames_sent())
                 .unwrap_or(0);
-            publish_audio(engine, events, tx_frames);
+            let own = session.as_ref().and_then(|active| active.own_network());
+            publish_audio(engine, events, tx_frames, own);
         }
 
         Command::Devices => protocol::publish(

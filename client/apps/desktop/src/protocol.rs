@@ -107,6 +107,12 @@ pub struct AudioEvent {
     pub playback: Option<String>,
     pub tone: bool,
     pub ptt_binding: Option<String>,
+    /// Our round-trip time to the server. Older bridges do not send it.
+    #[serde(default)]
+    pub ping_ms: Option<f64>,
+    /// Our packet loss towards the server, 0..1.
+    #[serde(default)]
+    pub loss_out: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,6 +202,7 @@ pub enum Command {
         voice_activation: bool,
         vad_threshold: f32,
         noise_suppression: u8,
+        monitor: bool,
     },
     Devices,
     Refresh,

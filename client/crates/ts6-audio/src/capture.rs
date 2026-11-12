@@ -7,8 +7,9 @@
 //! counted.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -17,6 +18,7 @@ use cpal::SampleFormat;
 use crate::codec::{VoiceEncoder, FRAME_SAMPLES, SAMPLE_RATE};
 use crate::denoise::{Denoiser, NoiseSuppression};
 use crate::devices::pick_input;
+use crate::playback::Monitor;
 use crate::resample::{downmix_to_mono, LinearResampler};
 use crate::vad::{level_db, Decision, VoiceActivation, DEFAULT_THRESHOLD_DB, SILENCE_DB};
 
@@ -33,6 +35,8 @@ pub struct CaptureConfig {
     pub threshold_db: f32,
     /// Noise suppression level; adjustable while running.
     pub noise_suppression: NoiseSuppression,
+    /// Receives the processed audio for local "hear yourself" playback.
+    pub monitor: Monitor,
 }
 
 impl Default for CaptureConfig {
@@ -43,6 +47,7 @@ impl Default for CaptureConfig {
             voice_activation: true,
             threshold_db: DEFAULT_THRESHOLD_DB,
             noise_suppression: NoiseSuppression::Standard,
+            monitor: Monitor::default(),
         }
     }
 }
@@ -128,6 +133,7 @@ struct Processor {
     vad: Option<VoiceActivation>,
     /// The last encoded frame, sent first when the gate opens (pre-roll).
     previous: Option<Vec<u8>>,
+    monitor: Monitor,
 }
 
 impl Processor {
@@ -155,7 +161,27 @@ impl Processor {
             live,
             denoiser: Denoiser::new(),
             previous: None,
+            monitor: Monitor::default(),
         })
+    }
+
+    /// The device was (re)opened with a new sample rate: drop stale audio.
+    fn restart(&mut self, sample_rate: u32) {
+        self.resampler = LinearResampler::new(sample_rate, SAMPLE_RATE);
+        self.pending.clear();
+        self.previous = None;
+    }
+
+    /// The device went away: end any open voice session so listeners do not
+    /// hear a stuck transmission, and reset the voice gate.
+    fn interrupted(&mut self) {
+        if self.live.transmitting.swap(false, Ordering::Relaxed) {
+            self.send(Vec::new());
+        }
+        let threshold = f32::from_bits(self.live.threshold_db.load(Ordering::Relaxed));
+        self.vad = self.vad.as_ref().map(|_| VoiceActivation::new(threshold));
+        self.pending.clear();
+        self.previous = None;
     }
 
     fn send(&mut self, packet: Vec<u8>) {
@@ -187,6 +213,7 @@ impl Processor {
             // Denoise first, so the level (and voice activation) sees clean audio.
             let noise = NoiseSuppression::from_level(self.live.noise.load(Ordering::Relaxed));
             self.denoiser.process(&mut frame, noise);
+            self.monitor.push(&frame);
             let level = level_db(&frame);
             self.live.level_db.store(level.to_bits(), Ordering::Relaxed);
             // Every frame is encoded, sent or not, so the encoder state stays
@@ -227,6 +254,137 @@ impl Processor {
     }
 }
 
+/// No callback for this long means the device vanished without an error.
+const STALL: Duration = Duration::from_millis(1500);
+const RETRY: Duration = Duration::from_millis(200);
+
+fn input<T: cpal::SizedSample + Send + 'static>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    channels: usize,
+    processor: &Arc<Mutex<Processor>>,
+    lost: &Arc<AtomicBool>,
+    beat: &Arc<AtomicU64>,
+    to_f32: fn(T) -> f32,
+) -> Result<cpal::Stream> {
+    let (processor, beat, lost) = (processor.clone(), beat.clone(), lost.clone());
+    let mut scratch: Vec<f32> = Vec::new();
+    Ok(device.build_input_stream(
+        config,
+        move |data: &[T], _| {
+            beat.fetch_add(1, Ordering::Relaxed);
+            scratch.clear();
+            scratch.extend(data.iter().map(|s| to_f32(*s)));
+            if let Ok(mut processor) = processor.lock() {
+                processor.feed(&scratch, channels);
+            }
+        },
+        move |error: cpal::Error| {
+            // Xruns and reroutes are glitches the stream survives; reopening on
+            // them would loop forever on a busy system.
+            use cpal::ErrorKind::{DeviceChanged, Xrun};
+            if !matches!(error.kind(), Xrun | DeviceChanged) {
+                tracing::warn!(%error, "capture stream lost");
+                lost.store(true, Ordering::Relaxed);
+            }
+        },
+        None,
+    )?)
+}
+
+fn open_stream(
+    device: &cpal::Device,
+    processor: &Arc<Mutex<Processor>>,
+    lost: &Arc<AtomicBool>,
+    beat: &Arc<AtomicU64>,
+) -> Result<cpal::Stream> {
+    let supported = device.default_input_config()?;
+    let channels = supported.channels() as usize;
+    if let Ok(mut processor) = processor.lock() {
+        processor.restart(supported.sample_rate());
+    }
+    let (config, format) = (supported.config(), supported.sample_format());
+    let stream = match format {
+        SampleFormat::F32 => input::<f32>(device, config, channels, processor, lost, beat, |s| s)?,
+        SampleFormat::I16 => input::<i16>(device, config, channels, processor, lost, beat, |s| {
+            s as f32 / 32768.0
+        })?,
+        SampleFormat::U16 => input::<u16>(device, config, channels, processor, lost, beat, |s| {
+            (s as f32 - 32768.0) / 32768.0
+        })?,
+        other => return Err(anyhow!("unsupported capture sample format {other:?}")),
+    };
+    stream.play()?;
+    Ok(stream)
+}
+
+/// Keeps the microphone alive: when the device disappears (even for a few
+/// milliseconds, as with a flaky USB cable) the stream is dropped and reopened
+/// until it works, instead of staying dead until the app restarts. Runs until
+/// `stop` is set.
+fn supervise(
+    first: cpal::Device,
+    wanted: &Option<String>,
+    processor: &Arc<Mutex<Processor>>,
+    stop: &AtomicBool,
+) {
+    let lost = Arc::new(AtomicBool::new(false));
+    let beat = Arc::new(AtomicU64::new(0));
+    let mut first = Some(first);
+    // The open stream, the name of its device and the last heartbeat seen.
+    let mut open: Option<(cpal::Stream, String)> = None;
+    let mut seen = 0;
+    let mut seen_at = Instant::now();
+    let mut checked_at = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        if let Some((_, name)) = &open {
+            let now = beat.load(Ordering::Relaxed);
+            if now != seen {
+                (seen, seen_at) = (now, Instant::now());
+            }
+            // On a fallback device, switch back as soon as the chosen one returns.
+            let back = wanted.is_some()
+                && wanted.as_deref() != Some(name.as_str())
+                && checked_at.elapsed() > Duration::from_secs(1)
+                && {
+                    checked_at = Instant::now();
+                    pick_input(wanted.clone())
+                        .is_some_and(|d| &crate::devices::device_name(&d) != name)
+                };
+            if lost.load(Ordering::Relaxed) || seen_at.elapsed() > STALL || back {
+                tracing::warn!("microphone interrupted, reopening");
+                open = None;
+                if let Ok(mut processor) = processor.lock() {
+                    processor.interrupted();
+                }
+            }
+        }
+        if open.is_none() {
+            lost.store(false, Ordering::Relaxed);
+            let device = first.take().or_else(|| pick_input(wanted.clone()));
+            match device {
+                Some(device) => match open_stream(&device, processor, &lost, &beat) {
+                    Ok(stream) => {
+                        let name = crate::devices::device_name(&device);
+                        tracing::info!(device = %name, "capture started");
+                        (seen, seen_at) = (beat.load(Ordering::Relaxed), Instant::now());
+                        open = Some((stream, name));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot open the capture stream, retrying")
+                    }
+                },
+                None => tracing::warn!("no input device, retrying"),
+            }
+            if open.is_none() {
+                std::thread::sleep(RETRY);
+                continue;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Open the microphone and start feeding encoded frames into `sink`.
 pub fn start_capture(
     config: CaptureConfig,
@@ -237,8 +395,6 @@ pub fn start_capture(
     let supported = device.default_input_config()?;
     let channels = supported.channels() as usize;
     let sample_rate = supported.sample_rate();
-    let sample_format = supported.sample_format();
-    let stream_config = supported.config();
 
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(AtomicU64::new(0));
@@ -256,10 +412,12 @@ pub fn start_capture(
     let voice_activation = config.voice_activation;
     let device_for_thread = device_name.clone();
 
+    let wanted = config.device.clone();
+    let monitor = config.monitor.clone();
     let thread = std::thread::Builder::new()
         .name("ts6-capture".into())
         .spawn(move || {
-            let mut processor = match Processor::new(
+            let processor = match Processor::new(
                 sample_rate,
                 bitrate,
                 sink,
@@ -268,67 +426,13 @@ pub fn start_capture(
                 live_thread.clone(),
                 voice_activation,
             ) {
-                Ok(processor) => processor,
+                Ok(processor) => Arc::new(Mutex::new(Processor { monitor, ..processor })),
                 Err(error) => {
                     tracing::error!(%error, device = %device_for_thread, "cannot create the Opus encoder");
                     return;
                 }
             };
-
-            let on_error = |error| tracing::error!(%error, "capture stream error");
-            let stream = match sample_format {
-                SampleFormat::F32 => device.build_input_stream(
-                    stream_config,
-                    move |data: &[f32], _| processor.feed(data, channels),
-                    on_error,
-                    None,
-                ),
-                SampleFormat::I16 => device.build_input_stream(
-                    stream_config,
-                    move |data: &[i16], _| {
-                        let converted: Vec<f32> =
-                            data.iter().map(|s| *s as f32 / 32768.0).collect();
-                        processor.feed(&converted, channels);
-                    },
-                    on_error,
-                    None,
-                ),
-                SampleFormat::U16 => device.build_input_stream(
-                    stream_config,
-                    move |data: &[u16], _| {
-                        let converted: Vec<f32> = data
-                            .iter()
-                            .map(|s| (*s as f32 - 32768.0) / 32768.0)
-                            .collect();
-                        processor.feed(&converted, channels);
-                    },
-                    on_error,
-                    None,
-                ),
-                other => {
-                    tracing::error!(?other, "unsupported capture sample format");
-                    return;
-                }
-            };
-
-            let stream = match stream {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::error!(%error, device = %device_for_thread, "cannot open the capture stream");
-                    return;
-                }
-            };
-
-            if let Err(error) = stream.play() {
-                tracing::error!(%error, "cannot start the capture stream");
-                return;
-            }
-            tracing::info!(device = %device_for_thread, sample_rate, channels, ?sample_format, "capture started");
-
-            while !stop_thread.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            drop(stream);
+            supervise(device, &wanted, &processor, &stop_thread);
             live_thread.transmitting.store(false, Ordering::Relaxed);
             tracing::info!(device = %device_for_thread, "capture stopped");
         })?;

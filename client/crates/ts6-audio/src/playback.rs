@@ -24,6 +24,57 @@ use crate::resample::LinearResampler;
 /// Per-peer playback volume, shared with the audio callback.
 type Volumes = Arc<std::sync::Mutex<std::collections::HashMap<u16, f32>>>;
 
+/// Our own processed microphone, played back locally while enabled
+/// ("hear yourself"). Capture pushes into it, playback mixes it in.
+#[derive(Clone, Default, Debug)]
+pub struct Monitor(Arc<MonitorInner>);
+
+#[derive(Default, Debug)]
+struct MonitorInner {
+    on: AtomicBool,
+    samples: std::sync::Mutex<std::collections::VecDeque<f32>>,
+}
+
+/// Older monitor audio is dropped past this (100 ms at 48 kHz). shortcut:
+/// mic and speaker clocks drift, so this drops or pads samples now and then
+/// instead of resampling; upgrade if the monitor is used for long sessions.
+const MONITOR_MAX: usize = (SAMPLE_RATE as usize) / 10;
+
+impl Monitor {
+    pub fn set_enabled(&self, on: bool) {
+        self.0.on.store(on, Ordering::Relaxed);
+        if !on {
+            self.0
+                .samples
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
+        }
+    }
+
+    pub(crate) fn push(&self, frame: &[f32]) {
+        if !self.0.on.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut samples = self.0.samples.lock().unwrap_or_else(|p| p.into_inner());
+        samples.extend(frame);
+        let excess = samples.len().saturating_sub(MONITOR_MAX);
+        samples.drain(..excess);
+    }
+
+    fn mix_into(&self, mono: &mut [f32]) {
+        if !self.0.on.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Ok(mut samples) = self.0.samples.try_lock() {
+            let n = mono.len().min(samples.len());
+            for (out, own) in mono.iter_mut().zip(samples.drain(..n)) {
+                *out += own;
+            }
+        }
+    }
+}
+
 /// Highest per-user volume (400%).
 pub const MAX_PEER_VOLUME: f32 = 4.0;
 
@@ -98,6 +149,7 @@ struct Renderer {
     /// every callback, audible as small clicks.
     ready: std::collections::VecDeque<f32>,
     frames: Arc<AtomicU64>,
+    monitor: Monitor,
 }
 
 /// Mixer audio pulled per step: 5 ms, so at most 5 ms of extra latency.
@@ -109,6 +161,7 @@ impl Renderer {
         mixer: Arc<std::sync::Mutex<Mixer>>,
         volumes: Volumes,
         frames: Arc<AtomicU64>,
+        monitor: Monitor,
     ) -> Self {
         Self {
             mixer,
@@ -117,6 +170,7 @@ impl Renderer {
             resampled: Vec::new(),
             ready: std::collections::VecDeque::new(),
             frames,
+            monitor,
         }
     }
 
@@ -130,7 +184,7 @@ impl Renderer {
         // Pull small chunks until enough device-rate audio is ready; whatever is
         // left over waits for the next callback.
         while self.ready.len() < out_frames {
-            let mono = {
+            let mut mono = {
                 let mut mixer = self
                     .mixer
                     .lock()
@@ -140,6 +194,7 @@ impl Renderer {
                 }
                 mixer.render_mono(RENDER_CHUNK)
             };
+            self.monitor.mix_into(&mut mono);
             self.resampled.clear();
             self.resampler.process(&mono, &mut self.resampled);
             if self.resampled.is_empty() {
@@ -162,7 +217,7 @@ impl Renderer {
 
 /// Open the speakers. Received voice packets must be posted with
 /// [`Playback::enqueue`].
-pub fn start_playback(device: Option<String>) -> Result<Playback> {
+pub fn start_playback(device: Option<String>, monitor: Monitor) -> Result<Playback> {
     let output = pick_output(device).ok_or_else(|| anyhow!("no output device"))?;
     let device_name = crate::devices::device_name(&output);
     let supported = output.default_output_config()?;
@@ -216,7 +271,7 @@ pub fn start_playback(device: Option<String>) -> Result<Playback> {
 
             let stream = match sample_format {
                 SampleFormat::F32 => {
-                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone());
+                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone());
                     output.build_output_stream(
                         stream_config,
                         move |data: &mut [f32], _| renderer.fill(data, channels),
@@ -225,7 +280,7 @@ pub fn start_playback(device: Option<String>) -> Result<Playback> {
                     )
                 }
                 SampleFormat::I16 => {
-                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone());
+                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone());
                     let mut scratch: Vec<f32> = vec![0.0; 8192];
                     output.build_output_stream::<i16, _, _>(
                         stream_config,
@@ -244,7 +299,7 @@ pub fn start_playback(device: Option<String>) -> Result<Playback> {
                     )
                 }
                 SampleFormat::U16 => {
-                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone());
+                    let mut renderer = Renderer::new(sample_rate, mixer.clone(), volumes_thread.clone(), frames_thread.clone(), monitor.clone());
                     let mut scratch: Vec<f32> = vec![0.0; 8192];
                     output.build_output_stream::<u16, _, _>(
                         stream_config,
@@ -301,4 +356,24 @@ pub fn start_playback(device: Option<String>) -> Result<Playback> {
         frames,
         thread: Some(thread),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_is_silent_when_off_and_bounded_when_on() {
+        let monitor = Monitor::default();
+        monitor.push(&[0.5; 10]);
+        let mut out = [0.0; 4];
+        monitor.mix_into(&mut out);
+        assert_eq!(out, [0.0; 4]);
+
+        monitor.set_enabled(true);
+        monitor.push(&vec![0.25; MONITOR_MAX * 2]);
+        assert_eq!(monitor.0.samples.lock().unwrap().len(), MONITOR_MAX);
+        monitor.mix_into(&mut out);
+        assert_eq!(out, [0.25; 4]);
+    }
 }

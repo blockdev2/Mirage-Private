@@ -578,6 +578,13 @@ impl Session {
         Ok(())
     }
 
+    /// Our round-trip time (ms) and outgoing packet loss (0..1), measured
+    /// locally by the protocol layer: the server does not report our own.
+    pub fn own_network(&self) -> Option<(f64, f32)> {
+        let stats = self.con.get_network_stats().ok()?;
+        Some((stats.rtt.as_secs_f64() * 1000.0, stats.get_packetloss()))
+    }
+
     /// The latest connection statistics the server sent for a client.
     pub fn connection_info(&self, client_id: u16) -> Option<crate::state::ConnectionInfo> {
         let state = self.con.get_state().ok()?;
