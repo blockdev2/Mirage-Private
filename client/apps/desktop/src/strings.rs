@@ -70,6 +70,7 @@ pub struct Strings {
     pub busy_in_call: &'static str,
     pub need_profile: &'static str,
     pub error_banned: &'static str,
+    pub error_clone: &'static str,
     pub error_password: &'static str,
     pub bridge_offline: &'static str,
     pub bridge_offline_short: &'static str,
@@ -266,6 +267,8 @@ impl Strings {
     pub fn connect_error(&self, raw: &str) -> String {
         if raw.contains("ConnectFailedBanned") {
             self.error_banned.to_string()
+        } else if raw.contains("ClientTooManyClonesConnected") {
+            self.error_clone.to_string()
         } else if raw.to_lowercase().contains("password") {
             self.error_password.to_string()
         } else {
@@ -343,6 +346,7 @@ pub const PT: Strings = Strings {
     error_banned: "O servidor recusou a conexão: este endereço está bloqueado no momento, \
                    normalmente por tentativas de conexão em sequência. Aguarde alguns \
                    minutos antes de tentar de novo.",
+    error_clone: "Esta identidade ainda aparece conectada ao servidor, provavelmente de                   uma sessão que não foi encerrada. Aguarde alguns segundos e tente de novo.",
     error_password: "O servidor pediu uma senha que não foi aceita. Confira a senha e tente \
                      de novo.",
     bridge_offline: "O serviço local do Mirage não está em execução (127.0.0.1:8787). Inicie o \
@@ -499,5 +503,11 @@ mod tests {
     fn password_errors_are_translated() {
         assert_eq!(PT.connect_error("wrong Password"), PT.error_password);
         assert_eq!(PT.connect_error("boom"), "boom");
+        assert_eq!(
+            PT.connect_error(
+                "handshake failed: Server refused connection: ClientTooManyClonesConnected"
+            ),
+            PT.error_clone
+        );
     }
 }
