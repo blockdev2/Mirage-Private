@@ -64,3 +64,10 @@ intentionally changed. Re-run the eight upstream crypto tests, first-party tests
 lockfile audits, and live TS6 interoperability after any update. Record the exact
 verification outcome in `../docs/PUBLICATION.md`; successful unit tests alone do
 not establish server compatibility.
+
+## Local patch: ping-only round-trip time
+
+`patches/ping-rtt.patch` makes `ConnectionStats::rtt` follow ping replies only.
+Acks of command packets still tune the resend timer, but they include the
+server's processing time, so counting them made the displayed ping read high.
+Reapply when updating the vendored copy.

@@ -57,8 +57,9 @@ impl Mixer {
                     / samples.len().max(1) as f32)
                     .sqrt();
                 let level = levels.entry(*peer).or_insert(0.0);
-                // Rise at once, fall gently, like a meter.
-                *level = rms.max(*level * 0.9);
+                // Rise at once, fall gently, like a meter. Chunks are ~5 ms and
+                // the UI reads every ~80 ms, so this must hold between reads.
+                *level = rms.max(*level * 0.98);
             });
         let queues = self.handler.get_queues();
         self.levels.retain(|peer, _| queues.contains_key(peer));

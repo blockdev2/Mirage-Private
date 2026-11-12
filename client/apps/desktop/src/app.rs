@@ -510,7 +510,7 @@ impl App {
         } else {
             audio
                 .levels
-                .get(&client_id)
+                .get(&client_id.to_string())
                 .map_or(-90.0, |rms| 20.0 * rms.max(1e-6).log10())
         };
         ((db + 55.0) / 40.0).clamp(0.0, 1.0)

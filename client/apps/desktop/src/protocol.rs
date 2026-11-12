@@ -115,7 +115,9 @@ pub struct AudioEvent {
     pub loss_out: Option<f32>,
     /// Voice level (RMS, 0..1) of each peer talking. Older bridges omit it.
     #[serde(default)]
-    pub levels: std::collections::HashMap<u16, f32>,
+    /// Keyed by client id as text: JSON map keys are strings, and this
+    /// internally tagged event cannot turn them back into numbers.
+    pub levels: std::collections::HashMap<String, f32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -325,6 +327,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(chat, BridgeEvent::Chat(m) if m.attachments.len() == 1));
+    }
+
+    #[test]
+    fn audio_events_with_peer_levels_parse() {
+        // Integer map keys arrive as JSON strings; an internally tagged enum
+        // used to reject them, freezing the speaking marks while others talked.
+        let audio: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"audio","rx_packets":1,"tx_frames":2,"ptt_down":false,"speaking":[7],"capture":null,"playback":null,"tone":false,"ptt_binding":null,"levels":{"7":0.25}}"#,
+        )
+        .unwrap();
+        assert!(matches!(audio, BridgeEvent::Audio(a) if a.levels.get("7") == Some(&0.25)));
     }
 
     #[test]

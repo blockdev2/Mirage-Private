@@ -124,13 +124,15 @@ impl Playback {
         }
     }
 
-    /// Voice level (RMS, 0..1) of each peer currently talking. Skips a beat
-    /// rather than wait on the audio thread.
+    /// Voice level (RMS, 0..1) of each peer currently talking.
     pub fn peer_levels(&self) -> std::collections::HashMap<u16, f32> {
+        // A real lock: the audio callback holds the mixer most of the time, so
+        // try_lock usually failed and the levels came back empty. Cloning a
+        // few entries keeps the wait in microseconds.
         self.mixer
-            .try_lock()
-            .map(|m| m.levels())
-            .unwrap_or_default()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .levels()
     }
 
     /// Play a notification sound over whatever is playing.

@@ -1,0 +1,42 @@
+diff --git a/client/vendor/tsclientlib/tsproto/src/resend.rs b/client/vendor/tsclientlib/tsproto/src/resend.rs
+index ba86a33..d1ca8b0 100644
+--- a/client/vendor/tsclientlib/tsproto/src/resend.rs
++++ b/client/vendor/tsclientlib/tsproto/src/resend.rs
+@@ -462,7 +462,7 @@ impl Resender {
+ 				// Update srtt if the packet was not resent
+ 				if rec.id.tries == 1 {
+ 					let now = Instant::now();
+-					con.resender.update_srtt(now - rec.sent);
++					con.resender.update_srtt(now - rec.sent, false);
+ 				}
+ 
+ 				// Notify the waker that we can send another packet from the
+@@ -476,7 +476,7 @@ impl Resender {
+ 		if let Ok(i) = con.resender.last_pings.binary_search_by_key(&p_id, |p| p.id.packet_id) {
+ 			let ping = con.resender.last_pings.remove(i);
+ 			let now = Instant::now();
+-			con.resender.update_srtt(now - ping.sent);
++			con.resender.update_srtt(now - ping.sent, true);
+ 		}
+ 	}
+ 
+@@ -633,12 +633,18 @@ impl Resender {
+ 	}
+ 
+ 	/// Add another duration to the stored smoothed rtt.
+-	fn update_srtt(&mut self, rtt: Duration) {
++	///
++	/// Only ping replies update the reported `stats.rtt`: command acks also
++	/// carry the server's processing time and made the ping read too high.
++	fn update_srtt(&mut self, rtt: Duration, is_ping: bool) {
+ 		let diff =
+ 			if rtt > self.config.srtt { rtt - self.config.srtt } else { self.config.srtt - rtt };
+ 		self.config.srtt_dev = self.config.srtt_dev * 3 / 4 + diff / 4;
+ 		self.config.srtt = self.config.srtt * 7 / 8 + rtt / 8;
+ 
++		if !is_ping {
++			return;
++		}
+ 		// Rtt (non-smoothed)
+ 		let diff = if rtt > self.stats.rtt { rtt - self.stats.rtt } else { self.stats.rtt - rtt };
+ 		self.stats.rtt_dev = self.stats.rtt_dev * 3 / 4 + diff / 4;

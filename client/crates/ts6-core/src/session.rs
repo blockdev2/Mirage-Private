@@ -616,7 +616,8 @@ impl Session {
     /// locally by the protocol layer: the server does not report our own.
     pub fn own_network(&self) -> Option<(f64, f32)> {
         let stats = self.con.get_network_stats().ok()?;
-        Some((stats.rtt.as_secs_f64() * 1000.0, stats.get_packetloss()))
+        // Zero until the first ping reply arrives.
+        (!stats.rtt.is_zero()).then(|| (stats.rtt.as_secs_f64() * 1000.0, stats.get_packetloss()))
     }
 
     /// The latest connection statistics the server sent for a client.
