@@ -356,7 +356,9 @@ impl App {
 
     fn send(&self, command: Command) {
         // A closed channel means the link thread stopped; the UI keeps running.
-        let _ = self.bridge.outgoing.send(command);
+        // Never block the UI: a full or closed queue drops the command. A
+        // dropped chat send stays pending and then reports no answer.
+        let _ = self.bridge.outgoing.try_send(command);
     }
 
     /// The bridge applies both flags on each call, so always send the pair.

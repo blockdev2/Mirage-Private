@@ -7,7 +7,7 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpStream};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +21,13 @@ const RETRY_DELAY: Duration = Duration::from_millis(1200);
 /// Upper bound on how long a command can wait before it is written.
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bridge events held for the UI. When a stalled UI lets this fill, new events
+/// are dropped (the socket keeps being read) and a full refresh is requested
+/// once there is room again, so the UI resynchronizes instead of growing memory.
+const EVENT_CAPACITY: usize = 4096;
+/// UI commands waiting to be written. A full queue rejects the command at once
+/// instead of blocking the UI thread; nothing is retried automatically.
+const COMMAND_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketState {
@@ -36,15 +43,15 @@ pub enum Incoming {
 
 pub struct Bridge {
     pub incoming: Receiver<Incoming>,
-    pub outgoing: Sender<Command>,
+    pub outgoing: SyncSender<Command>,
 }
 
 impl Bridge {
     /// Starts the link thread. `ctx` is used only to wake the UI when data arrives.
     pub fn spawn(ctx: egui::Context) -> Self {
         start_embedded_bridge();
-        let (event_tx, event_rx) = mpsc::channel();
-        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(EVENT_CAPACITY);
+        let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_CAPACITY);
         thread::Builder::new()
             .name("ts6-bridge-link".into())
             .spawn(move || link_loop(event_tx, command_rx, ctx))
@@ -76,7 +83,7 @@ fn start_embedded_bridge() {
     }
 }
 
-fn link_loop(events: Sender<Incoming>, commands: Receiver<Command>, ctx: egui::Context) {
+fn link_loop(events: SyncSender<Incoming>, commands: Receiver<Command>, ctx: egui::Context) {
     loop {
         if !notify(&events, &ctx, SocketState::Connecting) {
             return;
@@ -99,7 +106,9 @@ fn link_loop(events: Sender<Incoming>, commands: Receiver<Command>, ctx: egui::C
     }
 }
 
-fn notify(events: &Sender<Incoming>, ctx: &egui::Context, state: SocketState) -> bool {
+/// Socket transitions are rare and must not be lost, so this one send may wait
+/// for the UI; it happens outside a session, when there is no socket to read.
+fn notify(events: &SyncSender<Incoming>, ctx: &egui::Context, state: SocketState) -> bool {
     let alive = events.send(Incoming::Socket(state)).is_ok();
     ctx.request_repaint();
     alive
@@ -135,11 +144,23 @@ fn connect_to(address: SocketAddr, url: &str) -> Result<WebSocket<TcpStream>, St
 /// `false` when the UI has dropped its channels and the thread should exit.
 fn run_session(
     socket: &mut WebSocket<TcpStream>,
-    events: &Sender<Incoming>,
+    events: &SyncSender<Incoming>,
     commands: &Receiver<Command>,
     ctx: &egui::Context,
 ) -> bool {
+    let mut resync = false;
     loop {
+        if resync && forward(events, Incoming::Socket(SocketState::Open)) == Forward::Sent {
+            // Room again: ask for a full status and snapshot to replace what
+            // was dropped.
+            let Ok(json) = serde_json::to_string(&Command::Refresh) else {
+                return true;
+            };
+            if socket.send(Message::Text(json.into())).is_err() {
+                return true;
+            }
+            resync = false;
+        }
         loop {
             match commands.try_recv() {
                 Ok(command) => {
@@ -158,8 +179,10 @@ fn run_session(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 if let Ok(event) = serde_json::from_str::<BridgeEvent>(text.as_str()) {
-                    if events.send(Incoming::Event(event)).is_err() {
-                        return false;
+                    match forward(events, Incoming::Event(event)) {
+                        Forward::Sent => {}
+                        Forward::Dropped => resync = true,
+                        Forward::Gone => return false,
                     }
                     ctx.request_repaint();
                 }
@@ -170,6 +193,68 @@ fn run_session(
                 if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(_) => return true,
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Forward {
+    Sent,
+    /// The UI queue was full; the event was discarded.
+    Dropped,
+    /// The UI has gone away.
+    Gone,
+}
+
+/// Never blocks: a full queue drops the event so the socket keeps being read.
+fn forward(events: &SyncSender<Incoming>, item: Incoming) -> Forward {
+    match events.try_send(item) {
+        Ok(()) => Forward::Sent,
+        Err(TrySendError::Full(_)) => Forward::Dropped,
+        Err(TrySendError::Disconnected(_)) => Forward::Gone,
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_ui_queue_drops_events_without_blocking() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        assert_eq!(
+            forward(&tx, Incoming::Socket(SocketState::Open)),
+            Forward::Sent
+        );
+        assert_eq!(
+            forward(&tx, Incoming::Socket(SocketState::Open)),
+            Forward::Sent
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(
+            forward(&tx, Incoming::Socket(SocketState::Open)),
+            Forward::Dropped
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(rx.try_iter().count(), 2);
+        assert_eq!(
+            forward(&tx, Incoming::Socket(SocketState::Open)),
+            Forward::Sent
+        );
+        drop(rx);
+        assert_eq!(
+            forward(&tx, Incoming::Socket(SocketState::Open)),
+            Forward::Gone
+        );
+    }
+
+    #[test]
+    fn a_full_command_queue_rejects_instead_of_blocking_the_ui() {
+        let (tx, _rx) = mpsc::sync_channel::<Command>(1);
+        assert!(tx.try_send(Command::Refresh).is_ok());
+        assert!(matches!(
+            tx.try_send(Command::Refresh),
+            Err(TrySendError::Full(_))
+        ));
     }
 }
 
