@@ -18,7 +18,7 @@ Read this file, [README.md](README.md), [architecture](docs/architecture.md), an
 
 ## Language and privacy
 
-All first-party human-readable content must be professional English: comments, docstrings, UI, logs, errors, fixtures, scripts, configuration descriptions, docs, and contribution metadata. Preserve technical identifiers, external contracts, third-party attribution, and externally supplied names where translation would change meaning or compatibility. Review prose manually; automated phrase checks are incomplete.
+All first-party human-readable content must be professional English: comments, docstrings, logs, errors, fixtures, scripts, configuration descriptions, docs, and contribution metadata. The desktop client's end-user UI text may be Brazilian Portuguese (pt-BR); keep its wording professional and consistent. Preserve technical identifiers, external contracts, third-party attribution, and externally supplied names where translation would change meaning or compatibility. Review prose manually; automated phrase checks are incomplete.
 
 Never add credentials, identities, personal paths, local usernames, private infrastructure, database state, or raw diagnostic captures. Use loopback/documentation examples and portable relative paths. Identity JSON contains a private key. Do not open ignored identities, databases, credentials, or server logs merely to perform a general audit. Never print suspected secrets; report locations and exposure status only.
 

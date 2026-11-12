@@ -81,7 +81,6 @@ def check() -> int:
         "private key material": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
         "GitHub token": re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),
     }
-    language = re.compile(r"\b(?:n\u00e3o|voc\u00ea|conectando|recebidos|enviados|apelido|aguardando)\b", re.IGNORECASE)
     for name in paths:
         path = ROOT / name
         try:
@@ -116,9 +115,6 @@ def check() -> int:
         for rule, pattern in rules.items():
             if pattern.search(source):
                 errors.append((name, rule))
-        if not name.startswith("client/vendor/") and name != "scripts/check_repository.py":
-            if language.search(source) or 'lang="pt-BR"' in source:
-                errors.append((name, "known English-only policy regression"))
         if name.startswith(".github/workflows/"):
             if "pull_request_target" in source:
                 errors.append((name, "privileged PR trigger"))
@@ -128,7 +124,7 @@ def check() -> int:
     for name, rule in errors:
         print(f"FAIL {name}: {rule}")
     print(f"Inspected {inspected} publishable UTF-8 files; {len(errors)} policy findings.")
-    print("Phrase checks are incomplete; manually review English prose and secret-scan the source and history.")
+    print("Prose is not phrase-checked; review text manually and secret-scan the source and history.")
     return int(bool(errors))
 
 
