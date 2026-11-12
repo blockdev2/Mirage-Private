@@ -122,3 +122,44 @@ These observations identify review points, not a decision that one contribution
 should replace the other. No automatic merge/rebase or cherry-pick was done.
 The owner should compare both pinned revisions, preserve the frontend work and
 security properties, and test a separately authorized combined implementation.
+
+## Follow-up review gaps (2026-11-12)
+
+A subsequent read-only review confirmed that all 31 original pending paths are
+present in this PR. The original checkout differs only in AGENTS.md, README.md
+and the smoke test, where this PR intentionally preserves shared policy/research
+and the tested asynchronous-frame correction. The publication worktree was clean
+at the start of this review.
+GitHub reports this PR as draft and mergeable=false/dirty against the newer main;
+no check runs were returned for head bfabae4 at review time. Earlier local
+verification is not equivalent to green hosted checks on a combined result.
+Dependency PR #1 moved to head 5b401a261adf87f9fa0b3c4b5a5a1f20c1aad94f;
+its older check results must not be applied to that new head.
+
+Two backend hardening gaps remain visible in source:
+
+- `Session::wait_result` bounds bookkeeping batches, but queues audio, unknown
+  commands and the raw-message fallback using direct push_back calls. Its
+  15-second deadline bounds waiting time, not queue length. The general buffer
+  path's 4096-item limit does not cover every insertion in this method. Apply
+  one explicit overflow policy across these paths and test a silent command
+  reply with continuing voice/notifications. Memory growth under that scenario
+  was not measured in this review; a finite queue bound is not established.
+- The bridge logs both name and raw content for UnknownCommand at debug level.
+  A future TS6 extension could carry signalling details or credential-bearing
+  transfer data there. Prefer command names, sizes and an allowlisted sanitized
+  schema; keep full protocol dumps an explicit private diagnostic. No exposed
+  credential was discovered or printed by this review.
+
+Native link channels also use unbounded std::sync::mpsc queues. Stress a stalled
+UI and a busy server before claiming bounded end-to-end memory use. Address
+these as focused regression-backed changes, preserving fair duplex polling and
+session ownership. These are source findings and proposed tests, not newly
+executed load experiments or permission to weaken existing checks.
+
+Functional verification still needed includes native rendered chat interaction,
+real microphone/speaker/PTT calls, long-running/reconnect/flood behavior,
+authorized hosted/official-client interoperability, and the planned Go-peer
+matrix. Persistent group chat, direct-message UI, WebRTC media, S3 integration
+and release packaging remain outside the implemented feature set of this branch.
+Do not infer their state on a future combined branch from this record alone.
