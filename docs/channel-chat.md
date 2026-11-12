@@ -33,9 +33,13 @@ manual test on another TS6 server saw the message arrive in the official client
 without an echo to the sender. The browser frontend renders `chat` events only,
 so without an echo it shows no local copy. The native frontend shows its own
 copy as pending, resolves it by `request_id`, and treats a matching echo within
-30 seconds as confirmation rather than a second message. Received channel events include the channel, sender name,
-text, self-echo flag, and timestamp. Core messages retain their original scope;
-private/server/poke messages do not appear in the channel conversation.
+30 seconds as confirmation rather than a second message. Received channel events
+include the channel, sender name, text, self-echo flag, and timestamp. Core
+messages retain their original scope; private/server/poke messages do not appear
+in the channel conversation.
+If the library falls back to a raw batched text notification, each supported
+record is preserved in order; unknown targets and client messages without a
+target ID are skipped instead of being assigned a fabricated client ID.
 
 Drafts stay editable after a rejected send. During a pending send they are
 disabled; after 20 seconds without confirmation the UI warns the user to check

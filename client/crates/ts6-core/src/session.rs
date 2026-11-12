@@ -209,26 +209,12 @@ impl Session {
                 .pending
                 .push_back(Item::UnknownCommand { name, content }),
             StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                if let Some(first) = msg.iter().next() {
-                    let invoker_id = Some(first.invoker_id.0);
-                    self.pending.push_back(Item::TextMessage(TextMessage {
-                        invoker_id,
-                        invoker_name: Some(first.invoker_name.clone()),
-                        message: first.message.clone(),
-                        channel_id: current_channel(&self.con),
-                        target: match first.target {
-                            tsclientlib::TextMessageTargetMode::Channel => {
-                                tsclientlib::MessageTarget::Channel
-                            }
-                            tsclientlib::TextMessageTargetMode::Server => {
-                                tsclientlib::MessageTarget::Server
-                            }
-                            _ => tsclientlib::MessageTarget::Client(
-                                first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
-                            ),
-                        },
-                        from_self: invoker_id == self.own_id(),
-                    }));
+                for item in raw_text_items(
+                    &InMessage::TextMessage(msg),
+                    self.own_id(),
+                    current_channel(&self.con),
+                ) {
+                    enqueue_pending(&mut self.pending, item);
                 }
             }
             StreamItem::IdentityLevelIncreasing(level) => {
@@ -287,30 +273,21 @@ impl Session {
                     return Some(Item::UnknownCommand { name, content })
                 }
                 Ok(StreamItem::MessageEvent(InMessage::TextMessage(msg))) => {
-                    let first = match msg.iter().next() {
-                        Some(m) => m,
+                    let mut items = raw_text_items(
+                        &InMessage::TextMessage(msg),
+                        self.own_id(),
+                        current_channel(&self.con),
+                    )
+                    .into_iter();
+                    match items.next() {
+                        Some(item) => {
+                            for item in items {
+                                enqueue_pending(&mut self.pending, item);
+                            }
+                            return Some(item);
+                        }
                         None => continue,
-                    };
-                    let invoker_id = Some(first.invoker_id.0);
-                    let from_self = invoker_id == self.own_id();
-                    return Some(Item::TextMessage(TextMessage {
-                        invoker_id,
-                        invoker_name: Some(first.invoker_name.clone()),
-                        message: first.message.clone(),
-                        channel_id: current_channel(&self.con),
-                        target: match first.target {
-                            tsclientlib::TextMessageTargetMode::Channel => {
-                                tsclientlib::MessageTarget::Channel
-                            }
-                            tsclientlib::TextMessageTargetMode::Server => {
-                                tsclientlib::MessageTarget::Server
-                            }
-                            _ => tsclientlib::MessageTarget::Client(
-                                first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
-                            ),
-                        },
-                        from_self,
-                    }));
+                    }
                 }
                 // TextMessage is the only message we surface for now; other
                 // in-messages are either handled by the library or not needed yet.
@@ -362,27 +339,21 @@ impl Session {
                 Some(Item::UnknownCommand { name, content })
             }
             StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                let first = msg.iter().next()?;
-                let invoker_id = Some(first.invoker_id.0);
-                let from_self = invoker_id == self.own_id();
-                Some(Item::TextMessage(TextMessage {
-                    invoker_id,
-                    invoker_name: Some(first.invoker_name.clone()),
-                    message: first.message.clone(),
-                    channel_id: current_channel(&self.con),
-                    target: match first.target {
-                        tsclientlib::TextMessageTargetMode::Channel => {
-                            tsclientlib::MessageTarget::Channel
+                let mut items = raw_text_items(
+                    &InMessage::TextMessage(msg),
+                    self.own_id(),
+                    current_channel(&self.con),
+                )
+                .into_iter();
+                match items.next() {
+                    Some(item) => {
+                        for item in items {
+                            enqueue_pending(&mut self.pending, item);
                         }
-                        tsclientlib::TextMessageTargetMode::Server => {
-                            tsclientlib::MessageTarget::Server
-                        }
-                        _ => tsclientlib::MessageTarget::Client(
-                            first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
-                        ),
-                    },
-                    from_self,
-                }))
+                        Some(item)
+                    }
+                    None => None,
+                }
             }
             StreamItem::MessageEvent(_) => None,
             StreamItem::IdentityLevelIncreasing(level) => Some(Item::IdentityLevel(level)),
@@ -559,26 +530,12 @@ impl Session {
                     .pending
                     .push_back(Item::UnknownCommand { name, content }),
                 StreamItem::MessageEvent(InMessage::TextMessage(msg)) => {
-                    if let Some(first) = msg.iter().next() {
-                        let invoker_id = Some(first.invoker_id.0);
-                        self.pending.push_back(Item::TextMessage(TextMessage {
-                            invoker_id,
-                            invoker_name: Some(first.invoker_name.clone()),
-                            message: first.message.clone(),
-                            channel_id: current_channel(&self.con),
-                            target: match first.target {
-                                tsclientlib::TextMessageTargetMode::Channel => {
-                                    tsclientlib::MessageTarget::Channel
-                                }
-                                tsclientlib::TextMessageTargetMode::Server => {
-                                    tsclientlib::MessageTarget::Server
-                                }
-                                _ => tsclientlib::MessageTarget::Client(
-                                    first.target_client_id.unwrap_or(tsclientlib::ClientId(0)),
-                                ),
-                            },
-                            from_self: invoker_id == self.own_id(),
-                        }));
+                    for item in raw_text_items(
+                        &InMessage::TextMessage(msg),
+                        self.own_id(),
+                        current_channel(&self.con),
+                    ) {
+                        enqueue_pending(&mut self.pending, item);
                     }
                 }
                 StreamItem::Audio(packet) => self.pending.push_back(Item::Audio(packet)),
@@ -768,11 +725,15 @@ fn bool_flag(value: bool) -> String {
 /// Keep replay bounded even when one library event contains a batch of messages.
 fn enqueue_book_items(pending: &mut VecDeque<Item>, items: Vec<Item>) {
     for item in items {
-        if pending.len() >= MAX_PENDING_ITEMS {
-            pending.pop_front();
-        }
-        pending.push_back(item);
+        enqueue_pending(pending, item);
     }
+}
+
+fn enqueue_pending(pending: &mut VecDeque<Item>, item: Item) {
+    if pending.len() >= MAX_PENDING_ITEMS {
+        pending.pop_front();
+    }
+    pending.push_back(item);
 }
 
 /// Upper bound on items held for replay. Overflow drops the oldest item so the
@@ -823,6 +784,34 @@ fn book_items(
     }
     items.push(Item::StateChanged);
     items
+}
+
+fn raw_text_items(message: &InMessage, own_id: Option<u16>, channel_id: Option<u64>) -> Vec<Item> {
+    let InMessage::TextMessage(messages) = message else {
+        return Vec::new();
+    };
+    messages
+        .iter()
+        .filter_map(|message| {
+            let target = match message.target {
+                tsclientlib::TextMessageTargetMode::Channel => tsclientlib::MessageTarget::Channel,
+                tsclientlib::TextMessageTargetMode::Server => tsclientlib::MessageTarget::Server,
+                tsclientlib::TextMessageTargetMode::Client => {
+                    tsclientlib::MessageTarget::Client(message.target_client_id?)
+                }
+                tsclientlib::TextMessageTargetMode::Unknown => return None,
+            };
+            let invoker_id = Some(message.invoker_id.0);
+            Some(Item::TextMessage(TextMessage {
+                invoker_id,
+                invoker_name: Some(message.invoker_name.clone()),
+                message: message.message.clone(),
+                channel_id,
+                target,
+                from_self: invoker_id == own_id,
+            }))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -896,5 +885,38 @@ mod chat_tests {
             "Unicode: emoji \u{1f600} | slash / backslash \\ newline\n"
         );
         assert!(items.iter().any(|item| matches!(item, Item::StateChanged)));
+    }
+
+    #[test]
+    fn raw_text_message_batches_preserve_valid_records_and_skip_unknown_targets() {
+        let mut header_bytes = [0_u8; tsproto_packets::S2C_HEADER_LEN];
+        header_bytes[tsproto_packets::S2C_HEADER_LEN - 1] = PacketType::Command as u8;
+        let header = tsproto_packets::packets::InHeader::new(Direction::S2C, &header_bytes);
+        let message = InMessage::new(
+            &header,
+            b"notifytextmessage targetmode=2 msg=channel invokerid=7 invokername=Alice|targetmode=3 msg=server invokerid=8 invokername=Bob|targetmode=0 msg=unknown invokerid=9 invokername=Unknown|targetmode=1 msg=missing-target invokerid=10 invokername=Missing|targetmode=1 target=42 msg=private invokerid=11 invokername=Carol",
+        )
+        .expect("parse batched text notification");
+
+        let items = raw_text_items(&message, Some(7), Some(3));
+        let messages: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::TextMessage(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].message, "channel");
+        assert_eq!(messages[0].target, tsclientlib::MessageTarget::Channel);
+        assert!(messages[0].from_self);
+        assert_eq!(messages[1].message, "server");
+        assert_eq!(messages[1].target, tsclientlib::MessageTarget::Server);
+        assert_eq!(messages[2].message, "private");
+        assert_eq!(
+            messages[2].target,
+            tsclientlib::MessageTarget::Client(tsclientlib::ClientId(42))
+        );
     }
 }
