@@ -16,8 +16,6 @@ use tungstenite::{Message, WebSocket};
 
 use crate::protocol::{AudioEvent, BridgeEvent, Command};
 
-const BRIDGE_PORT: u16 = 8787;
-const BRIDGE_URL: &str = "ws://127.0.0.1:8787/ws";
 const RETRY_DELAY: Duration = Duration::from_millis(1200);
 /// Upper bound on how long a command can wait before it is written.
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
@@ -75,14 +73,15 @@ impl Bridge {
 /// client runs from a single executable. An external `ts6-bridge` still works:
 /// the link simply connects to it instead.
 fn start_embedded_bridge() {
-    let address = SocketAddr::from(([127, 0, 0, 1], BRIDGE_PORT));
+    let port = crate::instance::bridge_port();
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
     if TcpStream::connect_timeout(&address, Duration::from_millis(150)).is_ok() {
         return;
     }
     let started = thread::Builder::new()
         .name("ts6-bridge-host".into())
-        .spawn(|| {
-            if let Err(error) = ts6_bridge::serve_blocking_without_ui(BRIDGE_PORT) {
+        .spawn(move || {
+            if let Err(error) = ts6_bridge::serve_blocking_without_ui(port) {
                 eprintln!("embedded ts6-bridge stopped: {error:#}");
             }
         });
@@ -128,8 +127,9 @@ fn notify(events: &SyncSender<Incoming>, ctx: &egui::Context, state: SocketState
 }
 
 fn connect() -> Result<WebSocket<TcpStream>, String> {
-    let address = SocketAddr::from(([127, 0, 0, 1], BRIDGE_PORT));
-    connect_to(address, BRIDGE_URL)
+    let port = crate::instance::bridge_port();
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    connect_to(address, &format!("ws://127.0.0.1:{port}/ws"))
 }
 
 fn connect_to(address: SocketAddr, url: &str) -> Result<WebSocket<TcpStream>, String> {
