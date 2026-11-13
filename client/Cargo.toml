@@ -7,6 +7,7 @@ members = [
     "crates/ts6-cli",
     "crates/ts6-bridge",
     "crates/ts6-stream",
+    "crates/ts6-capture",
     "apps/desktop",
 ]
 # Vendored upstream code lives in its own workspace and must not be a member here.
