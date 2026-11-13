@@ -1226,16 +1226,18 @@ impl App {
             + SPLIT_GAP_BELOW
             + 4.0 * ui.spacing().item_spacing.y;
         let mut split_room = 0.0;
+        let chat_min = self.chat_min_height();
         ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
             // Everything from here down to the window edge: participants,
             // controls, divider and chat. The divider splits it.
             split_room = ui.available_height();
             let slot = self.chat_height.map(|height| {
-                let height =
-                    height.clamp(CHAT_MIN_HEIGHT, max_chat_height(split_room, below_fixed));
+                let max = max_chat_height(split_room, below_fixed);
+                let height = height.clamp(chat_min.min(max), max);
                 (split_room - below_fixed - height).max(CARD_MIN_HEIGHT)
             });
-            self.participants_area(ui, &participants, slot);
+            let reserve = BELOW_GRID_MIN_HEIGHT.max(below_fixed + chat_min);
+            self.participants_area(ui, &participants, slot, reserve);
         });
 
         ui.add_space(CONTROLS_GAP_ABOVE);
@@ -1325,9 +1327,10 @@ impl App {
         ui: &mut egui::Ui,
         participants: &[&ClientInfo],
         slot: Option<f32>,
+        reserve: f32,
     ) {
         let room = slot
-            .unwrap_or_else(|| ui.available_height() - BELOW_GRID_MIN_HEIGHT)
+            .unwrap_or_else(|| ui.available_height() - reserve)
             .max(CARD_MIN_HEIGHT);
         let Some(slot) = slot else {
             self.participants_content(ui, participants, room, None);
@@ -1502,7 +1505,7 @@ impl App {
         }
         if let Some(height) = target {
             let max = max_chat_height(room, below_fixed);
-            self.chat_height = Some(height.clamp(CHAT_MIN_HEIGHT, max));
+            self.chat_height = Some(height.clamp(self.chat_min_height().min(max), max));
             ui.ctx().request_repaint();
         }
         if response.double_clicked() {
@@ -1618,6 +1621,17 @@ impl App {
 
     /// Chat under the participants: heading, scrolling history, composer.
     /// What we send shows as pending until the server echoes it back.
+    /// Height the chat needs to show its heading, a line of history and the
+    /// composer as it is now (taller with a reply or staged files).
+    fn chat_min_height(&self) -> f32 {
+        let notice = if self.chat_notice.is_some() {
+            22.0
+        } else {
+            0.0
+        };
+        CHAT_MIN_HEIGHT.max(40.0 + HISTORY_MIN_HEIGHT + 8.0 + notice + self.composer_height)
+    }
+
     fn chat_section(&mut self, ui: &mut egui::Ui, channel_id: Option<u64>, channel_name: &str) {
         let t = self.t;
         ui.label(RichText::new(t.chat_heading).font(FontId::new(16.0, theme::semibold())));
@@ -1695,22 +1709,6 @@ impl App {
                 vec2(ui.available_width(), 32.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let button = 2.0 * (CHAT_SEND_SIZE + ui.spacing().item_spacing.x);
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut self.chat_draft)
-                            .hint_text(placeholder)
-                            .frame(Frame::NONE)
-                            .char_limit(MAX_MESSAGE_BYTES)
-                            .desired_width(ui.available_width() - button)
-                            .align(Align2::LEFT_CENTER)
-                            .min_size(vec2(0.0, 32.0)),
-                    );
-                    if edit.changed() {
-                        self.chat_notice = None;
-                    }
-                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let can_send = self.channel_chat
-                        && (!self.chat_draft.trim().is_empty() || !self.staged.is_empty());
                     let can_attach = self.channel_chat && self.staged.len() < MAX_STAGED;
                     let attach = ui
                         .add_enabled_ui(can_attach, |ui| {
@@ -1733,7 +1731,35 @@ impl App {
                             self.staged.extend(files.into_iter().take(room));
                         }
                     }
-                    // Ctrl+V with a picture on the clipboard attaches it.
+                    let button = CHAT_SEND_SIZE + ui.spacing().item_spacing.x;
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.chat_draft)
+                            .hint_text(placeholder)
+                            .frame(Frame::NONE)
+                            .char_limit(MAX_MESSAGE_BYTES)
+                            .desired_width(ui.available_width() - button)
+                            .align(Align2::LEFT_CENTER)
+                            .min_size(vec2(0.0, 32.0)),
+                    );
+                    if edit.changed() {
+                        self.chat_notice = None;
+                    }
+                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let can_send = self.channel_chat
+                        && (!self.chat_draft.trim().is_empty() || !self.staged.is_empty());
+                    // Files dragged from Explorer onto the window join the tray.
+                    let dropped: Vec<_> = ui.input(|i| {
+                        i.raw
+                            .dropped_files
+                            .iter()
+                            .map(|f| f.path().to_path_buf())
+                            .filter(|path| path.is_file())
+                            .collect()
+                    });
+                    if can_attach && !dropped.is_empty() {
+                        let room = MAX_STAGED - self.staged.len();
+                        self.staged.extend(dropped.into_iter().take(room));
+                    }
                     // Ctrl+V with a picture on the clipboard attaches it.
                     let pasted = ui.input(|i| {
                         i.events.iter().find_map(|e| match e {
@@ -2618,7 +2644,12 @@ impl App {
             pos2(rect.left() + PAD, rect.center().y - 7.0),
             vec2(16.0, 14.0),
         );
-        Self::signal_bars(&painter, bars, theme::SUCCESS);
+        let quality = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.ping_ms)
+            .map_or(theme::SUCCESS, |ms| peer::ping_color(ms as f32));
+        Self::signal_bars(&painter, bars, quality);
         let mut x = bars.right() + 8.0;
         for galley in [Some(state), Some(time), ping].into_iter().flatten() {
             let y = rect.center().y - galley.size().y / 2.0;
@@ -2699,13 +2730,28 @@ impl App {
                             ui.label(RichText::new(label).color(theme::TEXT_2));
                         });
                     },
-                );
+                )
+                .response
             };
             row(ui, t.ping_average, format!("{average:.0} ms"));
             row(ui, t.ping_last, format!("{ping:.0} ms"));
             row(ui, t.ping_lost, loss_label(lost, counted));
+            row(
+                ui,
+                t.ping_voice_delay,
+                format!("~{:.0} ms", voice_delay_ms(ping)),
+            )
+            .on_hover_text(t.voice_delay_hint);
         });
     }
+}
+
+/// Rough mouth-to-ear delay in a call, from our ping to the server.
+/// shortcut: assumes the other person has the same ping and a fixed local
+/// pipeline (20 ms capture frame, about 60 ms of jitter and device buffers);
+/// upgrade by measuring the live jitter buffer depth if precision matters.
+fn voice_delay_ms(ping_ms: f64) -> f64 {
+    ping_ms + 80.0
 }
 
 /// "12 (0.4%)": packets lost and their share of the packets counted.
