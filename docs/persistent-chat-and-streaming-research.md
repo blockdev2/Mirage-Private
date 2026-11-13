@@ -355,3 +355,49 @@ already fails against the official client (answer apparently not applied), a
 Mirage publisher may meet the same wall with an official viewer; check the
 direction `official viewer -> Mirage publisher` first when testing, and keep the
 candidate and signaling counts only, never SDP or addresses.
+
+
+## The official client ignores our SDP (2026-11-13, experiment under test)
+
+New evidence from the **official client's own local log** (the TeamSpeak
+client writes `Logs/Default/ts5client_*.log`; read it on the owner's machine
+only, it is not part of the repository). In both directions (Mirage watching
+the official client, and the official client watching Mirage) the log shows
+`SetRemoteDescription CALL … OK` for every SDP produced by the official
+client but **never** for an SDP produced by webrtc-rs. The official client
+therefore rejects our SDP before libwebrtc sees it, silently, which explains
+"no checks of its own, then a re-offer" above. It is not a network problem:
+Chromium (libwebrtc) in the built-in browser pane accepts our offers and
+answers, connects, and decodes our H.264 stream on the same PC.
+
+What differs from an official answer (Chrome layout, about 2.9 KB): session
+version and origin line, `msid-semantic`, `ice-options:trickle`, `rtcp:9`
+lines, attribute order, `rtcp-xr`/`rrtr`, and an audio section. The cause
+inside the client is unknown (`MangleSessionVersion` is a symbol in
+`TeamSpeak.dll`; it may validate or rewrite the SDP).
+
+Experiment in the code (`ts6-stream/src/sdp.rs`, marked as an experiment):
+the SDP text is rewritten to the Chrome layout in six cumulative levels
+(0 = untouched … 5 = everything above) and the level is cycled per
+negotiation, 5 down to 0, unless `MIRAGE_SDP_LEVEL=<0-5>` pins one. It never
+touches ICE credentials, fingerprint, payloads or directions. The publisher
+now also offers an inactive Opus audio section and a send-only video section,
+like the official publisher. Candidate `mid` is the m-line index when the
+candidate has none (`"0"`, as libwebrtc sends).
+
+Verified here: unit tests, every level negotiated as offer and as answer
+through our own stack (`every_sdp_layout_still_negotiates`), and Chromium
+accepted all six answer levels and all six offer levels (connected and
+playing for the answer side). **Not verified:** that the official client
+accepts any level. How to check: run a share/watch with the official client,
+then search its log for `SetRemoteDescription CALL` after each attempt and
+compare the SDP length (it differs per level). The level that gets `OK` and
+`OnConnectionChange new_state=2` becomes the default and the cycling goes
+away. If none does, next suspects are the codec list in our answer (the
+official one lists AV1/VP9/VP8 too), session-version handling, and a closer
+look at `TeamSpeak.dll`.
+
+Other open items seen in the same logs: our candidates are sometimes delayed
+about 3 s by STUN gathering, the official viewer's retries produce
+`joinstreamrequest err=5638`, and the Mirage viewer gives up after 20 s
+without a first frame.

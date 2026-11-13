@@ -10,7 +10,9 @@ use rtc::interceptor::Registry;
 use rtc::media::Sample;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264};
+use rtc::peer_connection::configuration::media_engine::{
+    MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS,
+};
 use rtc::peer_connection::configuration::{
     RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
 };
@@ -20,7 +22,7 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::rtp_transceiver::PayloadType;
+use rtc::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,6 +45,19 @@ const PENDING_CANDIDATES: usize = 64;
 const H264_PAYLOAD_TYPE: PayloadType = 102;
 const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 
+fn opus() -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: 48_000,
+            channels: 2,
+            sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
+            rtcp_feedback: vec![],
+        },
+        payload_type: 111,
+    }
+}
+
 fn h264() -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
@@ -54,6 +69,13 @@ fn h264() -> RTCRtpCodecParameters {
         },
         payload_type: H264_PAYLOAD_TYPE,
     }
+}
+
+/// webrtc-rs reports an empty `mid`; the reference clients send the media
+/// section's own mid (`"0"` for the single video section).
+pub fn candidate_mid(mid: Option<String>, m_line: Option<u16>) -> Option<String> {
+    mid.filter(|m| !m.is_empty())
+        .or_else(|| Some(m_line.unwrap_or(0).to_string()))
 }
 
 /// State shared with the connection's event handler.
@@ -72,7 +94,7 @@ impl PeerConnectionEventHandler for Shared {
         };
         let _ = self.signals.try_send(Signal::IceCandidate {
             sdp: init.candidate,
-            mid: init.sdp_mid,
+            mid: candidate_mid(init.sdp_mid, init.sdp_mline_index),
             m_line: init.sdp_mline_index,
         });
     }
@@ -225,6 +247,9 @@ impl Publisher {
         media
             .register_codec(h264(), RtpCodecKind::Video)
             .map_err(|_| anyhow!("cannot register H.264"))?;
+        media
+            .register_codec(opus(), RtpCodecKind::Audio)
+            .map_err(|_| anyhow!("cannot register Opus"))?;
         let (signal_tx, signals) = channel(SIGNAL_QUEUE);
         let connected = Arc::new(AtomicBool::new(false));
         let shared = Shared {
@@ -258,6 +283,31 @@ impl Publisher {
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
             .await
             .context("cannot add the video track")?;
+        // The reference publisher offers an inactive audio section next to the
+        // video one (stream audio is not sent), and the official viewer expects both.
+        // The reference publisher's video section is send-only, not send-receive.
+        for transceiver in connection.get_transceivers().await {
+            transceiver
+                .set_direction(RTCRtpTransceiverDirection::Sendonly)
+                .await
+                .context("cannot make the video section send-only")?;
+        }
+        let audio = connection
+            .add_transceiver_from_kind(
+                RtpCodecKind::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    streams: vec![],
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .context("cannot add the audio section")?;
+        // Only receive-only sections can be added; make it inactive afterwards.
+        audio
+            .set_direction(RTCRtpTransceiverDirection::Inactive)
+            .await
+            .context("cannot make the audio section inactive")?;
         Ok(Self {
             connection,
             track,
@@ -269,8 +319,15 @@ impl Publisher {
         })
     }
 
-    /// The SDP offer for `respondjoinstreamrequest`.
+    /// The SDP offer for `respondjoinstreamrequest`, in the next SDP layout of
+    /// the experiment (see `sdp`).
     pub async fn offer(&self) -> Result<String> {
+        let (level, version) = crate::sdp::next_level();
+        self.offer_with(level, version).await
+    }
+
+    /// The offer written at a given SDP level (see `sdp`).
+    pub async fn offer_with(&self, level: u8, version: u32) -> Result<String> {
         let offer = self
             .connection
             .create_offer(None)
@@ -281,7 +338,7 @@ impl Publisher {
             .set_local_description(offer)
             .await
             .context("cannot set the local description")?;
-        Ok(text)
+        Ok(crate::sdp::shape(&text, level, version))
     }
 
     /// Applies a signal relayed from the viewer.

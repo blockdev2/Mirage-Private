@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
-use ts6_stream::{Publisher, Signal, Viewer};
+use ts6_stream::{shape, Publisher, Signal, Viewer, MAX_LEVEL};
 
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -155,4 +155,47 @@ async fn closing_the_publisher_stops_the_flow_without_hanging() {
     tokio::time::timeout(Duration::from_secs(10), viewer.close())
         .await
         .expect("viewer close returns");
+}
+
+/// The official client wants Chrome's SDP layout; our own stack must still
+/// accept every layout, as an offer and as an answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_sdp_layout_still_negotiates() {
+    for level in 0..=MAX_LEVEL {
+        let publisher = Publisher::new(LOCALHOST).await.expect("publisher");
+        let viewer = Viewer::new(LOCALHOST).await.expect("viewer");
+        let offer = publisher.offer_with(level, 2).await.expect("offer");
+        assert_eq!(
+            offer
+                .matches(
+                    "
+m="
+                )
+                .count(),
+            2,
+            "video and audio, level {level}"
+        );
+        let answer = viewer.accept_offer(&offer).await.expect("offer accepted");
+        let shaped = shape(&answer, level, 2);
+        publisher
+            .apply(Signal::Answer(shaped))
+            .await
+            .unwrap_or_else(|e| panic!("answer at level {level}: {e:#}"));
+        publisher.close().await;
+        viewer.close().await;
+    }
+}
+
+/// Diagnostic: writes the publisher's offer at every level to the folder named
+/// by `MIRAGE_ORACLE_DIR` (offer-<level>.sdp) so a real libwebrtc can judge them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "diagnostic: needs MIRAGE_ORACLE_DIR"]
+async fn write_offers_for_a_browser() {
+    let dir = std::path::PathBuf::from(std::env::var("MIRAGE_ORACLE_DIR").unwrap());
+    for level in 0..=MAX_LEVEL {
+        let publisher = Publisher::new(LOCALHOST).await.expect("publisher");
+        let offer = publisher.offer_with(level, 2).await.expect("offer");
+        std::fs::write(dir.join(format!("offer-{level}.sdp")), offer).unwrap();
+        publisher.close().await;
+    }
 }

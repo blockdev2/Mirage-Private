@@ -148,8 +148,9 @@ fn parse_candidate(json: &str) -> Option<RTCIceCandidateInit> {
 }
 
 fn local_candidate_json(init: &RTCIceCandidateInit) -> String {
+    let mid = ts6_stream::candidate_mid(init.sdp_mid.clone(), init.sdp_mline_index);
     serde_json::json!({"cmd": "iceCandidate", "args": {
-        "sdp": init.candidate, "mid": init.sdp_mid, "mLine": init.sdp_mline_index}})
+        "sdp": init.candidate, "mid": mid, "mLine": init.sdp_mline_index}})
     .to_string()
 }
 
@@ -245,7 +246,10 @@ async fn start(
     }
     .await;
     let answer = match (negotiated, peer.local_description().await) {
-        (Ok(()), Some(answer)) => answer.sdp,
+        (Ok(()), Some(answer)) => {
+            let (level, version) = ts6_stream::next_level();
+            ts6_stream::shape(&answer.sdp, level, version)
+        }
         _ => {
             frames().close();
             let _ = peer.close().await;

@@ -349,3 +349,109 @@ async fn answer_keeps_the_official_offers_extension_ids() {
     assert!(video.contains("a=rtpmap:102 H264/90000"), "{answer}");
     assert!(answer.contains("a=setup:active") || answer.contains("a=setup:passive"));
 }
+
+/// Diagnostic, not a regression test: answers the offer in the file named by
+/// `MIRAGE_ORACLE_OFFER` exactly like the app's viewer does, writes the answer
+/// to `MIRAGE_ORACLE_OUT` and the local candidates (one JSON per line, with the
+/// milliseconds since the answer) after it. A real libwebrtc (a browser) can then
+/// apply them, which shows whether the official client could.
+#[tokio::test]
+#[ignore = "diagnostic: needs MIRAGE_ORACLE_OFFER and MIRAGE_ORACLE_OUT"]
+async fn oracle_answer_for_a_given_offer() {
+    let _turn = SERIAL.lock().await;
+    let offer = std::fs::read_to_string(std::env::var("MIRAGE_ORACLE_OFFER").unwrap()).unwrap();
+    let (event_tx, mut events) = tokio::sync::mpsc::channel(64);
+    let worker = StreamWorker::spawn(event_tx).unwrap();
+    assert!(worker
+        .send(WorkerCommand::Offer {
+            stream: "s".into(),
+            sdp: offer,
+        })
+        .is_ok());
+    let mut out = String::new();
+    let mut answered_at = None;
+    let end = tokio::time::Instant::now() + Duration::from_secs(8);
+    while let Ok(Some(event)) = tokio::time::timeout_at(end, events.recv()).await {
+        match event {
+            WorkerEvent::Answer { sdp, .. } => {
+                answered_at = Some(Instant::now());
+                out.push_str(&sdp);
+                out.push_str(
+                    "
+=====
+",
+                );
+            }
+            WorkerEvent::LocalIce { json, .. } => {
+                let ms = answered_at.map_or(0, |t| t.elapsed().as_millis());
+                out.push_str(&format!(
+                    "{ms} {json}
+"
+                ));
+            }
+            WorkerEvent::Failed { reason, .. } => out.push_str(&format!(
+                "FAILED {reason:?}
+"
+            )),
+            WorkerEvent::Playing { .. } => {}
+        }
+    }
+    std::fs::write(std::env::var("MIRAGE_ORACLE_OUT").unwrap(), out).unwrap();
+}
+
+/// Diagnostic, not a regression test: the app's viewer as a child process of a
+/// script. Reads JSON lines on stdin (`{"op":"offer","sdp":..}`,
+/// `{"op":"ice","json":..}`, `{"op":"quit"}`) and prints events as JSON lines
+/// (`answer`, `ice`, `playing`, `failed`). RUST_LOG=ice=debug traces go to stderr.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "diagnostic: driven by a script over stdin/stdout"]
+async fn oracle_interactive_viewer() {
+    use std::io::{BufRead, Write};
+    let _turn = SERIAL.lock().await;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+    let (event_tx, mut events) = tokio::sync::mpsc::channel(256);
+    let worker = StreamWorker::spawn(event_tx).unwrap();
+    let (line_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let emit = |value: serde_json::Value| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "@@{value}");
+        let _ = out.flush();
+    };
+    let end = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end) => break,
+            Some(line) = lines.recv() => {
+                let Ok(command) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                match command["op"].as_str() {
+                    Some("offer") => {
+                        let sdp = command["sdp"].as_str().unwrap_or_default().to_owned();
+                        let _ = worker.send(WorkerCommand::Offer { stream: "s".into(), sdp });
+                    }
+                    Some("ice") => {
+                        let json = command["json"].as_str().unwrap_or_default().to_owned();
+                        let _ = worker.send(WorkerCommand::RemoteIce { stream: "s".into(), json });
+                    }
+                    Some("quit") => break,
+                    _ => {}
+                }
+            }
+            Some(event) = events.recv() => match event {
+                WorkerEvent::Answer { sdp, .. } => emit(serde_json::json!({"ev": "answer", "sdp": sdp})),
+                WorkerEvent::LocalIce { json, .. } => emit(serde_json::json!({"ev": "ice", "json": json})),
+                WorkerEvent::Playing { .. } => emit(serde_json::json!({"ev": "playing"})),
+                WorkerEvent::Failed { reason, .. } => emit(serde_json::json!({"ev": "failed", "reason": format!("{reason:?}")})),
+            },
+        }
+    }
+}
