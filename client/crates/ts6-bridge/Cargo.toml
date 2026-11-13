@@ -38,3 +38,5 @@ windows = { version = "=0.62.2", features = [
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
+# Same version as ts6-audio: one libopus, used here to make the test audio.
+audiopus = "0.3.0-rc.0"

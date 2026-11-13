@@ -123,6 +123,7 @@ fn fail(events: &Sender<WorkerEvent>, stream: String, reason: FailReason) {
 async fn close(active: &mut Option<Active>) {
     if let Some(current) = active.take() {
         frames().close();
+        ts6_audio::stream_audio::stream_audio().clear();
         let _ = current.peer.close().await;
     }
 }
@@ -195,9 +196,9 @@ async fn start(
             .register_codec(h264(profile, payload_type), RtpCodecKind::Video)
             .map_err(|_| FailReason::Unsupported)?;
     }
-    // Stream audio is accepted like a browser would and then ignored: the
-    // official client discards an answer that refuses its audio section.
-    // shortcut: stream audio is not played yet, stage 4 wires it to playback.
+    // Stream audio is accepted like a browser would (the official client
+    // discards an answer that refuses its audio section) and played mixed in
+    // with voice. shortcut: no separate volume or mute for it yet.
     let opus = RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
             mime_type: MIME_TYPE_OPUS.to_owned(),
@@ -375,8 +376,13 @@ impl PeerConnectionEventHandler for Viewer {
     }
 
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-        if track.kind().await != RtpCodecKind::Video {
-            return;
+        match track.kind().await {
+            RtpCodecKind::Audio => {
+                self.runtime.spawn(Box::pin(play_audio(track)));
+                return;
+            }
+            RtpCodecKind::Video => {}
+            _ => return,
         }
         let Some(media_ssrc) = track.ssrcs().await.first().copied() else {
             return;
@@ -465,6 +471,48 @@ impl PeerConnectionEventHandler for Viewer {
             }
         }));
     }
+}
+
+/// Decodes the stream's Opus track and hands it to playback.
+async fn play_audio(track: Arc<dyn TrackRemote>) {
+    use ts6_audio::stream_audio::{stream_audio, StreamDecoder};
+    let Ok(mut decoder) = StreamDecoder::new() else {
+        return;
+    };
+    let sink = stream_audio();
+    let mut last: Option<u16> = None;
+    let (mut packets, mut concealed, mut since) = (0u32, 0u32, Instant::now());
+    while let Some(event) = track.poll().await {
+        let packet = match event {
+            TrackRemoteEvent::OnRtpPacket(packet) => packet,
+            TrackRemoteEvent::OnEnded => break,
+            _ => continue,
+        };
+        let seq = packet.header.sequence_number;
+        // Skip late or duplicate packets; conceal a short gap (up to 3 packets).
+        if let Some(previous) = last {
+            let step = seq.wrapping_sub(previous);
+            if step == 0 || step > 0x8000 {
+                continue;
+            }
+            for _ in 1..step.min(4) {
+                if let Ok(pcm) = decoder.decode(None) {
+                    sink.push(pcm);
+                    concealed += 1;
+                }
+            }
+        }
+        last = Some(seq);
+        packets += 1;
+        if let Ok(pcm) = decoder.decode(Some(&packet.payload)) {
+            sink.push(pcm);
+        }
+        if since.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(packets, concealed, "stream audio, last 5 s");
+            (packets, concealed, since) = (0, 0, Instant::now());
+        }
+    }
+    sink.clear();
 }
 
 #[cfg(test)]

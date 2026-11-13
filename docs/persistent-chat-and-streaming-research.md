@@ -537,3 +537,16 @@ the decoder worked on a keyframe, and each overflow forces a wait for a
 keyframe. The queue is now 30 units (about 0.5 s). Decoder load is about 50 %,
 so it only needs to absorb bursts.
 
+### Stream audio (2026-11-13, night)
+
+The viewer already accepted the official offer's Opus m-line; it now plays it.
+`on_track` for an audio track spawns `play_audio`: Opus (stereo, 48 kHz,
+payload 111) is decoded with libopus, gaps of up to 3 packets are concealed,
+late and duplicate packets are skipped, and the mono downmix goes to a
+process-wide sink that the playback callback mixes in (`stream_audio.rs`:
+starts after 60 ms queued, restarts after running dry, drops the oldest past
+300 ms so sound cannot drift behind the picture). Closing the viewer clears the
+sink. Verified on loopback only (a 440 Hz tone from a webrtc-rs publisher
+reaches the mix); not yet heard from a real official share. Known gaps: no
+separate volume or mute, and the playback chain is mono.
+

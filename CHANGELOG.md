@@ -4,6 +4,7 @@ No tagged releases have been established in this checkout. Entries describe repo
 
 ## Unreleased
 
+- **Stream audio is played.** Watching a screen share now decodes the stream's stereo Opus track (with concealment of short gaps), downmixes it to mono and mixes it into the playback next to voice (`ts6_audio::stream_audio`, 60 ms prebuffer, 300 ms cap). The loopback test now sends a 440 Hz tone and asserts it reaches the playback mix. No separate volume or mute for stream audio yet, and it is not verified against the official client with real sound. The loopback viewer test also repeats its clip until the connection is up (it failed about 1 run in 3 when ICE took longer than the 3 s clip).
 - Viewer: the decode queue holds 30 access units instead of 4. With the packet window fixed, the log showed no lost packets but short freezes when keyframes (slow to decode) filled the 4-slot queue, which forced a wait for a keyframe the official client rarely sends.
 - **Fix freezes of about 20 s while watching a stream.** The viewer reassembled frames with a 64-packet window, smaller than a 1080p keyframe, so every keyframe after the first was dropped and the picture stayed frozen until the sender produced another one by itself. The window is now 4096 packets with a 500 ms bound; a unit test packs a 250 KB keyframe into about 210 packets. Confirmed against the official client: no freezes in a 2-minute run.
 - Desktop: saved profiles whose nickname is shorter than 3 characters are tagged "inválido" in the profile list and a red hint says so under the list.

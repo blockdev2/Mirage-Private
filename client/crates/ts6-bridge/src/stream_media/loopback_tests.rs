@@ -124,7 +124,7 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
         .await
         .unwrap();
     let audio_track = track(RtpCodecKind::Audio, &audio, 0x4d49_0002);
-    publisher
+    let audio_sender = publisher
         .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal>)
         .await
         .unwrap();
@@ -144,6 +144,7 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut answered = false;
     let mut sending = None;
+    let mut audio_task = None;
     let mut playing = false;
     while !(playing && frames().latest(0).is_some()) {
         tokio::select! {
@@ -162,11 +163,37 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
                     let track = Arc::clone(&video_track);
                     let sender = Arc::clone(&video_sender);
                     let units = units.clone();
+                    let audio_track = Arc::clone(&audio_track);
+                    let audio_sender = Arc::clone(&audio_sender);
+                    audio_task = Some(tokio::spawn(async move {
+                        let encoder = audiopus::coder::Encoder::new(
+                            audiopus::SampleRate::Hz48000,
+                            audiopus::Channels::Stereo,
+                            audiopus::Application::Audio,
+                        )
+                        .unwrap();
+                        let pt = audio_sender.get_parameters().await.unwrap().rtp_parameters.codecs[0].payload_type;
+                        let ssrc = audio_track.ssrcs().await[0];
+                        let mut phase = 0.0f32;
+                        loop {
+                            let pcm: Vec<f32> = (0..960).flat_map(|_| {
+                                phase += 440.0 * std::f32::consts::TAU / 48_000.0;
+                                let v = phase.sin() * 0.5;
+                                [v, v]
+                            }).collect();
+                            let mut packet = [0u8; 1275];
+                            let len = encoder.encode_float(&pcm, &mut packet).unwrap();
+                            let sample = Sample { data: packet[..len].to_vec().into(), duration: Duration::from_millis(20), ..Sample::new(Instant::now()) };
+                            let _ = audio_track.sample_writer(ssrc, pt).write_sample(&sample).await;
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }));
                     sending = Some(tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let pt = sender.get_parameters().await.unwrap().rtp_parameters.codecs[0].payload_type;
                         let ssrc = track.ssrcs().await[0];
-                        for unit in units {
+                        // Repeats the clip: connecting can take longer than one pass.
+                        for unit in units.into_iter().cycle() {
                             let sample = Sample { data: unit.into(), duration: Duration::from_millis(50), ..Sample::new(Instant::now()) };
                             let _ = track.sample_writer(ssrc, pt).write_sample(&sample).await;
                             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -198,6 +225,22 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
         r.abs_diff(20) <= 20 && g.abs_diff(180) <= 20 && b.abs_diff(80) <= 20,
         "{r},{g},{b}"
     );
+
+    // The stream's Opus track reaches the playback mix as sound.
+    let mut heard = false;
+    for _ in 0..40 {
+        let mut mix = [0.0f32; 480];
+        ts6_audio::stream_audio::stream_audio().mix_into(&mut mix);
+        if mix.iter().any(|s| s.abs() > 0.05) {
+            heard = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(heard, "no stream audio reached the playback mix");
+    if let Some(task) = audio_task {
+        task.abort();
+    }
 
     // Closing stops frames for good, even while the publisher still sends.
     assert!(worker.send(WorkerCommand::Close).is_ok());
