@@ -398,8 +398,9 @@ fn labeled_input(
 // Sidebar -------------------------------------------------------------------
 
 impl App {
-    /// Sidebar of the hub: navigation, favorites, add server and local profile.
-    pub(super) fn home_sidebar(&mut self, ui: &mut egui::Ui) {
+    /// The one sidebar, on every screen: navigation, the connected server with
+    /// its channels, favorites, add server and the local profile.
+    pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = self.t;
         self.logo(ui);
         ui.add_space(20.0);
@@ -417,9 +418,6 @@ impl App {
         ) {
             self.section = Section::History;
         }
-        if self.in_session() && self.nav_item(ui, icon::HEADPHONES, t.nav_voice, false) {
-            self.section = Section::Voice;
-        }
 
         ui.add_space(8.0);
         ui.separator();
@@ -430,7 +428,7 @@ impl App {
                     .font(FontId::new(15.0, theme::icons()))
                     .color(theme::TEXT_3),
             );
-            theme::section_label(ui, &t.favorites_heading.to_uppercase());
+            theme::section_label(ui, &t.servers_heading.to_uppercase());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::icon_button(ui, icon::PLUS, t.add_server, false, 28.0).clicked() {
                     self.open_favorite_dialog(None);
@@ -450,10 +448,21 @@ impl App {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                if favorites.is_empty() {
+                self.connected_server(ui);
+                let live = self
+                    .session_address
+                    .as_deref()
+                    .map(store::normalize_address);
+                let others: Vec<&Favorite> = favorites
+                    .iter()
+                    .filter(|f| {
+                        live.as_deref() != Some(store::normalize_address(&f.address).as_str())
+                    })
+                    .collect();
+                if others.is_empty() && !self.in_session() {
                     ui.label(RichText::new(t.no_favorites).small().color(theme::TEXT_3));
                 }
-                for favorite in &favorites {
+                for favorite in others {
                     self.favorite_row(ui, favorite);
                 }
             });
@@ -1342,7 +1351,7 @@ impl App {
     }
 
     /// Puts a server into the quick-connect form without connecting.
-    fn select_server(&mut self, address: &str) {
+    pub(super) fn select_server(&mut self, address: &str) {
         self.address = address.trim().to_string();
         self.address_problem = None;
         self.selected_favorite = self.store.favorite_for(address).map(|f| f.id.clone());

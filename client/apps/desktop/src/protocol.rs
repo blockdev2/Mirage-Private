@@ -113,6 +113,11 @@ pub struct AudioEvent {
     /// Our packet loss towards the server, 0..1.
     #[serde(default)]
     pub loss_out: Option<f32>,
+    /// Packets lost and counted since the connection began.
+    #[serde(default)]
+    pub lost_packets: Option<u64>,
+    #[serde(default)]
+    pub counted_packets: Option<u64>,
     /// Voice level (RMS, 0..1) of each peer talking. Older bridges omit it.
     #[serde(default)]
     /// Keyed by client id as text: JSON map keys are strings, and this
@@ -150,7 +155,8 @@ pub enum BridgeEvent {
         snapshot: Snapshot,
     },
     Log(LogLine),
-    Audio(AudioEvent),
+    /// Boxed: it is by far the largest event and the queue holds many.
+    Audio(Box<AudioEvent>),
     Devices {
         devices: DeviceLists,
     },

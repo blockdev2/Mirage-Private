@@ -1,0 +1,77 @@
+name: Build client
+# Builds the native Windows client. Every run leaves a downloadable artifact;
+# a push to main also refreshes the rolling "nightly" pre-release, whose
+# asset URL is stable, so the newest build is always one click away.
+on:
+  push:
+    branches: [main]
+  # Only to prove this workflow itself still works when it changes.
+  pull_request:
+    paths: ['.github/workflows/build.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    name: Windows release build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the documented Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: client -> target
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the desktop client
+        working-directory: client
+        run: cargo build --locked --release -p ts6-desktop
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item client/target/release/ts6-desktop.exe dist/Mirage.exe
+          Copy-Item LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath Mirage-windows-x64.zip -Force
+          (Get-FileHash Mirage-windows-x64.zip -Algorithm SHA256).Hash.ToLower() + '  Mirage-windows-x64.zip' | Set-Content Mirage-windows-x64.zip.sha256
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: Mirage-windows-x64
+          path: |
+            Mirage-windows-x64.zip
+            Mirage-windows-x64.zip.sha256
+          retention-days: 30
+          if-no-files-found: error
+  nightly:
+    name: Refresh nightly pre-release
+    needs: windows
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: Mirage-windows-x64
+      - name: Replace the nightly release
+        run: |
+          set -euo pipefail
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly Mirage-windows-x64.zip Mirage-windows-x64.zip.sha256 \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Nightly ${GITHUB_SHA::7}" \
+            --notes "Automatic Windows build of main at $GITHUB_SHA. Unsigned: Windows SmartScreen may warn. Verify the download against the .sha256 file."

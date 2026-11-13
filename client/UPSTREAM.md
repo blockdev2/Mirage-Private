@@ -71,3 +71,10 @@ not establish server compatibility.
 Acks of command packets still tune the resend timer, but they include the
 server's processing time, so counting them made the displayed ping read high.
 Reapply when updating the vendored copy.
+
+## Local patch: cumulative packet-loss counts
+
+`patches/packet-loss-counts.patch` adds `ConnectionStats::total_lost`,
+`total_counted` and `packetloss_counts()`. The upstream loss figure is a
+fraction over the last second only; the connection popup also shows how many
+packets were lost since the call began. Reapply when updating the vendored copy.

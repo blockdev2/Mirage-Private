@@ -67,8 +67,6 @@ pub mod icon {
     pub const CARET_UP: &str = "\u{E13C}";
     pub const CARET_RIGHT: &str = "\u{E13A}";
     pub const DOTS_THREE: &str = "\u{E1FE}";
-    pub const LIST: &str = "\u{E2F0}";
-    pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const LOCK_SIMPLE: &str = "\u{E308}";
     pub const SPEAKER_LOW: &str = "\u{E44C}";
     pub const SPEAKER_SLASH: &str = "\u{E45A}";
@@ -84,6 +82,12 @@ pub mod icon {
     pub const REPLY: &str = "\u{E024}";
     pub const COPY: &str = "\u{E1CA}";
     pub const EYE_SLASH: &str = "\u{E224}";
+    pub const CHECK: &str = "\u{E182}";
+    pub const PAPERCLIP: &str = "\u{E39A}";
+    pub const SMILEY: &str = "\u{E436}";
+    pub const CHATS: &str = "\u{E17C}";
+    pub const HASH: &str = "\u{E2A2}";
+    pub const FILE: &str = "\u{E230}";
 }
 
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
@@ -420,73 +424,6 @@ pub fn chip(ui: &mut Ui, text: &str, color: Color32, background: Color32) {
         .rect_filled(rect, CornerRadius::same(4), background);
     let pos = rect.center() - galley.size() / 2.0;
     ui.painter().galley(pos, galley, color);
-}
-
-/// Width of the segmented control: two 100 px segments, a 3 px gap, 3 px padding
-/// on each side and the 1 px border.
-pub const SEGMENTED_WIDTH: f32 = 211.0;
-
-/// Two-option switch (used for the list/grid view toggle). Each option is an
-/// (icon, label) pair. Returns the index clicked this frame, if any.
-pub fn segmented(ui: &mut Ui, options: [(&str, &str); 2], selected: usize) -> Option<usize> {
-    let mut clicked = None;
-    Frame::new()
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(Margin::same(3))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
-            ui.horizontal(|ui| {
-                for (index, (glyph, label)) in options.iter().enumerate() {
-                    let active = index == selected;
-                    let (rect, response) =
-                        ui.allocate_exact_size(vec2(100.0, 30.0), Sense::click());
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::Role::Button, true, active, *label)
-                    });
-                    let (fill, ink) = if active {
-                        (SURFACE_HOVER, TEXT)
-                    } else if response.hovered() {
-                        (SURFACE_RAISED, TEXT)
-                    } else {
-                        (Color32::TRANSPARENT, TEXT_2)
-                    };
-                    let painter = ui.painter();
-                    painter.rect_filled(rect, CornerRadius::same(4), fill);
-                    let icon_galley =
-                        painter.layout_no_wrap(glyph.to_string(), FontId::new(15.0, icons()), ink);
-                    let label_galley = painter.layout_no_wrap(
-                        label.to_string(),
-                        FontId::new(13.0, semibold()),
-                        ink,
-                    );
-                    let gap = 6.0;
-                    let total = icon_galley.size().x + gap + label_galley.size().x;
-                    let start = rect.center().x - total / 2.0;
-                    painter.galley(
-                        pos2(start, rect.center().y - icon_galley.size().y / 2.0),
-                        icon_galley.clone(),
-                        ink,
-                    );
-                    painter.galley(
-                        pos2(
-                            start + icon_galley.size().x + gap,
-                            rect.center().y - label_galley.size().y / 2.0,
-                        ),
-                        label_galley,
-                        ink,
-                    );
-                    if response.has_focus() {
-                        focus_ring(painter, rect);
-                    }
-                    if response.clicked() && !active {
-                        clicked = Some(index);
-                    }
-                }
-            });
-        });
-    clicked
 }
 
 /// Dark surface with a hairline border, used for every content block.

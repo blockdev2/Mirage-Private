@@ -278,6 +278,29 @@ pub struct Data {
     pub audio: AudioSettings,
     /// Playback volume per TeamSpeak user (unique id), 1.0 = 100%.
     pub volumes: std::collections::HashMap<String, f32>,
+    /// Channel chat kept on this computer so a conversation survives a restart.
+    /// The server keeps no history for classic channel chat, so this is the
+    /// only place it can come from. Keyed by `transcript_key`.
+    pub transcripts: std::collections::HashMap<String, Vec<SavedMessage>>,
+}
+
+/// One chat message as kept on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedMessage {
+    pub author: String,
+    pub text: String,
+    pub mine: bool,
+    pub hour: u8,
+    pub minute: u8,
+}
+
+/// Messages kept per channel; older ones are dropped.
+pub const MAX_SAVED_PER_CHANNEL: usize = 200;
+/// Conversations kept in total, so the file cannot grow without bound.
+const MAX_TRANSCRIPTS: usize = 40;
+
+fn transcript_key(address: &str, channel: u64) -> String {
+    format!("{}#{channel}", normalize_address(address))
 }
 
 pub struct Store {
@@ -372,6 +395,11 @@ impl Store {
         for volume in self.data.volumes.values_mut() {
             *volume = volume.clamp(0.0, MAX_PEER_VOLUME);
         }
+        self.data.transcripts.retain(|key, messages| {
+            let excess = messages.len().saturating_sub(MAX_SAVED_PER_CHANNEL);
+            messages.drain(..excess);
+            key.contains('#') && !messages.is_empty()
+        });
         self.data.version = 1;
     }
 
@@ -575,16 +603,75 @@ impl Store {
         self.data.history.truncate(MAX_HISTORY);
     }
 
+    /// Forgetting a server also forgets the conversations kept for it.
     pub fn remove_history(&mut self, address: &str) {
         let key = normalize_address(address);
         self.data
             .history
             .retain(|e| normalize_address(&e.address) != key);
+        let prefix = format!("{key}#");
+        self.data.transcripts.retain(|k, _| !k.starts_with(&prefix));
     }
 
-    /// Clears the history only. Favorites are kept.
+    /// Clears the connection history and the kept conversations. Favorites
+    /// are kept.
     pub fn clear_history(&mut self) {
         self.data.history.clear();
+        self.data.transcripts.clear();
+    }
+
+    // Chat transcripts -----------------------------------------------------------
+
+    /// Every conversation kept for a server, as (channel id, messages).
+    pub fn transcripts_for(&self, address: &str) -> Vec<(u64, &[SavedMessage])> {
+        let prefix = format!("{}#", normalize_address(address));
+        self.data
+            .transcripts
+            .iter()
+            .filter_map(|(key, messages)| {
+                let channel = key.strip_prefix(&prefix)?.parse().ok()?;
+                Some((channel, messages.as_slice()))
+            })
+            .collect()
+    }
+
+    /// Replaces the kept conversations of the channels in `chats`; channels
+    /// not mentioned keep what they had. Returns whether anything changed, so
+    /// the caller writes the file only then.
+    pub fn save_transcripts(
+        &mut self,
+        address: &str,
+        chats: std::collections::HashMap<u64, Vec<SavedMessage>>,
+    ) -> bool {
+        let mut changed = false;
+        let mut fresh = std::collections::HashSet::new();
+        for (channel, mut messages) in chats {
+            let excess = messages.len().saturating_sub(MAX_SAVED_PER_CHANNEL);
+            messages.drain(..excess);
+            let key = transcript_key(address, channel);
+            fresh.insert(key.clone());
+            if self.data.transcripts.get(&key) != Some(&messages) {
+                self.data.transcripts.insert(key, messages);
+                changed = true;
+            }
+        }
+        // shortcut: over the cap, drops arbitrary older conversations (never
+        // the ones just saved); no recency is tracked. Upgrade if people keep
+        // many busy servers.
+        while self.data.transcripts.len() > MAX_TRANSCRIPTS {
+            let Some(key) = self
+                .data
+                .transcripts
+                .keys()
+                .find(|k| !fresh.contains(*k))
+                .cloned()
+            else {
+                break;
+            };
+            self.data.transcripts.remove(&key);
+            changed = true;
+        }
+        changed
     }
 
     /// The name to show for a server: the favorite's custom name when it is
@@ -675,6 +762,53 @@ mod tests {
         std::env::temp_dir()
             .join(format!("mirage-test-{}", new_id()))
             .join(FILE_NAME)
+    }
+
+    fn saved(text: &str) -> SavedMessage {
+        SavedMessage {
+            author: "Ana".into(),
+            text: text.into(),
+            mine: false,
+            hour: 9,
+            minute: 30,
+        }
+    }
+
+    #[test]
+    fn conversations_are_kept_per_server_and_channel_and_forgotten_with_it() {
+        let path = temp_file();
+        let mut store = Store::open_at(Some(path.clone()));
+        let chats = |text: &str| std::collections::HashMap::from([(1, vec![saved(text)])]);
+        assert!(store.save_transcripts("Voz.Exemplo.com:9987", chats("oi")));
+        // Same content again: nothing to write.
+        assert!(!store.save_transcripts("voz.exemplo.com", chats("oi")));
+        assert!(store.save_transcripts("outro.exemplo.com", chats("tchau")));
+        store.save();
+
+        let reopened = Store::open_at(Some(path.clone()));
+        let kept = reopened.transcripts_for("voz.exemplo.com");
+        assert_eq!(kept.len(), 1);
+        assert_eq!((kept[0].0, kept[0].1[0].text.as_str()), (1, "oi"));
+
+        let mut store = reopened;
+        store.remove_history("voz.exemplo.com");
+        assert!(store.transcripts_for("voz.exemplo.com").is_empty());
+        assert_eq!(store.transcripts_for("outro.exemplo.com").len(), 1);
+        store.clear_history();
+        assert!(store.data.transcripts.is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_conversation_keeps_only_its_newest_messages() {
+        let mut store = Store::open_at(None);
+        let many: Vec<_> = (0..MAX_SAVED_PER_CHANNEL + 5)
+            .map(|i| saved(&i.to_string()))
+            .collect();
+        store.save_transcripts("a", std::collections::HashMap::from([(1, many)]));
+        let kept = store.transcripts_for("a")[0].1;
+        assert_eq!(kept.len(), MAX_SAVED_PER_CHANNEL);
+        assert_eq!(kept[0].text, "5");
     }
 
     #[test]

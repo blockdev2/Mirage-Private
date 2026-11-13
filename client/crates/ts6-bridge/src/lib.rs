@@ -124,15 +124,23 @@ pub async fn serve(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
     serve_inner(port, Some(ui_dir)).await
 }
 
+/// How often the session loop wakes with nothing else to do.
+const SESSION_TICK: std::time::Duration = std::time::Duration::from_millis(10);
+
 async fn serve_inner(port: u16, ui_dir: Option<PathBuf>) -> anyhow::Result<()> {
     let (commands, command_rx) = mpsc::channel::<Command>(32);
     let (events, _) = broadcast::channel::<String>(256);
     // The session loop also receives reports from its own transfer tasks.
     let internal = commands.clone();
-    // Wakes the session loop regularly so speaking rings expire on time.
+    // Wakes the session loop regularly. Speaking rings expire on it, and so
+    // does incoming network traffic: a packet that arrives while the loop
+    // idles is only noticed at the next wake-up (measured on Windows: the
+    // server answers a ping in 0.2 ms, yet the reply was handled up to one
+    // tick later and the ping read 30-90 ms). A short tick bounds that wait
+    // for pings and for the first packet of incoming voice.
     let ticker = commands.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        let mut interval = tokio::time::interval(SESSION_TICK);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
@@ -387,7 +395,7 @@ fn publish_audio(
     engine: &mut audio::AudioEngine,
     events: &broadcast::Sender<String>,
     tx_frames: u64,
-    own: Option<(f64, f32)>,
+    own: Option<ts6_core::OwnNetwork>,
 ) {
     let counters = engine.counters();
     protocol::publish(
@@ -403,8 +411,10 @@ fn publish_audio(
             playback: counters.playback,
             tone: counters.tone,
             ptt_binding: counters.ptt_binding,
-            ping_ms: own.map(|(ping, _)| ping),
-            loss_out: own.map(|(_, loss)| loss),
+            ping_ms: own.map(|net| net.ping_ms),
+            loss_out: own.map(|net| net.loss),
+            lost_packets: own.map(|net| net.lost_packets),
+            counted_packets: own.map(|net| net.counted_packets),
             levels: counters.levels,
         },
     );

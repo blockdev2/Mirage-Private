@@ -88,6 +88,17 @@ pub enum Wake<T = ()> {
     Command(T),
 }
 
+/// Our own connection quality, measured by the protocol layer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OwnNetwork {
+    pub ping_ms: f64,
+    /// Packet loss of the last second, 0..1.
+    pub loss: f32,
+    /// Packets lost and packets counted since the connection began.
+    pub lost_packets: u64,
+    pub counted_packets: u64,
+}
+
 pub struct Session {
     session_id: String,
     con: Connection,
@@ -612,12 +623,17 @@ impl Session {
         Ok(())
     }
 
-    /// Our round-trip time (ms) and outgoing packet loss (0..1), measured
-    /// locally by the protocol layer: the server does not report our own.
-    pub fn own_network(&self) -> Option<(f64, f32)> {
+    /// Our round-trip time and packet loss, measured locally by the protocol
+    /// layer: the server does not report our own.
+    pub fn own_network(&self) -> Option<OwnNetwork> {
         let stats = self.con.get_network_stats().ok()?;
         // Zero until the first ping reply arrives.
-        (!stats.rtt.is_zero()).then(|| (stats.rtt.as_secs_f64() * 1000.0, stats.get_packetloss()))
+        (!stats.rtt.is_zero()).then(|| OwnNetwork {
+            ping_ms: stats.rtt.as_secs_f64() * 1000.0,
+            loss: stats.get_packetloss(),
+            lost_packets: stats.total_lost,
+            counted_packets: stats.total_counted,
+        })
     }
 
     /// The latest connection statistics the server sent for a client.

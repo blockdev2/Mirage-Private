@@ -309,6 +309,9 @@ pub enum Event<'a> {
         ping_ms: Option<f64>,
         /// Our packet loss towards the server, 0..1.
         loss_out: Option<f32>,
+        /// Packets lost and packets counted since the connection began.
+        lost_packets: Option<u64>,
+        counted_packets: Option<u64>,
         /// Voice level (RMS, 0..1) of each peer talking right now.
         levels: std::collections::HashMap<u16, f32>,
     },
@@ -436,6 +439,8 @@ mod tests {
             ptt_binding: Some("F13".into()),
             ping_ms: None,
             loss_out: None,
+            lost_packets: None,
+            counted_packets: None,
             levels: Default::default(),
         })
         .unwrap();
