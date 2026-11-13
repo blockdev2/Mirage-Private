@@ -459,3 +459,16 @@ at 0.1 ms, so capture and encoding do not starve the session. The log shows
 Mirage's candidates on a different interface/public IP than the earlier run
 (10.165.x with a different srflx address), so the path to the server is the
 suspect; compare with the official client's own ping to the same server.
+
+### Fourth round: slow answers, and a VPN (2026-11-13)
+
+A level-5 answer of the same length (1572 chars) that was applied at 13:32
+was ignored at 14:46, so the SDP level is not the whole story. What differs is
+timing: the 13:32 answer reached the official publisher 35 ms after its offer
+(ping 14 ms); the ignored ones arrived about 900 ms later (ping 430-440 ms),
+after the official client's own `OnConnectionChange new_state=1` (about 450 ms
+after its offer). Hypothesis, not proven: the official client drops an answer
+that arrives after that point. `Get-NetIPConfiguration` shows the cause of the
+ping: the default route goes through a Mullvad VPN adapter (metric 1), ahead
+of the LAN. Next test: VPN off (or Mirage excluded) and watch again.
+The level fix above is kept, since the old layouts were refused even when fast.

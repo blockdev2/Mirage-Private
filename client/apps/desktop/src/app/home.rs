@@ -1157,7 +1157,12 @@ impl App {
                 .show_ui(ui, |ui| {
                     for profile in &self.store.data.profiles {
                         let current = active.as_deref() == Some(profile.id.as_str());
-                        if ui.selectable_label(current, &profile.nickname).clicked() {
+                        let label = if crate::store::nickname_ok(&profile.nickname) {
+                            profile.nickname.clone()
+                        } else {
+                            format!("{} ({})", profile.nickname, t.nickname_invalid_tag)
+                        };
+                        if ui.selectable_label(current, label).clicked() {
                             chosen = Some(profile.id.clone());
                         }
                     }
@@ -1167,6 +1172,18 @@ impl App {
                 self.store.save();
             }
             ui.add_space(2.0);
+            let profile_bad = !self.use_other_nickname
+                && active
+                    .as_deref()
+                    .and_then(|id| self.store.profile(id))
+                    .is_some_and(|p| !crate::store::nickname_ok(&p.nickname));
+            if profile_bad {
+                ui.label(
+                    RichText::new(t.profile_nickname_invalid)
+                        .small()
+                        .color(theme::DANGER),
+                );
+            }
             ui.label(
                 RichText::new(t.profile_saved_note)
                     .small()
