@@ -364,7 +364,7 @@ impl App {
     /// Saves a new name to the profile and, in a call, to the server.
     fn commit_name(&mut self, typed: &str, current: &str) {
         let name: String = typed.trim().chars().take(NICKNAME_MAX_CHARS).collect();
-        if name.is_empty() || name == current {
+        if !crate::store::nickname_ok(&name) || name == current {
             return;
         }
         match self.store.active_profile_id() {

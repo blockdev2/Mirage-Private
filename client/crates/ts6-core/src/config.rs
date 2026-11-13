@@ -1,6 +1,40 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+/// Shortest nickname the server accepts (it answers `ParameterInvalidSize`).
+pub const NICKNAME_MIN_CHARS: usize = 3;
+/// Longest nickname the server accepts. Measured in characters, not bytes.
+pub const NICKNAME_MAX_CHARS: usize = 30;
+
+/// Why a nickname cannot be used. The server trims it and then counts
+/// characters, so the check does the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NicknameError {
+    TooShort,
+    TooLong,
+}
+
+impl std::fmt::Display for NicknameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a nickname needs {NICKNAME_MIN_CHARS} to {NICKNAME_MAX_CHARS} characters"
+        )
+    }
+}
+
+impl std::error::Error for NicknameError {}
+
+/// Trims `raw` and checks its length against the server's limits.
+pub fn check_nickname(raw: &str) -> Result<&str, NicknameError> {
+    let name = raw.trim();
+    match name.chars().count() {
+        n if n < NICKNAME_MIN_CHARS => Err(NicknameError::TooShort),
+        n if n > NICKNAME_MAX_CHARS => Err(NicknameError::TooLong),
+        _ => Ok(name),
+    }
+}
+
 /// Everything needed to open one server connection.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -80,6 +114,16 @@ pub fn default_config_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nickname_limits_match_the_server() {
+        use super::{check_nickname, NicknameError};
+        assert_eq!(check_nickname("a"), Err(NicknameError::TooShort));
+        assert_eq!(check_nickname("  ab  "), Err(NicknameError::TooShort));
+        assert_eq!(check_nickname(" abc "), Ok("abc"));
+        assert_eq!(check_nickname(&"é".repeat(30)).map(str::len), Ok(60));
+        assert_eq!(check_nickname(&"x".repeat(31)), Err(NicknameError::TooLong));
+    }
+
     use super::*;
 
     #[test]

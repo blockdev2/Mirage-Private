@@ -50,25 +50,35 @@ pub fn nv12_to_rgba(
         (w, h)
     };
     let chroma = stride * rows;
-    let mut rgba = Vec::with_capacity(out_w * out_h * 4);
-    for oy in 0..out_h {
-        let y = oy * h / out_h;
-        for ox in 0..out_w {
-            let x = ox * w / out_w;
-            let luma = f32::from(data[y * stride + x]);
-            let at = chroma + (y / 2) * stride + (x & !1);
-            let u = f32::from(data[at]) - 128.0;
-            let v = f32::from(data[at + 1]) - 128.0;
-            let l = (luma - 16.0) * 1.164;
-            let clamp = |c: f32| c.round().clamp(0.0, 255.0) as u8;
-            rgba.extend_from_slice(&[
-                clamp(l + 1.793 * v),
-                clamp(l - 0.213 * u - 0.533 * v),
-                clamp(l + 2.112 * u),
-                255,
-            ]);
+    let xs: Vec<usize> = (0..out_w).map(|ox| ox * w / out_w).collect();
+    let mut rgba = vec![0u8; out_w * out_h * 4];
+    // A 1080p picture takes about 70 ms in one float loop, which caps the
+    // stream near 14 fps; fixed point split over a few threads is far faster.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 4);
+    let band = out_h.div_ceil(workers).max(1);
+    std::thread::scope(|scope| {
+        for (index, rows_out) in rgba.chunks_mut(band * out_w * 4).enumerate() {
+            let xs = &xs;
+            scope.spawn(move || {
+                for (n, row) in rows_out.chunks_exact_mut(out_w * 4).enumerate() {
+                    let y = (index * band + n) * h / out_h;
+                    let luma_row = &data[y * stride..y * stride + w];
+                    let chroma_row = &data[chroma + (y / 2) * stride..];
+                    for (px, &x) in row.as_chunks_mut::<4>().0.iter_mut().zip(xs) {
+                        let c = (i32::from(luma_row[x]) - 16) * 298 + 128;
+                        let u = i32::from(chroma_row[x & !1]) - 128;
+                        let v = i32::from(chroma_row[(x & !1) + 1]) - 128;
+                        px[0] = ((c + 459 * v) >> 8).clamp(0, 255) as u8;
+                        px[1] = ((c - 55 * u - 136 * v) >> 8).clamp(0, 255) as u8;
+                        px[2] = ((c + 541 * u) >> 8).clamp(0, 255) as u8;
+                        px[3] = 255;
+                    }
+                }
+            });
         }
-    }
+    });
     Some(Frame {
         width: out_w as u32,
         height: out_h as u32,
@@ -547,5 +557,64 @@ mod tests {
         let frames = decode_all(&encode_fixture(2560, 1440, GREEN_BGR, 3));
         let last = frames.last().expect("frames");
         assert_eq!((last.width, last.height), (1920, 1080));
+    }
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::*;
+
+    /// The original per-pixel float conversion, kept as the reference.
+    fn reference(data: &[u8], w: usize, h: usize, stride: usize, rows: usize) -> Vec<u8> {
+        let chroma = stride * rows;
+        let mut out = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let luma = f32::from(data[y * stride + x]);
+                let at = chroma + (y / 2) * stride + (x & !1);
+                let u = f32::from(data[at]) - 128.0;
+                let v = f32::from(data[at + 1]) - 128.0;
+                let l = (luma - 16.0) * 1.164;
+                let clamp = |c: f32| c.round().clamp(0.0, 255.0) as u8;
+                out.extend_from_slice(&[
+                    clamp(l + 1.793 * v),
+                    clamp(l - 0.213 * u - 0.533 * v),
+                    clamp(l + 2.112 * u),
+                    255,
+                ]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn fixed_point_matches_the_float_reference() {
+        let (w, h, stride, rows) = (66usize, 38usize, 70usize, 40usize);
+        let data: Vec<u8> = (0..stride * rows * 3 / 2)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let frame = nv12_to_rgba(&data, w as u32, h as u32, stride, rows).unwrap();
+        let want = reference(&data, w, h, stride, rows);
+        assert_eq!(frame.rgba.len(), want.len());
+        let worst = frame
+            .rgba
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= 2, "worst channel difference {worst}");
+    }
+
+    #[test]
+    #[ignore = "timing probe, run with --release --nocapture"]
+    fn convert_1080p_timing() {
+        let (w, h) = (1920usize, 1080usize);
+        let data = vec![100u8; w * h * 3 / 2];
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            std::hint::black_box(nv12_to_rgba(&data, w as u32, h as u32, w, h));
+        }
+        println!("nv12_to_rgba 1080p: {:?} per frame", start.elapsed() / 20);
     }
 }

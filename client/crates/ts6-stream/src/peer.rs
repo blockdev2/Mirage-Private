@@ -43,7 +43,7 @@ const SIGNAL_QUEUE: usize = 64;
 /// Candidates held while the remote description is still missing.
 const PENDING_CANDIDATES: usize = 64;
 const H264_PAYLOAD_TYPE: PayloadType = 102;
-const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f";
 
 fn opus() -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
@@ -100,6 +100,7 @@ impl PeerConnectionEventHandler for Shared {
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        tracing::info!(?state, "stream peer connection state");
         self.connected.store(
             state == RTCPeerConnectionState::Connected,
             Ordering::Release,

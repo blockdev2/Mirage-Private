@@ -17,7 +17,9 @@ pub mod session;
 pub mod state;
 pub mod streams;
 
-pub use config::ClientConfig;
+pub use config::{
+    check_nickname, ClientConfig, NicknameError, NICKNAME_MAX_CHARS, NICKNAME_MIN_CHARS,
+};
 pub use session::{ChatTarget, Item, OwnNetwork, Session, TextMessage, Wake};
 pub use state::{ChannelInfo, ClientInfo, ConnectionInfo, ServerInfo, Snapshot};
 

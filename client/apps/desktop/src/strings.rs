@@ -465,7 +465,7 @@ pub const PT: Strings = Strings {
     profile_first_title: "Crie seu perfil local",
     profile_first_body: "Seu apelido fica salvo neste computador. Não é preciso criar conta.",
     nickname_label: "Apelido",
-    nickname_required: "Informe um apelido.",
+    nickname_required: "O apelido precisa ter de 3 a 30 caracteres.",
     make_default: "Definir como perfil padrão",
     delete_profile: "Excluir perfil",
     choose_photo: "Escolher foto",

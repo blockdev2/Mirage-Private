@@ -59,6 +59,7 @@ async fn the_primary_monitor_reaches_a_loopback_viewer() {
     let capture = ScreenCapture::start(CaptureConfig::default()).expect("capture starts");
     let (mut units, mut keyframes, mut bytes) = (0u32, 0u32, 0usize);
     let mut first_startable = None;
+    let mut profile_idc = None;
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline && viewer.packets() < 30 {
         match capture.units().recv_timeout(Duration::from_millis(100)) {
@@ -66,6 +67,12 @@ async fn the_primary_monitor_reaches_a_loopback_viewer() {
                 let info = analyze(&unit.data);
                 if first_startable.is_none() {
                     first_startable = Some(unit.keyframe && info.parameter_sets);
+                    // SPS (NAL 7): the byte after the header is profile_idc.
+                    profile_idc = unit
+                        .data
+                        .windows(5)
+                        .find(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 7)
+                        .map(|w| w[4]);
                 }
                 units += 1;
                 keyframes += u32::from(unit.keyframe);
@@ -91,7 +98,7 @@ async fn the_primary_monitor_reaches_a_loopback_viewer() {
     let failure = capture.error();
     capture.stop().expect("capture stops");
     eprintln!(
-        "units={units} keyframes={keyframes} bytes={bytes} viewer_packets={} failure={failure:?}",
+        "units={units} keyframes={keyframes} bytes={bytes} profile_idc={profile_idc:?} viewer_packets={} failure={failure:?}",
         viewer.packets()
     );
 

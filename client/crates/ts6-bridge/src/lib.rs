@@ -43,14 +43,31 @@ struct App {
     events: broadcast::Sender<String>,
 }
 
+/// Installs the log subscriber. Output goes to stderr, or appends to the file
+/// named by `MIRAGE_LOG_FILE` (the desktop exe has no console). Another
+/// subscriber may already be installed when hosted inside the desktop.
+fn init_logging(default_filter: &str) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+    let file = std::env::var_os("MIRAGE_LOG_FILE").and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    let _ = match file {
+        Some(file) => builder
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .try_init(),
+        None => builder.try_init(),
+    };
+}
+
 pub fn main_entry() -> anyhow::Result<()> {
-    // Another subscriber may already be installed when hosted inside the desktop.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ts6_bridge=debug")),
-        )
-        .try_init();
+    init_logging("info,ts6_bridge=debug");
 
     let port: u16 = std::env::var("TS6_BRIDGE_PORT")
         .ok()
@@ -930,6 +947,27 @@ async fn apply_command(
             publish_media(media, events);
 
             let nickname = nickname.unwrap_or_else(|| "ts6client".to_string());
+            let nickname = match ts6_core::check_nickname(&nickname) {
+                Ok(name) => name.to_owned(),
+                Err(error) => {
+                    protocol::publish(
+                        events,
+                        &Event::Status {
+                            session_id: None,
+                            connected: false,
+                            address: None,
+                            nickname: None,
+                            error: Some(&error.to_string()),
+                        },
+                    );
+                    log(
+                        events,
+                        "error",
+                        format!("connection refused locally: {error}"),
+                    );
+                    return;
+                }
+            };
             let mut client_config = ts6_core::ClientConfig::new(&address, &nickname);
             if let Some(channel) = channel.filter(|value| !value.trim().is_empty()) {
                 client_config = client_config.channel(channel);
@@ -1162,7 +1200,16 @@ async fn apply_command(
         } => publish_chat_file(events, channel, path, file),
 
         Command::Nick { name } => match session.as_mut() {
-            Some(active) => match active.set_nickname(&name).await {
+            Some(_) if ts6_core::check_nickname(&name).is_err() => log(
+                events,
+                "error",
+                format!(
+                    "nickname must have {} to {} characters",
+                    ts6_core::NICKNAME_MIN_CHARS,
+                    ts6_core::NICKNAME_MAX_CHARS
+                ),
+            ),
+            Some(active) => match active.set_nickname(name.trim()).await {
                 Ok(()) => {
                     log(events, "ok", format!("nickname changed to {name}"));
                     publish_state(active, events);
@@ -1323,12 +1370,7 @@ async fn apply_command(
 pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
     // Quiet by default: debug output can include server command metadata. Set
     // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .try_init();
+    init_logging("warn");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1341,12 +1383,7 @@ pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
 pub fn serve_blocking_without_ui(port: u16) -> anyhow::Result<()> {
     // Quiet by default: debug output can include server command metadata. Set
     // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .try_init();
+    init_logging("warn");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

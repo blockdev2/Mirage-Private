@@ -290,9 +290,22 @@ fn spawn_decoder(
                     }
                 };
                 let mut first = true;
+                let (mut shown, mut busy, mut since) = (0u32, Duration::ZERO, Instant::now());
                 while let Ok(unit) = queue.recv() {
-                    match decoder.decode(&unit) {
+                    let started = Instant::now();
+                    let result = decoder.decode(&unit);
+                    busy += started.elapsed();
+                    if since.elapsed() >= Duration::from_secs(5) {
+                        tracing::info!(
+                            frames = shown,
+                            busy_ms = busy.as_millis() as u64,
+                            "stream decoder, last 5 s"
+                        );
+                        (shown, busy, since) = (0, Duration::ZERO, Instant::now());
+                    }
+                    match result {
                         Ok(Some(frame)) => {
+                            shown += 1;
                             frames().publish(generation, frame);
                             if std::mem::take(&mut first) {
                                 let _ = internal.send(Internal::Playing(generation));
@@ -341,6 +354,7 @@ impl PeerConnectionEventHandler for Viewer {
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        tracing::info!(?state, "stream viewer connection state");
         if state == RTCPeerConnectionState::Failed {
             let _ = self
                 .internal

@@ -401,3 +401,38 @@ Other open items seen in the same logs: our candidates are sometimes delayed
 about 3 s by STUN gathering, the official viewer's retries produce
 `joinstreamrequest err=5638`, and the Mirage viewer gives up after 20 s
 without a first frame.
+
+### Result of the SDP experiment (2026-11-13, same day)
+
+The official client's log after the Chrome-layout build shows both
+directions now work at the negotiation level: it applied our answer
+(`SetRemoteDescription CALL site=HandleRemoteAnswer … OK`, 1572 chars) and our
+offer (`site=HandleRemoteOffer … OK`, 1593 chars), and both peer connections
+reached `OnConnectionChange new_state=2` (connected) within 3 s. Mirage showed
+the official client's screen for a while. So the silent rejection was SDP
+shape, not network. (Which of the six levels did it is not separated: the
+levels cycle, and the lengths seen match the shaped layouts; pin
+`MIRAGE_SDP_LEVEL` to bisect if the cycling should go away.)
+
+Two separate bugs remained, both found in the same log and a timing probe:
+
+- **Official viewer showed nothing of our share.** Log line `Trying to create
+  decoder for unsupported format. Codec name: H264, parameters:
+  { level-asymmetry-allowed=1 packetization-mode=1 profile-level-id=42e01f }`.
+  The official client offers and decodes only H.264 High
+  (`profile-level-id=640c1f`); we offered Constrained Baseline. The publisher
+  now offers `640c1f` and the encoder asks Media Foundation for High
+  (`MF_MT_MPEG2_PROFILE = 100`, falls back to the encoder default if
+  declined). Checked on this machine: the first SPS of a real capture has
+  `profile_idc=100`. Level is still declared 3.1 while the stream may be
+  1080p; the official decoder has not been tested with it yet.
+- **Mirage viewing the official stream lagged and dropped.** `nv12_to_rgba`
+  took about 70 ms for a 1080p frame (one thread, floats), so the stream was
+  capped near 14 fps; the 4-frame decode queue overflowed, every overflow
+  forced a wait for the next keyframe plus a PLI, and the picture froze.
+  The conversion is now fixed point over up to 4 threads: about 1.9 ms per
+  1080p frame, matching the old output within 2 levels (test). Not yet seen
+  live at 60 fps: the Media Foundation decode time itself is unmeasured.
+  The "drop" itself is unexplained (the official log showed ICE healthy at
+  15 s); `MIRAGE_LOG_FILE` plus `dist/share-test/Mirage-com-log.cmd` now
+  record the viewer's connection state and decoder frames per 5 s.

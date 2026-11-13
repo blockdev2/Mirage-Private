@@ -13,7 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 /// TeamSpeak's limit for a nickname.
-pub const NICKNAME_MAX_CHARS: usize = 30;
+pub const NICKNAME_MAX_CHARS: usize = ts6_core::NICKNAME_MAX_CHARS;
+
+/// Whether the server would accept this nickname (3 to 30 characters once
+/// trimmed).
+pub fn nickname_ok(nickname: &str) -> bool {
+    ts6_core::check_nickname(nickname).is_ok()
+}
 /// Oldest history entries beyond this count are dropped.
 pub const MAX_HISTORY: usize = 50;
 const FILE_NAME: &str = "profiles.json";
@@ -898,6 +904,16 @@ mod tests {
         assert_eq!(store.data.favorites.len(), 1);
         assert_eq!(store.display_name("voz.com", "Reportado"), "Um");
         assert_eq!(store.display_name("outro.com", "Reportado"), "Reportado");
+    }
+
+    #[test]
+    fn nickname_needs_three_to_thirty_characters() {
+        assert!(!nickname_ok(""));
+        assert!(!nickname_ok("ab"));
+        assert!(!nickname_ok("  ab  "));
+        assert!(nickname_ok("abc"));
+        assert!(nickname_ok(&"é".repeat(30)));
+        assert!(!nickname_ok(&"é".repeat(31)));
     }
 
     #[test]
