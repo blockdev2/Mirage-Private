@@ -156,12 +156,11 @@ fn list_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> RowOutcome {
         };
         painter.rect_filled(rect, CornerRadius::same(8), fill);
         if spec.selected {
-            painter.rect_stroke(
-                rect,
-                CornerRadius::same(8),
-                Stroke::new(1.0, theme::TEXT_3),
-                StrokeKind::Inside,
+            let bar = Rect::from_min_size(
+                rect.left_top() + vec2(0.0, rect.height() / 2.0 - 10.0),
+                vec2(3.0, 20.0),
             );
+            painter.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
         } else if !borderless {
             painter.rect_stroke(
                 rect,
@@ -295,11 +294,23 @@ fn list_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> RowOutcome {
             }
         }
         if let Some(menu_rect) = menu_rect {
+            // Quiet until the row is in use, so a list is names, not buttons.
+            let menu_key = ui.scope_id().with("menu-open");
+            let in_use = hovered
+                || spec.selected
+                || response.has_focus()
+                || ui.data(|d| d.get_temp::<bool>(menu_key)).unwrap_or(false);
             let more = ui
                 .scope_builder(UiBuilder::new().max_rect(menu_rect), |ui| {
+                    if !in_use {
+                        ui.set_opacity(0.0);
+                    }
                     theme::icon_button(ui, icon::DOTS_THREE, spec.menu_label, false, ROW_BUTTON)
                 })
                 .inner;
+            // Remembered for the next frame, so the button stays while its menu is up.
+            let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&more));
+            ui.data_mut(|d| d.insert_temp(menu_key, open));
             egui::Popup::menu(&more).show(|ui| {
                 ui.set_min_width(190.0);
                 for (action, label) in &spec.menu {
@@ -422,19 +433,7 @@ impl App {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(icon::BOOKMARK_SIMPLE)
-                    .font(FontId::new(15.0, theme::icons()))
-                    .color(theme::TEXT_3),
-            );
-            theme::section_label(ui, &t.servers_heading.to_uppercase());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::icon_button(ui, icon::PLUS, t.add_server, false, 28.0).clicked() {
-                    self.open_favorite_dialog(None);
-                }
-            });
-        });
+        theme::section_label(ui, t.servers_heading);
         ui.add_space(6.0);
 
         // The profile row is pinned to the bottom; favorites and "Adicionar
@@ -461,6 +460,11 @@ impl App {
                     .collect();
                 if others.is_empty() && !self.in_session() {
                     ui.label(RichText::new(t.no_favorites).small().color(theme::TEXT_3));
+                }
+                if self.in_session() && !others.is_empty() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
                 }
                 for favorite in others {
                     self.favorite_row(ui, favorite);
@@ -878,7 +882,7 @@ impl App {
 
         theme::card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            theme::section_label(ui, &t.last_connection.to_uppercase());
+            theme::section_label(ui, t.last_connection);
             ui.add_space(10.0);
 
             let inner = ui.available_width();

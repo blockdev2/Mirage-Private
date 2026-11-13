@@ -518,13 +518,13 @@ pub fn masked_text(
         painter.rect_stroke(
             bar,
             CornerRadius::same(5),
-            Stroke::new(1.0, BORDER.gamma_multiply(hidden)),
+            Stroke::new(1.0, BORDER_SOFT.gamma_multiply(hidden)),
             egui::StrokeKind::Inside,
         );
         // Fine diagonal hatching, kept inside the bar.
         let clip = painter.with_clip_rect(bar.shrink(1.5));
-        let ink = lerp_color(BORDER, TEXT_3, 0.35 + 0.35 * lift).gamma_multiply(hidden);
-        let step = 5.0;
+        let ink = lerp_color(BORDER_SOFT, BORDER, 0.5 + 0.5 * lift).gamma_multiply(hidden);
+        let step = 6.0;
         let mut x = bar.left() - bar.height();
         while x < bar.right() {
             clip.line_segment(
@@ -604,7 +604,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
 pub fn section_label(ui: &mut Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(FontId::new(12.0, medium()))
+            .font(FontId::new(12.5, medium()))
             .color(TEXT_3),
     );
 }
@@ -740,6 +740,27 @@ pub fn avatar_tiny(painter: &egui::Painter, center: egui::Pos2, size: f32, name:
         FontId::new(size * 0.45, semibold()),
         Color32::from_rgb(20, 22, 28),
     );
+}
+
+/// A soft halo of `color` behind a participant's avatar: stacked, fading
+/// circles, so it needs no texture. `strength` is about 1 at rest and rises
+/// while the person speaks. Clipped to `rect` so it never spills out of a tile.
+pub fn aura(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    center: egui::Pos2,
+    radius: f32,
+    color: Color32,
+    strength: f32,
+) {
+    let painter = painter.with_clip_rect(rect.shrink(1.0));
+    const STEPS: u32 = 28;
+    for step in 0..STEPS {
+        let t = step as f32 / (STEPS - 1) as f32;
+        let alpha = (2.6 * strength).round().clamp(0.0, 255.0) as u8;
+        let ring = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+        painter.circle_filled(center, radius * (1.0 - 0.85 * t), ring);
+    }
 }
 
 /// Stable avatar color for a name, so a participant keeps the same color.
