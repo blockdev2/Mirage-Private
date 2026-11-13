@@ -99,6 +99,7 @@ See [development and configuration](docs/DEVELOPMENT.md), [architecture](docs/ar
 | `client/crates/ts6-cli` | Diagnostics and manual measurement commands |
 | `client/crates/ts6-bridge` | Loopback HTTP/WebSocket service and local audio orchestration |
 | `client/crates/ts6-stream` | Native WebRTC publisher and viewer for TS6 streams (loopback-proven; not wired to the session yet) |
+| `client/crates/ts6-capture` | Windows monitor capture and GPU H.264 encoding (hardware encoder only; not wired to the session yet) |
 | `client/apps/desktop` | Native eframe/egui desktop frontend |
 | `client/apps/ui` | React 19, TypeScript 7, Vite 8, CSS |
 | `client/vendor/tsclientlib` | Tracked protocol source, separate workspace and licenses |

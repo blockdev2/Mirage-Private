@@ -12,13 +12,14 @@ See [README](README.md) and [current audit](docs/AUDIT.md) for limits and blocke
 
 ## Navigate
 
-- `client/Cargo.toml`: seven-package workspace and lockfile.
+- `client/Cargo.toml`: eight-package workspace and lockfile.
 - `ts6-core`: `Session`, `ClientConfig`, `Snapshot`, identity persistence, event polling.
 - `ts6-audio`: Opus, mono 48 kHz processing, capture/playback on dedicated threads.
 - `ts6-input`: Windows global PTT and bounded transmit gate.
 - `ts6-cli`: manual measurement commands; no-argument invocation prints usage.
 - `ts6-bridge`: one loopback HTTP/WebSocket service, one session, audio orchestration.
 - `ts6-stream`: native WebRTC publisher/viewer for TS6 streams; signaling-agnostic, not yet wired to the session.
+- `ts6-capture`: Windows monitor capture (WGC) -> GPU NV12 -> hardware H.264 (Media Foundation) -> Annex-B units; not yet wired to the session.
 - `client/apps/desktop`: native eframe/egui desktop frontend; embeds a bridge without static-file serving.
 - `client/apps/ui`: React 19 + TypeScript 7 + Vite 8; wire types in `src/types.ts`.
 - `client/vendor/tsclientlib`: third-party workspace; read `client/UPSTREAM.md` before changes.
