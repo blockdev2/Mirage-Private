@@ -208,7 +208,9 @@ separated by `;`): `wait:SECS`, `connect:HOST:PORT`, `chat:TEXT`,
 Coordinates are egui points (screenshot pixels divided by the display scale).
 `MIRAGE_DEV_OUT` is the folder for the screenshots. Use an isolated `APPDATA`
 so the real profile is untouched, and only a loopback test server.
-The code is compiled out of release builds.
+The code is compiled out of release builds. `MIRAGE_DEV_SIZE=1000x640` (also
+debug only) opens the window at that size, the smallest it allows, to check
+layouts such as Ajustes.
 
 ## Installer and updates while developing
 
