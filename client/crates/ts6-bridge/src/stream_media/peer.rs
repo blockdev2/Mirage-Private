@@ -38,7 +38,7 @@ const MAX_ICE_JSON: usize = 2 * 1024;
 /// First picture deadline after the answer is sent.
 const FIRST_FRAME: Duration = Duration::from_secs(20);
 /// Access units waiting for the decoder; more means the decoder is behind.
-const DECODE_QUEUE: usize = 4;
+const DECODE_QUEUE: usize = 30;
 
 /// What the peer's callbacks and the decoder report back to the loop.
 enum Internal {

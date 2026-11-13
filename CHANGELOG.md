@@ -4,6 +4,7 @@ No tagged releases have been established in this checkout. Entries describe repo
 
 ## Unreleased
 
+- Viewer: the decode queue holds 30 access units instead of 4. With the packet window fixed, the log showed no lost packets but short freezes when keyframes (slow to decode) filled the 4-slot queue, which forced a wait for a keyframe the official client rarely sends.
 - **Fix freezes of about 20 s while watching a stream.** The viewer reassembled frames with a 64-packet window, smaller than a 1080p keyframe, so every keyframe after the first was dropped and the picture stayed frozen until the sender produced another one by itself. The window is now 4096 packets with a 500 ms bound; a unit test packs a 250 KB keyframe into about 210 packets. Not yet confirmed against the official client.
 - Desktop: saved profiles whose nickname is shorter than 3 characters are tagged "inválido" in the profile list and a red hint says so under the list.
 - SDP shaping: the official client accepted only the highest layout (level 5, with `rtcp-xr`/`rrtr`) as an answer, so `next_level` no longer cycles and always writes level 5 (`MIRAGE_SDP_LEVEL` still pins another). Without it the official publisher never applied the Mirage viewer's answer, which is why watching its screen stayed on "Conectando à transmissão…". Measured from the official log (one accepted answer, two refused), not yet confirmed by a fresh run.

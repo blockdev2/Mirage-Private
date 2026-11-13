@@ -527,3 +527,13 @@ IDR into about 210 packets; it fails with a window of 64 and passes with 4096.
 The `Full` errors may be a consequence (the retransmission-less loss path left
 the consumer waiting) or a separate burst effect; the next run's log shows
 whether they remain.
+
+### Eighth round: queue overflow (2026-11-13, night)
+
+With the 4096 window the first log shows `dropped=0` (it was in the hundreds)
+and about 55 fps decoded, with fewer freezes. The remaining ones coincide with
+`full` > 0: the decode queue (4 units, about 66 ms at 60 fps) overflowed while
+the decoder worked on a keyframe, and each overflow forces a wait for a
+keyframe. The queue is now 30 units (about 0.5 s). Decoder load is about 50 %,
+so it only needs to absorb bursts.
+
