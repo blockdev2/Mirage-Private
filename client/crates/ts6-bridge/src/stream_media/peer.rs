@@ -387,6 +387,12 @@ impl PeerConnectionEventHandler for Viewer {
                     if keyframe.swap(false, Ordering::Relaxed) {
                         waiting_key = true;
                     }
+                    // Lost packets that retransmission did not recover leave
+                    // later frames referencing missing data: wait for a keyframe
+                    // instead of showing a frozen or smeared picture.
+                    if sample.prev_dropped_packets > 0 {
+                        waiting_key = true;
+                    }
                     if waiting_key && !is_keyframe(&sample.data) {
                         continue;
                     }

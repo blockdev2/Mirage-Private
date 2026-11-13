@@ -199,3 +199,24 @@ async fn write_offers_for_a_browser() {
         publisher.close().await;
     }
 }
+
+/// Timing probe: when does a peer bound to all interfaces (with the STUN
+/// servers) hand out its candidates? Run with `--ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs internet access; timing probe"]
+async fn candidate_timing_with_stun() {
+    let any = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    let publisher = Publisher::new(LOCALHOST).await.expect("publisher");
+    let mut viewer = Viewer::new(any).await.expect("viewer");
+    let offer = publisher.offer().await.expect("offer");
+    let start = std::time::Instant::now();
+    let _ = viewer.accept_offer(&offer).await.expect("answer");
+    println!("answer after {:?}", start.elapsed());
+    while let Ok(Some(signal)) =
+        tokio::time::timeout(Duration::from_secs(15), viewer.signals().recv()).await
+    {
+        let json = signal.to_json();
+        let kind = json.split("typ ").nth(1).and_then(|s| s.split(' ').next());
+        println!("{:?} {:?}", start.elapsed(), kind);
+    }
+}

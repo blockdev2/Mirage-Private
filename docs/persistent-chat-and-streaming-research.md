@@ -472,3 +472,18 @@ that arrives after that point. `Get-NetIPConfiguration` shows the cause of the
 ping: the default route goes through a Mullvad VPN adapter (metric 1), ahead
 of the LAN. Next test: VPN off (or Mirage excluded) and watch again.
 The level fix above is kept, since the old layouts were refused even when fast.
+
+### Fifth round: VPN off confirms it, then a freeze (2026-11-13, 15:26)
+
+With the VPN off the ping was 9 ms and the official log shows the Mirage
+answer arriving 32 ms after the offer and being applied (`SetRemoteDescription
+OK`), so the timing hypothesis held: the official client ignores a late
+answer. Mirage then showed the official screen, and froze. No Mirage log was
+available. Likely cause, not confirmed: packets lost and not recovered by
+NACK left later frames without their reference, and the viewer only asked for
+a keyframe on a full queue or a decode error. It now also waits for a keyframe
+(and sends a PLI) when the sample builder reports dropped packets. The desktop
+exe now writes `mirage.log` (stream connection state and decoder frames per 5
+s; no chat, no credentials) to `%APPDATA%	s6client` by default, trimmed at 2 MB.
+Gathering was ruled out as a delay on our side: host candidates leave within
+6 ms and srflx within 16 ms.

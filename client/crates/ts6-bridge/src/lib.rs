@@ -1382,7 +1382,23 @@ pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
 /// Used by desktop clients that render their UI natively.
 pub fn serve_blocking_without_ui(port: u16) -> anyhow::Result<()> {
     // Quiet by default: debug output can include server command metadata. Set
-    // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem.
+    // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem. The
+    // desktop exe has no console, so stream connection and decoder lines (no
+    // chat, no credentials) go to `mirage.log` in the config folder.
+    if std::env::var_os("MIRAGE_LOG_FILE").is_none() && std::env::var_os("RUST_LOG").is_none() {
+        let path = ts6_core::config::default_config_dir().join("mirage.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 2_000_000) {
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        std::env::set_var("MIRAGE_LOG_FILE", path);
+    }
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var(
+            "RUST_LOG",
+            "warn,ts6_bridge::stream_media=info,ts6_bridge::share_media=info,ts6_stream=info",
+        );
+    }
     init_logging("warn");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
