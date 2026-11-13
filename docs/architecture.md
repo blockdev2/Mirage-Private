@@ -32,6 +32,8 @@ flowchart LR
 | `ts6-bridge/src/audio.rs` | Bridge audio configuration, counters, optional synthetic tone, PTT orchestration |
 | `ts6-bridge/src/protocol.rs` | Serde command/event wire schema; mirrored by UI `src/types.ts` |
 | `apps/desktop` | Native eframe/egui frontend; communicates with the bridge over loopback WebSocket |
+| `apps/desktop/src/updater.rs` | `Updater`: Velopack check/download/apply on one worker thread behind a small state machine (`UpdateState`); the UI only reads `state()` and sends commands, so no network or disk work runs in a frame. `Unavailable` when the app is not an installed copy |
+| `apps/desktop/src/app/{settings,updates}.rs` | Ajustes window (page rail + pages) and the Atualizações page; `VelopackApp::build().run()` must stay the first statement of `main` because it handles the installer's hook arguments |
 | `apps/ui/src/useBridge.ts` | WebSocket lifecycle/reconnect and latest state; React components render it |
 
 The Cargo workspace contains six first-party packages, including the native desktop application. The vendored protocol tree is a separate workspace, excluded from the main workspace membership. The standalone `recon/probe-ts6` is outside both and uses the tracked protocol copy.

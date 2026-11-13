@@ -14,10 +14,14 @@ mod protocol;
 mod store;
 mod strings;
 mod theme;
+mod updater;
 
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // First of all: when the installer or the updater starts this program it
+    // runs its hook here and may end the process.
+    velopack::VelopackApp::build().run();
     let new_instance = std::env::args().any(|arg| arg == instance::NEW_INSTANCE_FLAG);
     let instance = match instance::acquire(new_instance) {
         instance::Outcome::Run(instance) => instance,

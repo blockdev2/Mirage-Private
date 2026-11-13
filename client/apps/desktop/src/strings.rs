@@ -188,7 +188,6 @@ pub struct Strings {
 
     // Settings window and diagnostics.
     pub settings_title: &'static str,
-    pub audio_section: &'static str,
     pub enable_audio: &'static str,
     pub transmit_mode: &'static str,
     pub mode_voice: &'static str,
@@ -237,6 +236,44 @@ pub struct Strings {
     pub diagnostics: &'static str,
     pub clear: &'static str,
     pub bridge_version_prefix: &'static str,
+
+    // Settings pages and updates.
+    pub page_profile: &'static str,
+    pub page_audio: &'static str,
+    pub page_updates: &'static str,
+    pub page_about: &'static str,
+    pub lead_profile: &'static str,
+    pub lead_audio: &'static str,
+    pub lead_updates: &'static str,
+    pub lead_about: &'static str,
+    pub profile_note: &'static str,
+    pub group_devices: &'static str,
+    pub group_voice: &'static str,
+    pub group_about: &'static str,
+    pub group_update_prefs: &'static str,
+    pub about_version: &'static str,
+    pub about_license: &'static str,
+    pub about_license_value: &'static str,
+    pub about_service: &'static str,
+    pub upd_installed: &'static str,
+    pub upd_check_again: &'static str,
+    pub upd_checking: &'static str,
+    pub upd_up_to_date: &'static str,
+    pub upd_download: &'static str,
+    pub upd_downloading: &'static str,
+    pub upd_restart: &'static str,
+    pub upd_restarting: &'static str,
+    pub upd_retry: &'static str,
+    pub upd_failed: &'static str,
+    pub upd_portable_title: &'static str,
+    pub upd_portable_body: &'static str,
+    pub upd_get_installer: &'static str,
+    pub upd_notes: &'static str,
+    pub upd_auto: &'static str,
+    pub upd_auto_hint: &'static str,
+    pub upd_source: &'static str,
+    pub upd_source_value: &'static str,
+    pub upd_restart_note: &'static str,
 }
 
 impl Strings {
@@ -306,6 +343,27 @@ impl Strings {
 
     pub fn bridge_version(&self, version: &str) -> String {
         format!("{} {version}", self.bridge_version_prefix)
+    }
+
+    /// "A versão 0.2.0 está disponível (12,3 MB)."
+    pub fn upd_available(&self, version: &str, bytes: u64) -> String {
+        format!(
+            "A versão {version} está disponível ({}).",
+            self.upd_size(bytes)
+        )
+    }
+
+    pub fn upd_ready(&self, version: &str) -> String {
+        format!("A versão {version} está pronta para instalar.")
+    }
+
+    pub fn upd_progress(&self, percent: u8) -> String {
+        format!("{} {percent}%", self.upd_downloading)
+    }
+
+    /// Megabytes with a comma, the way the interface language writes them.
+    pub fn upd_size(&self, bytes: u64) -> String {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0).replace('.', ",")
     }
 }
 
@@ -491,7 +549,6 @@ pub const PT: Strings = Strings {
     brand_name: "Mirage",
 
     settings_title: "Ajustes",
-    audio_section: "Áudio",
     enable_audio: "Ativar áudio",
     transmit_mode: "Modo de transmissão",
     mode_voice: "Ativação por voz",
@@ -524,7 +581,7 @@ pub const PT: Strings = Strings {
     noise_hint_strong: "Também corta o que não é voz: teclado, cliques do mouse e respiração.",
     ptt_hint: "Tecla segurada para falar, por exemplo F13, V ou Mouse4.",
     input: "Microfone",
-    output: "Headset",
+    output: "Saída de áudio",
     system_default: "Padrão do sistema",
     ptt_key: "Tecla push-to-talk",
     apply_audio: "Aplicar áudio",
@@ -541,6 +598,43 @@ pub const PT: Strings = Strings {
     diagnostics: "Diagnóstico",
     clear: "Limpar",
     bridge_version_prefix: "Bridge",
+
+    page_profile: "Perfil",
+    page_audio: "Áudio",
+    page_updates: "Atualizações",
+    page_about: "Sobre",
+    lead_profile: "Como você aparece para as outras pessoas.",
+    lead_audio: "Dispositivos, quando o microfone transmite e como a sua voz é tratada.",
+    lead_updates: "Mantenha o Mirage em dia. Nada é baixado sem você pedir.",
+    lead_about: "A versão que você está usando e as ferramentas para investigar um problema.",
+    profile_note: "Seu nome e sua foto ficam salvos neste computador e vão para o servidor quando você entra.",
+    group_devices: "Dispositivos",
+    group_voice: "Sua voz",
+    group_about: "Esta versão",
+    group_update_prefs: "Preferências",
+    about_version: "Versão do Mirage",
+    about_license: "Licença",
+    about_license_value: "MIT, código aberto",
+    about_service: "Serviço local",
+    upd_installed: "Versão instalada",
+    upd_check_again: "Procurar de novo",
+    upd_checking: "Procurando…",
+    upd_up_to_date: "Você já está na versão mais recente.",
+    upd_download: "Baixar atualização",
+    upd_downloading: "Baixando…",
+    upd_restart: "Reiniciar e atualizar",
+    upd_restarting: "Reiniciando…",
+    upd_retry: "Tentar de novo",
+    upd_failed: "Não foi possível concluir. Sua versão atual continua intacta.",
+    upd_portable_title: "Esta cópia não foi instalada",
+    upd_portable_body: "O Mirage só se atualiza sozinho quando é instalado pelo instalador. Esta é uma cópia portátil: baixe o instalador para receber atualizações.",
+    upd_get_installer: "Abrir a página de downloads",
+    upd_notes: "Novidades",
+    upd_auto: "Procurar ao abrir o Mirage",
+    upd_auto_hint: "Faz uma consulta curta à página de lançamentos do Mirage no GitHub. Desligada, só procura quando você pedir.",
+    upd_source: "Origem",
+    upd_source_value: "Lançamentos públicos do Mirage no GitHub",
+    upd_restart_note: "O Mirage fecha e abre de novo sozinho. Se você estiver em uma chamada, ela será encerrada.",
 };
 
 #[cfg(test)]

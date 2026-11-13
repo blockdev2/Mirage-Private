@@ -27,6 +27,7 @@ mod home;
 mod peer;
 mod settings;
 mod stream;
+mod updates;
 use chat::{ChatLog, Delivery, Entry, Failure, Incoming as ChatIncoming, Scope, MAX_MESSAGE_BYTES};
 use home::{Dialog, PendingConnect, Section};
 
@@ -231,6 +232,11 @@ pub struct App {
     /// Name and photo editing inside the settings window.
     profile_edit: settings::ProfileEdit,
     show_logs: bool,
+    /// In-app updates; see `updater.rs`.
+    updater: crate::updater::Updater,
+    /// When the window opened, for the one automatic update check.
+    opened_at: Instant,
+    startup_update_check: bool,
 }
 
 impl App {
@@ -314,6 +320,12 @@ impl App {
             address_focused: false,
             profile_edit: settings::ProfileEdit::default(),
             show_logs: false,
+            updater: {
+                let ctx = cc.egui_ctx.clone();
+                crate::updater::Updater::start(move || ctx.request_repaint())
+            },
+            opened_at: Instant::now(),
+            startup_update_check: false,
         }
     }
 
@@ -766,6 +778,7 @@ impl eframe::App for App {
 
         self.ensure_profile_dialog();
         self.dialogs(&ctx);
+        self.update_housekeeping(&ctx);
         self.settings_window(&ctx);
         self.image_viewer_window(&ctx);
         // Uploads go one by one so they post in the order they were added.
@@ -1184,8 +1197,22 @@ impl App {
                 });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::glyph_button(ui, icon::GEAR, t.settings_title, 32.0, 45.0).clicked() {
-                    self.show_settings = true;
+                let gear = theme::glyph_button(ui, icon::GEAR, t.settings_title, 32.0, 45.0);
+                if self.update_waiting() {
+                    // A quiet dot: a new version is waiting in the settings.
+                    ui.painter().circle_filled(
+                        gear.rect.right_top() + vec2(-7.0, 7.0),
+                        4.0,
+                        theme::SUCCESS,
+                    );
+                }
+                if gear.clicked() {
+                    let page = if self.update_waiting() {
+                        settings::Page::Updates
+                    } else {
+                        settings::Page::Profile
+                    };
+                    self.open_settings(page);
                 }
             });
         });
