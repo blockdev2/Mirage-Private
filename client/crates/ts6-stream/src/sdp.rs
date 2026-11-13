@@ -8,12 +8,14 @@
 //! rewritten; ICE credentials, fingerprint, payload types and directions are
 //! never changed, so the local peer keeps working from its own description.
 //!
-//! The levels are cumulative so a run can find the smallest one the official
-//! client accepts. `next_level` cycles through them (highest first) on each
-//! negotiation until one is pinned with `MIRAGE_SDP_LEVEL`.
+//! The levels are cumulative. Measured with the official client's log: an
+//! answer at level 5 got `SetRemoteDescription ... OK`, answers at levels 3 and
+//! 4 never reached it (offers were accepted at any level tried). So
+//! `next_level` always returns the highest level; `MIRAGE_SDP_LEVEL` pins
+//! another one for experiments.
 //!
-//! shortcut: an experiment; once the accepted level is known the others and
-//! the cycling go away.
+//! shortcut: one accepted answer against two refused ones is thin evidence;
+//! the lower levels stay only so this can be bisected again.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -30,16 +32,11 @@ static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
 pub fn next_level() -> (u8, u32) {
     let attempt = ATTEMPTS.fetch_add(1, Ordering::Relaxed);
     let version = 2 + attempt;
-    if let Some(level) = std::env::var("MIRAGE_SDP_LEVEL")
+    let level = std::env::var("MIRAGE_SDP_LEVEL")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
-    {
-        return (level.min(MAX_LEVEL), version);
-    }
-    (
-        MAX_LEVEL - (attempt % (u32::from(MAX_LEVEL) + 1)) as u8,
-        version,
-    )
+        .map_or(MAX_LEVEL, |level| level.min(MAX_LEVEL));
+    (level, version)
 }
 
 fn attr_name(line: &str) -> &str {

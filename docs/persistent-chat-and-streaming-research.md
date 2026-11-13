@@ -436,3 +436,26 @@ Two separate bugs remained, both found in the same log and a timing probe:
   The "drop" itself is unexplained (the official log showed ICE healthy at
   15 s); `MIRAGE_LOG_FILE` plus `dist/share-test/Mirage-com-log.cmd` now
   record the viewer's connection state and decoder frames per 5 s.
+
+### Third round: only the highest SDP level is accepted as an answer (2026-11-13)
+
+With the cycling build the official client's log showed the three answers it
+received from the Mirage viewer: the first one (level 5, 1572 chars) got
+`SetRemoteDescription CALL … OK` and connected; the next two (level 4, 1484
+chars, and level 3, 1365 chars) logged `kAnswer: dispatching to
+HandleRemoteAnswer` and then nothing, and the official publisher answered with
+`AddIceCandidate failed reason=The remote description was null` for every
+candidate and re-offered after 15 s. Our offers were accepted at every level
+seen (levels 4 and 5). The only difference between levels 4 and 5 is
+`a=rtcp-xr:rcvr-rtt=all` and `a=rtcp-fb:PT rrtr`, so the default is now level 5
+for everything (`next_level` no longer cycles; `MIRAGE_SDP_LEVEL` still pins
+another). Evidence is one accepted answer against two refused ones, so this
+is a measured guess until the next run.
+
+Ping: after the H.264 fix the share itself reached the official viewer (it
+displayed the Mirage window). The user then saw 430 ms pings in Mirage. A
+loopback server with a real share and a watching viewer keeps the bridge ping
+at 0.1 ms, so capture and encoding do not starve the session. The log shows
+Mirage's candidates on a different interface/public IP than the earlier run
+(10.165.x with a different srflx address), so the path to the server is the
+suspect; compare with the official client's own ping to the same server.
