@@ -4,6 +4,7 @@ No tagged releases have been established in this checkout. Entries describe repo
 
 ## Unreleased
 
+- New `ts6-stream` crate: native WebRTC publisher and viewer that speak TeamSpeak 6's `streamsignaling` JSON (answer, ICE candidates). Proven on loopback with a synthetic H.264 source (RTP crosses real UDP); not yet connected to the TeamSpeak session, to a screen capture or to an encoder, and not yet tested against the official client.
 - Native desktop: only one Mirage runs per computer. A second launch restores and focuses the running window and exits, instead of attaching to the first window's bridge and sharing its session and identity. `--new-instance` opens an independent window ("Mirage (2)", up to 8 extra) with its own bridge port, profiles and TeamSpeak identity under `Mirage/slots/<n>`.
 - Native desktop design pass: each participant glows in their own color behind the avatar (brighter while speaking); the connection popup is compact with right-aligned values; server rows select with a soft fill and bar instead of an outline, show their options button only when in use, and address redaction is quieter; the sidebar separates the live server from favorites and drops the duplicate add button; labels are sentence case and decimals use a comma (`2,0%`, `0,7 MB`).
 - Native desktop: one sidebar for every screen. The connected server stays in a "Servidores" list with its channels folded under it, so the call no longer disappears on Inicio; the separate "Canais de voz" entry, the list/squares switch, the participant count and the three-dot menu are gone.

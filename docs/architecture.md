@@ -27,6 +27,7 @@ flowchart LR
 | `ts6-audio/src/mixer.rs`, `resample.rs` | Per-peer decoding/jitter handling and linear sample-rate conversion |
 | `ts6-input` | Binding parser, Windows `GetAsyncKeyState` polling, transmit gate |
 | `ts6-bridge` | Axum loopback HTTP/static assets/WebSocket, shared command channel, broadcast events, one session owner |
+| `ts6-stream` | webrtc-rs publisher and viewer peers; exchange SDP and `Signal` values only, never touch the session |
 | `ts6-bridge/src/audio.rs` | Bridge audio configuration, counters, optional synthetic tone, PTT orchestration |
 | `ts6-bridge/src/protocol.rs` | Serde command/event wire schema; mirrored by UI `src/types.ts` |
 | `apps/desktop` | Native eframe/egui frontend; communicates with the bridge over loopback WebSocket |
