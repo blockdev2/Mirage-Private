@@ -7,7 +7,9 @@
 //! the transport.
 
 mod peer;
+mod sdp;
 mod signal;
 
-pub use peer::{Publisher, Viewer};
+pub use peer::{candidate_mid, configuration, Publisher, Viewer, STUN_SERVERS};
+pub use sdp::{next_level, shape, MAX_LEVEL};
 pub use signal::{Signal, SignalError, MAX_SIGNAL_BYTES};

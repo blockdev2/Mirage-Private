@@ -6853,6 +6853,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "audiopus",
  "axum",
  "futures",
  "reqwest",
@@ -6865,8 +6866,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ts6-audio",
+ "ts6-capture",
  "ts6-core",
  "ts6-input",
+ "ts6-stream",
  "webrtc",
  "windows",
 ]
@@ -6925,6 +6928,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ts6-bridge",
+ "ts6-core",
  "tungstenite 0.30.0",
  "velopack",
  "windows-sys 0.61.2",
@@ -6949,6 +6953,7 @@ dependencies = [
  "rtc",
  "serde_json",
  "tokio",
+ "tracing",
  "webrtc",
 ]
 

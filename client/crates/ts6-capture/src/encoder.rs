@@ -30,6 +30,8 @@ const MAX_UNIT_BYTES: u32 = 8 * 1024 * 1024;
 const INPUT_WAIT: Duration = Duration::from_millis(250);
 /// Distance between keyframes, in seconds.
 const GOP_SECONDS: u32 = 2;
+/// `eAVEncH264VProfile_High`.
+const H264_PROFILE_HIGH: u32 = 100;
 
 /// COM and Media Foundation for the current thread; drop it last.
 pub struct MfRuntime;
@@ -521,9 +523,15 @@ fn configure(
 
         let output = media_type(&MFVideoFormat_H264, size, fps)?;
         output.SetUINT32(&MF_MT_AVG_BITRATE, bitrate_kbps.saturating_mul(1000))?;
-        transform
-            .SetOutputType(0, &output, 0)
-            .context("set encoder output type")?;
+        // The official client decodes only H.264 High (profile-level-id 640c1f),
+        // so ask for it; an encoder that declines keeps its own default profile.
+        let _ = output.SetUINT32(&MF_MT_MPEG2_PROFILE, H264_PROFILE_HIGH);
+        if transform.SetOutputType(0, &output, 0).is_err() {
+            output.DeleteItem(&MF_MT_MPEG2_PROFILE)?;
+            transform
+                .SetOutputType(0, &output, 0)
+                .context("set encoder output type")?;
+        }
         let input = media_type(&MFVideoFormat_NV12, size, fps)?;
         if transform.SetInputType(0, &input, 0).is_err() {
             // Fall back to the encoder's own NV12 offer at our size and rate.

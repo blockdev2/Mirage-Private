@@ -124,7 +124,7 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
         .await
         .unwrap();
     let audio_track = track(RtpCodecKind::Audio, &audio, 0x4d49_0002);
-    publisher
+    let audio_sender = publisher
         .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal>)
         .await
         .unwrap();
@@ -144,6 +144,7 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut answered = false;
     let mut sending = None;
+    let mut audio_task = None;
     let mut playing = false;
     while !(playing && frames().latest(0).is_some()) {
         tokio::select! {
@@ -162,11 +163,37 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
                     let track = Arc::clone(&video_track);
                     let sender = Arc::clone(&video_sender);
                     let units = units.clone();
+                    let audio_track = Arc::clone(&audio_track);
+                    let audio_sender = Arc::clone(&audio_sender);
+                    audio_task = Some(tokio::spawn(async move {
+                        let encoder = audiopus::coder::Encoder::new(
+                            audiopus::SampleRate::Hz48000,
+                            audiopus::Channels::Stereo,
+                            audiopus::Application::Audio,
+                        )
+                        .unwrap();
+                        let pt = audio_sender.get_parameters().await.unwrap().rtp_parameters.codecs[0].payload_type;
+                        let ssrc = audio_track.ssrcs().await[0];
+                        let mut phase = 0.0f32;
+                        loop {
+                            let pcm: Vec<f32> = (0..960).flat_map(|_| {
+                                phase += 440.0 * std::f32::consts::TAU / 48_000.0;
+                                let v = phase.sin() * 0.5;
+                                [v, v]
+                            }).collect();
+                            let mut packet = [0u8; 1275];
+                            let len = encoder.encode_float(&pcm, &mut packet).unwrap();
+                            let sample = Sample { data: packet[..len].to_vec().into(), duration: Duration::from_millis(20), ..Sample::new(Instant::now()) };
+                            let _ = audio_track.sample_writer(ssrc, pt).write_sample(&sample).await;
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    }));
                     sending = Some(tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let pt = sender.get_parameters().await.unwrap().rtp_parameters.codecs[0].payload_type;
                         let ssrc = track.ssrcs().await[0];
-                        for unit in units {
+                        // Repeats the clip: connecting can take longer than one pass.
+                        for unit in units.into_iter().cycle() {
                             let sample = Sample { data: unit.into(), duration: Duration::from_millis(50), ..Sample::new(Instant::now()) };
                             let _ = track.sample_writer(ssrc, pt).write_sample(&sample).await;
                             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -198,6 +225,22 @@ async fn watches_h264_from_a_webrtc_rs_publisher() {
         r.abs_diff(20) <= 20 && g.abs_diff(180) <= 20 && b.abs_diff(80) <= 20,
         "{r},{g},{b}"
     );
+
+    // The stream's Opus track reaches the playback mix as sound.
+    let mut heard = false;
+    for _ in 0..40 {
+        let mut mix = [0.0f32; 480];
+        ts6_audio::stream_audio::stream_audio().mix_into(&mut mix);
+        if mix.iter().any(|s| s.abs() > 0.05) {
+            heard = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(heard, "no stream audio reached the playback mix");
+    if let Some(task) = audio_task {
+        task.abort();
+    }
 
     // Closing stops frames for good, even while the publisher still sends.
     assert!(worker.send(WorkerCommand::Close).is_ok());
@@ -348,4 +391,110 @@ async fn answer_keeps_the_official_offers_extension_ids() {
     let video = answer.split("m=audio").next().unwrap();
     assert!(video.contains("a=rtpmap:102 H264/90000"), "{answer}");
     assert!(answer.contains("a=setup:active") || answer.contains("a=setup:passive"));
+}
+
+/// Diagnostic, not a regression test: answers the offer in the file named by
+/// `MIRAGE_ORACLE_OFFER` exactly like the app's viewer does, writes the answer
+/// to `MIRAGE_ORACLE_OUT` and the local candidates (one JSON per line, with the
+/// milliseconds since the answer) after it. A real libwebrtc (a browser) can then
+/// apply them, which shows whether the official client could.
+#[tokio::test]
+#[ignore = "diagnostic: needs MIRAGE_ORACLE_OFFER and MIRAGE_ORACLE_OUT"]
+async fn oracle_answer_for_a_given_offer() {
+    let _turn = SERIAL.lock().await;
+    let offer = std::fs::read_to_string(std::env::var("MIRAGE_ORACLE_OFFER").unwrap()).unwrap();
+    let (event_tx, mut events) = tokio::sync::mpsc::channel(64);
+    let worker = StreamWorker::spawn(event_tx).unwrap();
+    assert!(worker
+        .send(WorkerCommand::Offer {
+            stream: "s".into(),
+            sdp: offer,
+        })
+        .is_ok());
+    let mut out = String::new();
+    let mut answered_at = None;
+    let end = tokio::time::Instant::now() + Duration::from_secs(8);
+    while let Ok(Some(event)) = tokio::time::timeout_at(end, events.recv()).await {
+        match event {
+            WorkerEvent::Answer { sdp, .. } => {
+                answered_at = Some(Instant::now());
+                out.push_str(&sdp);
+                out.push_str(
+                    "
+=====
+",
+                );
+            }
+            WorkerEvent::LocalIce { json, .. } => {
+                let ms = answered_at.map_or(0, |t| t.elapsed().as_millis());
+                out.push_str(&format!(
+                    "{ms} {json}
+"
+                ));
+            }
+            WorkerEvent::Failed { reason, .. } => out.push_str(&format!(
+                "FAILED {reason:?}
+"
+            )),
+            WorkerEvent::Playing { .. } => {}
+        }
+    }
+    std::fs::write(std::env::var("MIRAGE_ORACLE_OUT").unwrap(), out).unwrap();
+}
+
+/// Diagnostic, not a regression test: the app's viewer as a child process of a
+/// script. Reads JSON lines on stdin (`{"op":"offer","sdp":..}`,
+/// `{"op":"ice","json":..}`, `{"op":"quit"}`) and prints events as JSON lines
+/// (`answer`, `ice`, `playing`, `failed`). RUST_LOG=ice=debug traces go to stderr.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "diagnostic: driven by a script over stdin/stdout"]
+async fn oracle_interactive_viewer() {
+    use std::io::{BufRead, Write};
+    let _turn = SERIAL.lock().await;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+    let (event_tx, mut events) = tokio::sync::mpsc::channel(256);
+    let worker = StreamWorker::spawn(event_tx).unwrap();
+    let (line_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let emit = |value: serde_json::Value| {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "@@{value}");
+        let _ = out.flush();
+    };
+    let end = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end) => break,
+            Some(line) = lines.recv() => {
+                let Ok(command) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                match command["op"].as_str() {
+                    Some("offer") => {
+                        let sdp = command["sdp"].as_str().unwrap_or_default().to_owned();
+                        let _ = worker.send(WorkerCommand::Offer { stream: "s".into(), sdp });
+                    }
+                    Some("ice") => {
+                        let json = command["json"].as_str().unwrap_or_default().to_owned();
+                        let _ = worker.send(WorkerCommand::RemoteIce { stream: "s".into(), json });
+                    }
+                    Some("quit") => break,
+                    _ => {}
+                }
+            }
+            Some(event) = events.recv() => match event {
+                WorkerEvent::Answer { sdp, .. } => emit(serde_json::json!({"ev": "answer", "sdp": sdp})),
+                WorkerEvent::LocalIce { json, .. } => emit(serde_json::json!({"ev": "ice", "json": json})),
+                WorkerEvent::Playing { .. } => emit(serde_json::json!({"ev": "playing"})),
+                WorkerEvent::Failed { reason, .. } => emit(serde_json::json!({"ev": "failed", "reason": format!("{reason:?}")})),
+            },
+        }
+    }
 }

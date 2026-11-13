@@ -227,6 +227,7 @@ impl Renderer {
                 mixer.render_mono(RENDER_CHUNK)
             };
             self.monitor.mix_into(&mut mono);
+            crate::stream_audio::stream_audio().mix_into(&mut mono);
             if let Ok(mut cues) = self.cues.try_lock() {
                 let n = mono.len().min(cues.len());
                 for (out, cue) in mono.iter_mut().zip(cues.drain(..n)) {

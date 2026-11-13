@@ -10,15 +10,19 @@ use rtc::interceptor::Registry;
 use rtc::media::Sample;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::media_engine::{
+    MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS,
+};
+use rtc::peer_connection::configuration::{
+    RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
+};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::rtp_transceiver::PayloadType;
+use rtc::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,7 +43,20 @@ const SIGNAL_QUEUE: usize = 64;
 /// Candidates held while the remote description is still missing.
 const PENDING_CANDIDATES: usize = 64;
 const H264_PAYLOAD_TYPE: PayloadType = 102;
-const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f";
+
+fn opus() -> RTCRtpCodecParameters {
+    RTCRtpCodecParameters {
+        rtp_codec: RTCRtpCodec {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: 48_000,
+            channels: 2,
+            sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
+            rtcp_feedback: vec![],
+        },
+        payload_type: 111,
+    }
+}
 
 fn h264() -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
@@ -52,6 +69,13 @@ fn h264() -> RTCRtpCodecParameters {
         },
         payload_type: H264_PAYLOAD_TYPE,
     }
+}
+
+/// webrtc-rs reports an empty `mid`; the reference clients send the media
+/// section's own mid (`"0"` for the single video section).
+pub fn candidate_mid(mid: Option<String>, m_line: Option<u16>) -> Option<String> {
+    mid.filter(|m| !m.is_empty())
+        .or_else(|| Some(m_line.unwrap_or(0).to_string()))
 }
 
 /// State shared with the connection's event handler.
@@ -70,12 +94,13 @@ impl PeerConnectionEventHandler for Shared {
         };
         let _ = self.signals.try_send(Signal::IceCandidate {
             sdp: init.candidate,
-            mid: init.sdp_mid,
+            mid: candidate_mid(init.sdp_mid, init.sdp_mline_index),
             m_line: init.sdp_mline_index,
         });
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        tracing::info!(?state, "stream peer connection state");
         self.connected.store(
             state == RTCPeerConnectionState::Connected,
             Ordering::Release,
@@ -159,6 +184,29 @@ async fn open_remote(connection: &Arc<dyn PeerConnection>, remote: &Remote) -> R
     Ok(())
 }
 
+/// The STUN servers the official TeamSpeak client uses. STUN only reveals the
+/// address the router shows to the internet; it never carries media, and the
+/// official client configures no TURN relay either.
+pub const STUN_SERVERS: [&str; 3] = [
+    "stun:turn.teamspeak.com:3478",
+    "stun:turn2.teamspeak.com:3478",
+    "stun:stun.l.google.com:19302",
+];
+
+/// The peer configuration for peers bound to `bind`. A peer bound to loopback
+/// talks only to this machine, so it gets no STUN servers (and no network
+/// traffic or delay while gathering candidates).
+pub fn configuration(bind: IpAddr) -> RTCConfiguration {
+    let mut builder = RTCConfigurationBuilder::new();
+    if !bind.is_loopback() {
+        builder = builder.with_ice_servers(vec![RTCIceServer {
+            urls: STUN_SERVERS.map(String::from).to_vec(),
+            ..Default::default()
+        }]);
+    }
+    builder.build()
+}
+
 async fn connect(
     bind: IpAddr,
     media: MediaEngine,
@@ -169,7 +217,7 @@ async fn connect(
         .map_err(|_| anyhow!("cannot register interceptors"))?;
     let runtime = default_runtime().ok_or_else(|| anyhow!("no async runtime available"))?;
     let connection = PeerConnectionBuilder::new()
-        .with_configuration(RTCConfigurationBuilder::new().build())
+        .with_configuration(configuration(bind))
         .with_media_engine(media)
         .with_interceptor_registry(registry)
         .with_handler(Arc::new(shared))
@@ -200,6 +248,9 @@ impl Publisher {
         media
             .register_codec(h264(), RtpCodecKind::Video)
             .map_err(|_| anyhow!("cannot register H.264"))?;
+        media
+            .register_codec(opus(), RtpCodecKind::Audio)
+            .map_err(|_| anyhow!("cannot register Opus"))?;
         let (signal_tx, signals) = channel(SIGNAL_QUEUE);
         let connected = Arc::new(AtomicBool::new(false));
         let shared = Shared {
@@ -233,6 +284,31 @@ impl Publisher {
             .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
             .await
             .context("cannot add the video track")?;
+        // The reference publisher offers an inactive audio section next to the
+        // video one (stream audio is not sent), and the official viewer expects both.
+        // The reference publisher's video section is send-only, not send-receive.
+        for transceiver in connection.get_transceivers().await {
+            transceiver
+                .set_direction(RTCRtpTransceiverDirection::Sendonly)
+                .await
+                .context("cannot make the video section send-only")?;
+        }
+        let audio = connection
+            .add_transceiver_from_kind(
+                RtpCodecKind::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    streams: vec![],
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .context("cannot add the audio section")?;
+        // Only receive-only sections can be added; make it inactive afterwards.
+        audio
+            .set_direction(RTCRtpTransceiverDirection::Inactive)
+            .await
+            .context("cannot make the audio section inactive")?;
         Ok(Self {
             connection,
             track,
@@ -244,8 +320,15 @@ impl Publisher {
         })
     }
 
-    /// The SDP offer for `respondjoinstreamrequest`.
+    /// The SDP offer for `respondjoinstreamrequest`, in the next SDP layout of
+    /// the experiment (see `sdp`).
     pub async fn offer(&self) -> Result<String> {
+        let (level, version) = crate::sdp::next_level();
+        self.offer_with(level, version).await
+    }
+
+    /// The offer written at a given SDP level (see `sdp`).
+    pub async fn offer_with(&self, level: u8, version: u32) -> Result<String> {
         let offer = self
             .connection
             .create_offer(None)
@@ -256,7 +339,7 @@ impl Publisher {
             .set_local_description(offer)
             .await
             .context("cannot set the local description")?;
-        Ok(text)
+        Ok(crate::sdp::shape(&text, level, version))
     }
 
     /// Applies a signal relayed from the viewer.
@@ -411,5 +494,32 @@ impl Viewer {
 
     pub async fn close(&self) {
         let _ = self.connection.close().await;
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn loopback_peers_use_no_stun_servers() {
+        for bind in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            assert!(configuration(bind).ice_servers().is_empty());
+        }
+    }
+
+    #[test]
+    fn network_peers_use_the_three_official_stun_servers() {
+        let config = configuration(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let servers = config.ice_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].urls, STUN_SERVERS.map(String::from).to_vec());
+        // A TURN URL would fail here for lack of credentials; STUN needs none.
+        assert!(servers[0].urls().is_ok());
+        assert!(servers[0].urls.iter().all(|url| url.starts_with("stun:")));
     }
 }

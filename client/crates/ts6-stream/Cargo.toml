@@ -9,6 +9,7 @@ description = "Native WebRTC publisher and viewer for TeamSpeak 6 streams (signa
 anyhow = "1"
 async-trait = "0.1"
 serde_json = "1"
+tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 rtc = "0.21.1"
 webrtc = "0.21.1"

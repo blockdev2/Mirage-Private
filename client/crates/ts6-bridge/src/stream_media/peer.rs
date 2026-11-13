@@ -11,15 +11,16 @@ use rtc::peer_connection::configuration::interceptor_registry::register_default_
 use rtc::peer_connection::configuration::media_engine::{
     MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS,
 };
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionIceEvent;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtc::rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp::codec::h264::H264Packet;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
 };
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ const MAX_ICE_JSON: usize = 2 * 1024;
 /// First picture deadline after the answer is sent.
 const FIRST_FRAME: Duration = Duration::from_secs(20);
 /// Access units waiting for the decoder; more means the decoder is behind.
-const DECODE_QUEUE: usize = 4;
+const DECODE_QUEUE: usize = 30;
 
 /// What the peer's callbacks and the decoder report back to the loop.
 enum Internal {
@@ -122,6 +123,7 @@ fn fail(events: &Sender<WorkerEvent>, stream: String, reason: FailReason) {
 async fn close(active: &mut Option<Active>) {
     if let Some(current) = active.take() {
         frames().close();
+        ts6_audio::stream_audio::stream_audio().clear();
         let _ = current.peer.close().await;
     }
 }
@@ -148,8 +150,9 @@ fn parse_candidate(json: &str) -> Option<RTCIceCandidateInit> {
 }
 
 fn local_candidate_json(init: &RTCIceCandidateInit) -> String {
+    let mid = ts6_stream::candidate_mid(init.sdp_mid.clone(), init.sdp_mline_index);
     serde_json::json!({"cmd": "iceCandidate", "args": {
-        "sdp": init.candidate, "mid": init.sdp_mid, "mLine": init.sdp_mline_index}})
+        "sdp": init.candidate, "mid": mid, "mLine": init.sdp_mline_index}})
     .to_string()
 }
 
@@ -193,9 +196,9 @@ async fn start(
             .register_codec(h264(profile, payload_type), RtpCodecKind::Video)
             .map_err(|_| FailReason::Unsupported)?;
     }
-    // Stream audio is accepted like a browser would and then ignored: the
-    // official client discards an answer that refuses its audio section.
-    // shortcut: stream audio is not played yet, stage 4 wires it to playback.
+    // Stream audio is accepted like a browser would (the official client
+    // discards an answer that refuses its audio section) and played mixed in
+    // with voice. shortcut: no separate volume or mute for it yet.
     let opus = RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
             mime_type: MIME_TYPE_OPUS.to_owned(),
@@ -226,7 +229,7 @@ async fn start(
         runtime: Arc::clone(&runtime),
     });
     let peer = PeerConnectionBuilder::new()
-        .with_configuration(RTCConfigurationBuilder::new().build())
+        .with_configuration(ts6_stream::configuration(IpAddr::V4(Ipv4Addr::UNSPECIFIED)))
         .with_media_engine(engine)
         .with_interceptor_registry(registry)
         .with_handler(handler as Arc<dyn PeerConnectionEventHandler>)
@@ -245,7 +248,10 @@ async fn start(
     }
     .await;
     let answer = match (negotiated, peer.local_description().await) {
-        (Ok(()), Some(answer)) => answer.sdp,
+        (Ok(()), Some(answer)) => {
+            let (level, version) = ts6_stream::next_level();
+            ts6_stream::shape(&answer.sdp, level, version)
+        }
         _ => {
             frames().close();
             let _ = peer.close().await;
@@ -286,9 +292,22 @@ fn spawn_decoder(
                     }
                 };
                 let mut first = true;
+                let (mut shown, mut busy, mut since) = (0u32, Duration::ZERO, Instant::now());
                 while let Ok(unit) = queue.recv() {
-                    match decoder.decode(&unit) {
+                    let started = Instant::now();
+                    let result = decoder.decode(&unit);
+                    busy += started.elapsed();
+                    if since.elapsed() >= Duration::from_secs(5) {
+                        tracing::info!(
+                            frames = shown,
+                            busy_ms = busy.as_millis() as u64,
+                            "stream decoder, last 5 s"
+                        );
+                        (shown, busy, since) = (0, Duration::ZERO, Instant::now());
+                    }
+                    match result {
                         Ok(Some(frame)) => {
+                            shown += 1;
                             frames().publish(generation, frame);
                             if std::mem::take(&mut first) {
                                 let _ = internal.send(Internal::Playing(generation));
@@ -307,6 +326,17 @@ fn spawn_decoder(
         })?;
     Ok(units)
 }
+
+/// Reassembles RTP packets into access units. A 1080p keyframe spans well over
+/// a hundred packets, so the window must be far larger than the 64 the first
+/// version used: that size dropped every keyframe, and with no keyframe the
+/// picture froze until the sender happened to produce another one.
+fn new_sample_builder() -> SampleBuilder<H264Packet> {
+    SampleBuilder::new(BUILDER_WINDOW, H264Packet::default(), 90_000)
+        .with_max_time_delay(Duration::from_millis(500))
+}
+
+const BUILDER_WINDOW: u16 = 4096;
 
 /// Whether an Annex B access unit holds an IDR slice (NAL type 5).
 fn is_keyframe(unit: &[u8]) -> bool {
@@ -337,6 +367,7 @@ impl PeerConnectionEventHandler for Viewer {
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        tracing::info!(?state, "stream viewer connection state");
         if state == RTCPeerConnectionState::Failed {
             let _ = self
                 .internal
@@ -345,8 +376,13 @@ impl PeerConnectionEventHandler for Viewer {
     }
 
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-        if track.kind().await != RtpCodecKind::Video {
-            return;
+        match track.kind().await {
+            RtpCodecKind::Audio => {
+                self.runtime.spawn(Box::pin(play_audio(track)));
+                return;
+            }
+            RtpCodecKind::Video => {}
+            _ => return,
         }
         let Some(media_ssrc) = track.ssrcs().await.first().copied() else {
             return;
@@ -354,9 +390,14 @@ impl PeerConnectionEventHandler for Viewer {
         let decode = self.decode.clone();
         let keyframe = Arc::clone(&self.keyframe);
         self.runtime.spawn(Box::pin(async move {
-            let mut builder = SampleBuilder::new(64, H264Packet::default(), 90_000);
+            let mut builder = new_sample_builder();
             let mut waiting_key = true;
             let mut last_pli: Option<Instant> = None;
+            let mut fir_sequence = 0u8;
+            // Counters for the 5 s log line: where a freeze happens.
+            let (mut packets, mut samples, mut dropped, mut skipped, mut full, mut keys, mut asked) =
+                (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+            let mut since = Instant::now();
             while let Some(event) = track.poll().await {
                 let packet = match event {
                     TrackRemoteEvent::OnRtpPacket(packet) => packet,
@@ -364,18 +405,47 @@ impl PeerConnectionEventHandler for Viewer {
                     _ => continue,
                 };
                 let now = Instant::now();
+                packets += 1;
+                if since.elapsed() >= Duration::from_secs(5) {
+                    tracing::info!(
+                        packets,
+                        samples,
+                        dropped,
+                        skipped,
+                        full,
+                        keys,
+                        asked,
+                        waiting_key,
+                        "stream track, last 5 s"
+                    );
+                    (packets, samples, dropped, skipped, full, keys, asked) = (0, 0, 0, 0, 0, 0, 0);
+                    since = now;
+                }
                 builder.push(now, packet);
                 while let Some(sample) = builder.pop(now) {
+                    samples += 1;
+                    dropped += u32::from(sample.prev_dropped_packets);
                     if keyframe.swap(false, Ordering::Relaxed) {
                         waiting_key = true;
                     }
+                    // Lost packets that retransmission did not recover leave
+                    // later frames referencing missing data: wait for a keyframe
+                    // instead of showing a frozen or smeared picture.
+                    if sample.prev_dropped_packets > 0 {
+                        waiting_key = true;
+                    }
                     if waiting_key && !is_keyframe(&sample.data) {
+                        skipped += 1;
                         continue;
                     }
+                    keys += u32::from(is_keyframe(&sample.data));
                     waiting_key = false;
                     match decode.try_send(sample.data.to_vec()) {
                         Ok(()) => {}
-                        Err(TrySendError::Full(_)) => waiting_key = true,
+                        Err(TrySendError::Full(_)) => {
+                            full += 1;
+                            waiting_key = true;
+                        }
                         Err(TrySendError::Disconnected(_)) => return,
                     }
                 }
@@ -385,11 +455,64 @@ impl PeerConnectionEventHandler for Viewer {
                         sender_ssrc: 0,
                         media_ssrc,
                     };
-                    let _ = track.write_rtcp(vec![Box::new(pli)]).await;
+                    fir_sequence = fir_sequence.wrapping_add(1);
+                    let fir = FullIntraRequest {
+                        sender_ssrc: 0,
+                        media_ssrc,
+                        fir: vec![FirEntry {
+                            ssrc: media_ssrc,
+                            sequence_number: fir_sequence,
+                        }],
+                    };
+                    asked += 1;
+                    // Both are negotiated (`nack pli`, `ccm fir`); either may be honored.
+                    let _ = track.write_rtcp(vec![Box::new(pli), Box::new(fir)]).await;
                 }
             }
         }));
     }
+}
+
+/// Decodes the stream's Opus track and hands it to playback.
+async fn play_audio(track: Arc<dyn TrackRemote>) {
+    use ts6_audio::stream_audio::{stream_audio, StreamDecoder};
+    let Ok(mut decoder) = StreamDecoder::new() else {
+        return;
+    };
+    let sink = stream_audio();
+    let mut last: Option<u16> = None;
+    let (mut packets, mut concealed, mut since) = (0u32, 0u32, Instant::now());
+    while let Some(event) = track.poll().await {
+        let packet = match event {
+            TrackRemoteEvent::OnRtpPacket(packet) => packet,
+            TrackRemoteEvent::OnEnded => break,
+            _ => continue,
+        };
+        let seq = packet.header.sequence_number;
+        // Skip late or duplicate packets; conceal a short gap (up to 3 packets).
+        if let Some(previous) = last {
+            let step = seq.wrapping_sub(previous);
+            if step == 0 || step > 0x8000 {
+                continue;
+            }
+            for _ in 1..step.min(4) {
+                if let Ok(pcm) = decoder.decode(None) {
+                    sink.push(pcm);
+                    concealed += 1;
+                }
+            }
+        }
+        last = Some(seq);
+        packets += 1;
+        if let Ok(pcm) = decoder.decode(Some(&packet.payload)) {
+            sink.push(pcm);
+        }
+        if since.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(packets, concealed, "stream audio, last 5 s");
+            (packets, concealed, since) = (0, 0, Instant::now());
+        }
+    }
+    sink.clear();
 }
 
 #[cfg(test)]
@@ -410,6 +533,41 @@ mod tests {
         assert_eq!(parsed.sdp_mline_index, Some(0));
         assert!(parse_candidate(r#"{"cmd":"answer","args":{}}"#).is_none());
         assert!(parse_candidate(&"x".repeat(MAX_ICE_JSON + 1)).is_none());
+    }
+
+    #[test]
+    fn a_keyframe_of_hundreds_of_packets_is_rebuilt_whole() {
+        use rtc::rtp::codec::h264::H264Payloader;
+        use rtc::rtp::packetizer::Payloader;
+        // About 250 KB of IDR slice: roughly 210 packets at a 1200-byte MTU.
+        let mut unit = vec![0, 0, 0, 1, 0x65];
+        unit.extend((0..250_000u32).map(|i| (i % 251) as u8 | 1));
+        let payloads = H264Payloader::default()
+            .payload(1200, &unit.into())
+            .unwrap();
+        assert!(payloads.len() > 64, "{} packets", payloads.len());
+        let mut builder = new_sample_builder();
+        let now = Instant::now();
+        let last = payloads.len() - 1;
+        for (i, payload) in payloads.into_iter().enumerate() {
+            let mut packet = rtc::rtp::packet::Packet::default();
+            packet.header.sequence_number = 100 + i as u16;
+            packet.header.timestamp = 9000;
+            packet.header.marker = i == last;
+            packet.payload = payload;
+            builder.push(now, packet);
+        }
+        // The next frame's first packet releases the previous one.
+        let mut next = rtc::rtp::packet::Packet::default();
+        next.header.sequence_number = 100 + last as u16 + 1;
+        next.header.timestamp = 12000;
+        next.header.marker = true;
+        next.payload = vec![0x41, 9].into();
+        builder.push(now, next);
+        let sample = builder.pop(now).expect("the keyframe is complete");
+        assert_eq!(sample.prev_dropped_packets, 0);
+        assert!(is_keyframe(&sample.data));
+        assert_eq!(sample.data.len(), 250_000 + 5);
     }
 
     #[test]

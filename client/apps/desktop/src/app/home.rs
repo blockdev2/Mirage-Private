@@ -1157,7 +1157,12 @@ impl App {
                 .show_ui(ui, |ui| {
                     for profile in &self.store.data.profiles {
                         let current = active.as_deref() == Some(profile.id.as_str());
-                        if ui.selectable_label(current, &profile.nickname).clicked() {
+                        let label = if crate::store::nickname_ok(&profile.nickname) {
+                            profile.nickname.clone()
+                        } else {
+                            format!("{} ({})", profile.nickname, t.nickname_invalid_tag)
+                        };
+                        if ui.selectable_label(current, label).clicked() {
                             chosen = Some(profile.id.clone());
                         }
                     }
@@ -1167,6 +1172,18 @@ impl App {
                 self.store.save();
             }
             ui.add_space(2.0);
+            let profile_bad = !self.use_other_nickname
+                && active
+                    .as_deref()
+                    .and_then(|id| self.store.profile(id))
+                    .is_some_and(|p| !crate::store::nickname_ok(&p.nickname));
+            if profile_bad {
+                ui.label(
+                    RichText::new(t.profile_nickname_invalid)
+                        .small()
+                        .color(theme::DANGER),
+                );
+            }
             ui.label(
                 RichText::new(t.profile_saved_note)
                     .small()
@@ -1191,6 +1208,16 @@ impl App {
                     NICKNAME_MAX_CHARS,
                     false,
                 );
+                if !self.other_nickname.trim().is_empty()
+                    && !crate::store::nickname_ok(&self.other_nickname)
+                {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(t.nickname_required)
+                            .small()
+                            .color(theme::DANGER),
+                    );
+                }
             }
             ui.add_space(8.0);
 
@@ -1333,7 +1360,10 @@ impl App {
             Some(t.busy_in_call)
         } else if self.store.data.profiles.is_empty() {
             Some(t.need_profile)
-        } else if self.use_other_nickname && self.other_nickname.trim().is_empty() {
+        } else if !self
+            .effective_nickname()
+            .is_some_and(|name| crate::store::nickname_ok(&name))
+        {
             Some(t.nickname_required)
         } else {
             None
@@ -1614,7 +1644,9 @@ impl App {
                     }
                     let submit =
                         response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if *show_required && nickname.trim().is_empty() {
+                    if (*show_required || !nickname.trim().is_empty())
+                        && !crate::store::nickname_ok(nickname)
+                    {
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(t.nickname_required)
@@ -1725,7 +1757,7 @@ impl App {
                         }
                     });
                     if save {
-                        if nickname.trim().is_empty() {
+                        if !crate::store::nickname_ok(nickname) {
                             *show_required = true;
                         } else {
                             let profile_id = match id.as_deref() {

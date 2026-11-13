@@ -26,6 +26,7 @@ mod dev;
 mod home;
 mod peer;
 mod settings;
+mod share;
 mod stream;
 mod updates;
 use chat::{ChatLog, Delivery, Entry, Failure, Incoming as ChatIncoming, Scope, MAX_MESSAGE_BYTES};
@@ -214,6 +215,10 @@ pub struct App {
     chat_notice: Option<&'static str>,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
+    /// Our own screen share, as the bridge last reported it.
+    sharing: Option<share::Sharing>,
+    /// Monitors listed when the share picker was last opened.
+    share_monitors: Vec<share::MonitorChoice>,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
     connect_started: Option<Instant>,
@@ -312,6 +317,8 @@ impl App {
             logo: None,
             chat_notice: None,
             watching: None,
+            sharing: None,
+            share_monitors: Vec::new(),
             connect_started: None,
             open_channels: HashMap::new(),
             server_open: true,
@@ -378,6 +385,7 @@ impl App {
                     self.snapshot = None;
                     self.audio = None;
                     self.watching = None;
+                    self.sharing = None;
                     self.session_started = None;
                     self.call_channel = None;
                     self.ping_history.clear();
@@ -518,6 +526,7 @@ impl App {
                 self.server_icon = server_icon;
             }
             BridgeEvent::StreamState(update) => self.on_stream_state(update),
+            BridgeEvent::ShareState(update) => self.on_share_state(update),
         }
     }
 
@@ -1673,11 +1682,7 @@ impl App {
                 self.send_mute();
             }
 
-            ui.add_enabled_ui(false, |ui| {
-                theme::icon_button(ui, icon::SHARE_SCREEN, t.share_screen, false, CONTROL_SIZE)
-            })
-            .inner
-            .on_disabled_hover_text(t.share_disabled);
+            self.share_button(ui, CONTROL_SIZE);
 
             if theme::icon_button(ui, icon::DOTS_THREE, t.more_options, false, CONTROL_SIZE)
                 .clicked()

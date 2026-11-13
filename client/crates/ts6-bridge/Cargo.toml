@@ -9,6 +9,8 @@ description = "Local WebSocket bridge that owns a TS6 session and feeds the desk
 ts6-core = { path = "../ts6-core" }
 ts6-audio = { path = "../ts6-audio" }
 ts6-input = { path = "../ts6-input" }
+ts6-capture = { path = "../ts6-capture" }
+ts6-stream = { path = "../ts6-stream" }
 
 anyhow = "1"
 futures = "0.3"
@@ -36,3 +38,5 @@ windows = { version = "=0.62.2", features = [
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
+# Same version as ts6-audio: one libopus, used here to make the test audio.
+audiopus = "0.3.0-rc.0"

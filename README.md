@@ -24,8 +24,10 @@ WGC, resizing and a GPU texture copy with one final readback. It also drives
 Media Foundation H.264, HEVC and AV1 encoders directly (no FFmpeg), lets the user
 choose the encoder backend and GPU (discrete, integrated or CPU), and streams
 live RTP over loopback UDP with loss recovery; those checks passed on one
-development machine. End-user screen sharing, TS6 stream transport and
-official-viewer video remain unimplemented or unverified. See
+development machine. The desktop client now has a screen share button that
+connects that capture to the TS6 stream signaling (tested on loopback and with
+unit tests only); official-viewer video, a run against a real server and
+cross-network use remain unverified. See
 [streaming research](docs/persistent-chat-and-streaming-research.md) and the
 [native pipeline direction](docs/native-streaming-architecture.md).
 
@@ -106,7 +108,7 @@ See [development and configuration](docs/DEVELOPMENT.md), [architecture](docs/ar
 | `client/crates/ts6-input` | Key parsing, Windows key polling, transmit gate |
 | `client/crates/ts6-cli` | Diagnostics and manual measurement commands |
 | `client/crates/ts6-bridge` | Loopback HTTP/WebSocket service and local audio orchestration |
-| `client/crates/ts6-stream` | Native WebRTC publisher and viewer for TS6 streams (loopback-proven; not wired to the session yet) |
+| `client/crates/ts6-stream` | Native WebRTC publisher and viewer for TS6 streams (loopback-proven; the publisher is wired to the session by the bridge's screen share, untested against the official client) |
 | `client/crates/ts6-capture` | Windows monitor capture and GPU H.264 encoding (hardware encoder only; not wired to the session yet) |
 | `client/apps/desktop` | Native eframe/egui desktop frontend |
 | `client/apps/ui` | React 19, TypeScript 7, Vite 8, CSS |

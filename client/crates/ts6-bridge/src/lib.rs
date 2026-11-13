@@ -12,6 +12,8 @@ mod audio;
 mod media;
 mod probe;
 mod protocol;
+mod share;
+pub mod share_media;
 pub mod stream_media;
 mod streams;
 
@@ -41,14 +43,31 @@ struct App {
     events: broadcast::Sender<String>,
 }
 
+/// Installs the log subscriber. Output goes to stderr, or appends to the file
+/// named by `MIRAGE_LOG_FILE` (the desktop exe has no console). Another
+/// subscriber may already be installed when hosted inside the desktop.
+fn init_logging(default_filter: &str) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+    let file = std::env::var_os("MIRAGE_LOG_FILE").and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    let _ = match file {
+        Some(file) => builder
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .try_init(),
+        None => builder.try_init(),
+    };
+}
+
 pub fn main_entry() -> anyhow::Result<()> {
-    // Another subscriber may already be installed when hosted inside the desktop.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ts6_bridge=debug")),
-        )
-        .try_init();
+    init_logging("info,ts6_bridge=debug");
 
     let port: u16 = std::env::var("TS6_BRIDGE_PORT")
         .ok()
@@ -442,6 +461,9 @@ async fn session_task(
     // (leaving it ends the watched stream).
     let mut streams = streams::StreamRegistry::default();
     let mut viewer: Option<stream_media::StreamWorker> = None;
+    // Our own screen share: signaling state and the capture/peer worker.
+    let mut share = share::ShareRegistry::default();
+    let mut sharer: Option<share_media::ShareWorker> = None;
     let mut own_channel: Option<u64> = None;
     let mut engine = audio::AudioEngine::new();
     let mut config = audio::AudioConfig::default();
@@ -506,6 +528,15 @@ async fn session_task(
                                         &internal,
                                     );
                                     streams.reset();
+                                    // Our stream belongs to the channel we left.
+                                    let actions = share.stop(std::time::Instant::now());
+                                    share_actions(
+                                        actions,
+                                        Some(&mut *active),
+                                        &mut sharer,
+                                        &events,
+                                        &internal,
+                                    );
                                 }
                                 own_channel = channel;
                             }
@@ -587,6 +618,14 @@ async fn session_task(
                                     &events,
                                     &internal,
                                 );
+                                let actions = share.on_event(&event, std::time::Instant::now());
+                                share_actions(
+                                    actions,
+                                    Some(&mut *active),
+                                    &mut sharer,
+                                    &events,
+                                    &internal,
+                                );
                             }
                         }
                         Item::Reconnecting => log(&events, "warn", "reconnecting..."),
@@ -619,6 +658,9 @@ async fn session_task(
             own_channel = None;
             streams.reset();
             viewer = None;
+            share.reset();
+            sharer = None;
+            publish_share(&events, "stopped", None, 0);
             stream_media::frame::frames().close();
             engine.stop();
             media.reset();
@@ -659,6 +701,29 @@ async fn session_task(
                 stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
                 None
             }
+            Some(Command::ShareStart { monitor }) => {
+                let own = session.as_ref().and_then(own_client_id);
+                let actions = match own {
+                    Some(own) => share.start(own, monitor, std::time::Instant::now()),
+                    None => vec![share::Action::Publish {
+                        state: "failed",
+                        reason: Some("offline"),
+                        viewers: 0,
+                    }],
+                };
+                share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
+                None
+            }
+            Some(Command::ShareStop) => {
+                let actions = share.stop(std::time::Instant::now());
+                share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
+                None
+            }
+            Some(Command::ShareWorker(report)) => {
+                let actions = share.on_worker(report, std::time::Instant::now());
+                share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
+                None
+            }
             other => other,
         };
         if let Some(command) = pending {
@@ -680,6 +745,8 @@ async fn session_task(
             if session.is_none() {
                 streams.reset();
                 viewer = None;
+                share.reset();
+                sharer = None;
                 own_channel = None;
                 stream_media::frame::frames().close();
             }
@@ -688,6 +755,10 @@ async fn session_task(
         let expired = streams.tick(std::time::Instant::now());
         if !expired.is_empty() {
             stream_actions(expired, session.as_mut(), &mut viewer, &events, &internal);
+        }
+        let expired = share.tick(std::time::Instant::now());
+        if !expired.is_empty() {
+            share_actions(expired, session.as_mut(), &mut sharer, &events, &internal);
         }
 
         if engine.stats_due() {
@@ -748,6 +819,96 @@ fn stream_actions(
     }
 }
 
+/// Our own client id, which identifies our `notifystreamstarted`.
+fn own_client_id(session: &Session) -> Option<u16> {
+    session
+        .snapshot()
+        .ok()?
+        .clients
+        .iter()
+        .find(|client| client.is_self)
+        .map(|client| client.id)
+}
+
+fn publish_share(
+    events: &broadcast::Sender<String>,
+    state: &str,
+    reason: Option<&str>,
+    viewers: usize,
+) {
+    protocol::publish(
+        events,
+        &Event::ShareState {
+            state,
+            reason,
+            viewers,
+        },
+    );
+}
+
+/// Carries out what the share registry decided; like `stream_actions`, server
+/// commands never wait, so voice never waits on stream signaling.
+fn share_actions(
+    actions: Vec<share::Action>,
+    mut session: Option<&mut Session>,
+    sharer: &mut Option<share_media::ShareWorker>,
+    events: &broadcast::Sender<String>,
+    internal: &mpsc::Sender<Command>,
+) {
+    for action in actions {
+        match action {
+            share::Action::Send(name, args) => {
+                if let Some(active) = session.as_deref_mut() {
+                    if let Err(error) = active.send_command_no_wait(name, &args) {
+                        tracing::debug!(%error, name, "share command failed");
+                    }
+                }
+            }
+            share::Action::Worker(command) => {
+                if sharer.is_none() && matches!(command, share_media::ShareCommand::Start { .. }) {
+                    *sharer = spawn_sharer(internal);
+                }
+                match sharer.as_ref() {
+                    Some(worker) => {
+                        if worker.send(command).is_err() {
+                            tracing::warn!("screen share queue full; its deadline ends the share");
+                        }
+                    }
+                    // The worker could not start: report it as a capture failure.
+                    None => publish_share(events, "failed", Some("capture"), 0),
+                }
+            }
+            // Dropping the worker closes its peers and stops the capture.
+            share::Action::CloseWorker => *sharer = None,
+            share::Action::Publish {
+                state,
+                reason,
+                viewers,
+            } => publish_share(events, state, reason, viewers),
+        }
+    }
+}
+
+/// Starts the share worker; its reports come back as internal commands.
+fn spawn_sharer(internal: &mpsc::Sender<Command>) -> Option<share_media::ShareWorker> {
+    let (reports, mut incoming) = mpsc::channel(64);
+    let forward = internal.clone();
+    tokio::spawn(async move {
+        while let Some(report) = incoming.recv().await {
+            if forward.send(Command::ShareWorker(report)).await.is_err() {
+                break;
+            }
+        }
+    });
+    match share_media::ShareWorker::spawn(reports) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            tracing::warn!(%error, "screen share could not start");
+            None
+        }
+    }
+}
+
 /// Starts the viewer worker; its reports come back as internal commands.
 fn spawn_viewer(internal: &mpsc::Sender<Command>) -> Option<stream_media::StreamWorker> {
     let (reports, mut incoming) = mpsc::channel(64);
@@ -793,6 +954,27 @@ async fn apply_command(
             publish_media(media, events);
 
             let nickname = nickname.unwrap_or_else(|| "ts6client".to_string());
+            let nickname = match ts6_core::check_nickname(&nickname) {
+                Ok(name) => name.to_owned(),
+                Err(error) => {
+                    protocol::publish(
+                        events,
+                        &Event::Status {
+                            session_id: None,
+                            connected: false,
+                            address: None,
+                            nickname: None,
+                            error: Some(&error.to_string()),
+                        },
+                    );
+                    log(
+                        events,
+                        "error",
+                        format!("connection refused locally: {error}"),
+                    );
+                    return;
+                }
+            };
             let mut client_config = ts6_core::ClientConfig::new(&address, &nickname);
             if let Some(channel) = channel.filter(|value| !value.trim().is_empty()) {
                 client_config = client_config.channel(channel);
@@ -1028,7 +1210,16 @@ async fn apply_command(
         } => publish_chat_file(events, channel, path, file),
 
         Command::Nick { name } => match session.as_mut() {
-            Some(active) => match active.set_nickname(&name).await {
+            Some(_) if ts6_core::check_nickname(&name).is_err() => log(
+                events,
+                "error",
+                format!(
+                    "nickname must have {} to {} characters",
+                    ts6_core::NICKNAME_MIN_CHARS,
+                    ts6_core::NICKNAME_MAX_CHARS
+                ),
+            ),
+            Some(active) => match active.set_nickname(name.trim()).await {
                 Ok(()) => {
                     log(events, "ok", format!("nickname changed to {name}"));
                     publish_state(active, events);
@@ -1160,7 +1351,12 @@ async fn apply_command(
         Command::Tick => {}
 
         // Handled by the session loop before this function.
-        Command::WatchStream { .. } | Command::StopWatching | Command::StreamWorker(_) => {}
+        Command::WatchStream { .. }
+        | Command::StopWatching
+        | Command::StreamWorker(_)
+        | Command::ShareStart { .. }
+        | Command::ShareStop
+        | Command::ShareWorker(_) => {}
 
         Command::Volume { client, volume } => engine.set_volume(client, volume),
 
@@ -1184,12 +1380,7 @@ async fn apply_command(
 pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
     // Quiet by default: debug output can include server command metadata. Set
     // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .try_init();
+    init_logging("warn");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1201,13 +1392,24 @@ pub fn serve_blocking(port: u16, ui_dir: PathBuf) -> anyhow::Result<()> {
 /// Used by desktop clients that render their UI natively.
 pub fn serve_blocking_without_ui(port: u16) -> anyhow::Result<()> {
     // Quiet by default: debug output can include server command metadata. Set
-    // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .try_init();
+    // `RUST_LOG` (for example `ts6_bridge=debug`) to diagnose a problem. The
+    // desktop exe has no console, so stream connection and decoder lines (no
+    // chat, no credentials) go to `mirage.log` in the config folder.
+    if std::env::var_os("MIRAGE_LOG_FILE").is_none() && std::env::var_os("RUST_LOG").is_none() {
+        let path = ts6_core::config::default_config_dir().join("mirage.log");
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() > 2_000_000) {
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")));
+        std::env::set_var("MIRAGE_LOG_FILE", path);
+    }
+    if std::env::var_os("RUST_LOG").is_none() {
+        std::env::set_var(
+            "RUST_LOG",
+            "warn,ts6_bridge::stream_media=info,ts6_bridge::share_media=info,ts6_stream=info",
+        );
+    }
+    init_logging("warn");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

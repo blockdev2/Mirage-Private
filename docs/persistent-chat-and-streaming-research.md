@@ -336,3 +336,217 @@ interop is fixed, keep one implementation (likely `ts6-stream` for the peers,
 `ts6-bridge` for signaling and decoding). Note that `ts6-stream` holds remote
 candidates that arrive before the remote description; check whether that
 matters for the official client.
+
+## Our own screen share in the session (stage 3, 2026-11-13)
+
+The bridge now publishes a screen: `ts6-bridge/src/share.rs` (signaling state
+machine) and `share_media.rs` (worker with the `ts6-capture` capture and one
+`ts6-stream` publisher per viewer), driven by `share_start`/`share_stop` from
+the desktop share button. This resolves the overlap noted above in one
+direction: publishing uses `ts6-stream`; the viewer still uses its own peer in
+`ts6-bridge/src/stream_media`. Plan: `superpowers/plans/2026-11-13-screen-share-session.md`.
+
+Verified: the state machine and the worker against a loopback `ts6-stream`
+viewer, and once on one machine the real monitor capture and hardware encoder
+through the worker to a loopback viewer (61 RTP packets, counts only). Not
+verified: any run against a TS6 server or the official client, other machines,
+NAT, STUN/TURN, and the share picker on screen. Because the native viewer
+already fails against the official client (answer apparently not applied), a
+Mirage publisher may meet the same wall with an official viewer; check the
+direction `official viewer -> Mirage publisher` first when testing, and keep the
+candidate and signaling counts only, never SDP or addresses.
+
+
+## The official client ignores our SDP (2026-11-13, experiment under test)
+
+New evidence from the **official client's own local log** (the TeamSpeak
+client writes `Logs/Default/ts5client_*.log`; read it on the owner's machine
+only, it is not part of the repository). In both directions (Mirage watching
+the official client, and the official client watching Mirage) the log shows
+`SetRemoteDescription CALL … OK` for every SDP produced by the official
+client but **never** for an SDP produced by webrtc-rs. The official client
+therefore rejects our SDP before libwebrtc sees it, silently, which explains
+"no checks of its own, then a re-offer" above. It is not a network problem:
+Chromium (libwebrtc) in the built-in browser pane accepts our offers and
+answers, connects, and decodes our H.264 stream on the same PC.
+
+What differs from an official answer (Chrome layout, about 2.9 KB): session
+version and origin line, `msid-semantic`, `ice-options:trickle`, `rtcp:9`
+lines, attribute order, `rtcp-xr`/`rrtr`, and an audio section. The cause
+inside the client is unknown (`MangleSessionVersion` is a symbol in
+`TeamSpeak.dll`; it may validate or rewrite the SDP).
+
+Experiment in the code (`ts6-stream/src/sdp.rs`, marked as an experiment):
+the SDP text is rewritten to the Chrome layout in six cumulative levels
+(0 = untouched … 5 = everything above) and the level is cycled per
+negotiation, 5 down to 0, unless `MIRAGE_SDP_LEVEL=<0-5>` pins one. It never
+touches ICE credentials, fingerprint, payloads or directions. The publisher
+now also offers an inactive Opus audio section and a send-only video section,
+like the official publisher. Candidate `mid` is the m-line index when the
+candidate has none (`"0"`, as libwebrtc sends).
+
+Verified here: unit tests, every level negotiated as offer and as answer
+through our own stack (`every_sdp_layout_still_negotiates`), and Chromium
+accepted all six answer levels and all six offer levels (connected and
+playing for the answer side). **Not verified:** that the official client
+accepts any level. How to check: run a share/watch with the official client,
+then search its log for `SetRemoteDescription CALL` after each attempt and
+compare the SDP length (it differs per level). The level that gets `OK` and
+`OnConnectionChange new_state=2` becomes the default and the cycling goes
+away. If none does, next suspects are the codec list in our answer (the
+official one lists AV1/VP9/VP8 too), session-version handling, and a closer
+look at `TeamSpeak.dll`.
+
+Other open items seen in the same logs: our candidates are sometimes delayed
+about 3 s by STUN gathering, the official viewer's retries produce
+`joinstreamrequest err=5638`, and the Mirage viewer gives up after 20 s
+without a first frame.
+
+### Result of the SDP experiment (2026-11-13, same day)
+
+The official client's log after the Chrome-layout build shows both
+directions now work at the negotiation level: it applied our answer
+(`SetRemoteDescription CALL site=HandleRemoteAnswer … OK`, 1572 chars) and our
+offer (`site=HandleRemoteOffer … OK`, 1593 chars), and both peer connections
+reached `OnConnectionChange new_state=2` (connected) within 3 s. Mirage showed
+the official client's screen for a while. So the silent rejection was SDP
+shape, not network. (Which of the six levels did it is not separated: the
+levels cycle, and the lengths seen match the shaped layouts; pin
+`MIRAGE_SDP_LEVEL` to bisect if the cycling should go away.)
+
+Two separate bugs remained, both found in the same log and a timing probe:
+
+- **Official viewer showed nothing of our share.** Log line `Trying to create
+  decoder for unsupported format. Codec name: H264, parameters:
+  { level-asymmetry-allowed=1 packetization-mode=1 profile-level-id=42e01f }`.
+  The official client offers and decodes only H.264 High
+  (`profile-level-id=640c1f`); we offered Constrained Baseline. The publisher
+  now offers `640c1f` and the encoder asks Media Foundation for High
+  (`MF_MT_MPEG2_PROFILE = 100`, falls back to the encoder default if
+  declined). Checked on this machine: the first SPS of a real capture has
+  `profile_idc=100`. Level is still declared 3.1 while the stream may be
+  1080p; the official decoder has not been tested with it yet.
+- **Mirage viewing the official stream lagged and dropped.** `nv12_to_rgba`
+  took about 70 ms for a 1080p frame (one thread, floats), so the stream was
+  capped near 14 fps; the 4-frame decode queue overflowed, every overflow
+  forced a wait for the next keyframe plus a PLI, and the picture froze.
+  The conversion is now fixed point over up to 4 threads: about 1.9 ms per
+  1080p frame, matching the old output within 2 levels (test). Not yet seen
+  live at 60 fps: the Media Foundation decode time itself is unmeasured.
+  The "drop" itself is unexplained (the official log showed ICE healthy at
+  15 s); `MIRAGE_LOG_FILE` plus `dist/share-test/Mirage-com-log.cmd` now
+  record the viewer's connection state and decoder frames per 5 s.
+
+### Third round: only the highest SDP level is accepted as an answer (2026-11-13)
+
+With the cycling build the official client's log showed the three answers it
+received from the Mirage viewer: the first one (level 5, 1572 chars) got
+`SetRemoteDescription CALL … OK` and connected; the next two (level 4, 1484
+chars, and level 3, 1365 chars) logged `kAnswer: dispatching to
+HandleRemoteAnswer` and then nothing, and the official publisher answered with
+`AddIceCandidate failed reason=The remote description was null` for every
+candidate and re-offered after 15 s. Our offers were accepted at every level
+seen (levels 4 and 5). The only difference between levels 4 and 5 is
+`a=rtcp-xr:rcvr-rtt=all` and `a=rtcp-fb:PT rrtr`, so the default is now level 5
+for everything (`next_level` no longer cycles; `MIRAGE_SDP_LEVEL` still pins
+another). Evidence is one accepted answer against two refused ones, so this
+is a measured guess until the next run.
+
+Ping: after the H.264 fix the share itself reached the official viewer (it
+displayed the Mirage window). The user then saw 430 ms pings in Mirage. A
+loopback server with a real share and a watching viewer keeps the bridge ping
+at 0.1 ms, so capture and encoding do not starve the session. The log shows
+Mirage's candidates on a different interface/public IP than the earlier run
+(10.165.x with a different srflx address), so the path to the server is the
+suspect; compare with the official client's own ping to the same server.
+
+### Fourth round: slow answers, and a VPN (2026-11-13)
+
+A level-5 answer of the same length (1572 chars) that was applied at 13:32
+was ignored at 14:46, so the SDP level is not the whole story. What differs is
+timing: the 13:32 answer reached the official publisher 35 ms after its offer
+(ping 14 ms); the ignored ones arrived about 900 ms later (ping 430-440 ms),
+after the official client's own `OnConnectionChange new_state=1` (about 450 ms
+after its offer). Hypothesis, not proven: the official client drops an answer
+that arrives after that point. `Get-NetIPConfiguration` shows the cause of the
+ping: the default route goes through a Mullvad VPN adapter (metric 1), ahead
+of the LAN. Next test: VPN off (or Mirage excluded) and watch again.
+The level fix above is kept, since the old layouts were refused even when fast.
+
+### Fifth round: VPN off confirms it, then a freeze (2026-11-13, 15:26)
+
+With the VPN off the ping was 9 ms and the official log shows the Mirage
+answer arriving 32 ms after the offer and being applied (`SetRemoteDescription
+OK`), so the timing hypothesis held: the official client ignores a late
+answer. Mirage then showed the official screen, and froze. No Mirage log was
+available. Likely cause, not confirmed: packets lost and not recovered by
+NACK left later frames without their reference, and the viewer only asked for
+a keyframe on a full queue or a decode error. It now also waits for a keyframe
+(and sends a PLI) when the sample builder reports dropped packets. The desktop
+exe now writes `mirage.log` (stream connection state and decoder frames per 5
+s; no chat, no credentials) to `%APPDATA%\ts6client` by default, trimmed at 2 MB.
+Gathering was ruled out as a delay on our side: host candidates leave within
+6 ms and srflx within 16 ms.
+
+### Sixth round: freezes of about 20 s (2026-11-13, evening)
+
+Watching the official stream now works but freezes. `mirage.log` (decoder
+line is printed on the first decode after 5 s, so a long gap between lines is a
+freeze): reports at 21:21:16 and 21:21:45, 21:22:13 and 21:22:31, with 236-291
+frames per report and decoder load about 40 % (so the decoder is not the
+limit). Connection state stayed `Connected`. So media stops for about 20 s
+while ICE is healthy, which looks like the viewer waiting for a keyframe the
+official client does not send for a PLI. Added: FIR next to PLI (both are
+negotiated), and a 5 s `stream track` log line with packets, samples, dropped,
+skipped (waiting for a keyframe), queue-full, keyframes and keyframe requests,
+which tells packet loss, an unanswered request and a local stall apart.
+Not confirmed at that point.
+
+### Seventh round: the 64-packet window (2026-11-13, night)
+
+The `stream track` lines from a 100 s run settled it. Packets arrived at a
+steady 600-1500 per 5 s and about 58 frames per 5 s were assembled, but after
+the first keyframe `keys` stayed 0 and `skipped` equalled `samples` for the
+whole run, with `waiting_key=true` and a keyframe request every second. The
+decoder never received anything. `dropped` was in the hundreds per report, and
+`webrtc::peer_connection::driver` logged about 5000 `Failed to send RtpPacket
+to track remote: Full(...)` errors in the same period.
+
+Cause: the viewer built access units with `SampleBuilder::new(64, ...)`, and
+`max_late` is a count of buffered packets. A 1080p keyframe is well over 64
+packets, so the builder forced the head of the frame out before the rest
+arrived and every keyframe was reported as lost. The first keyframe survived
+only because it was smaller. Any later loss then made the viewer wait for a
+keyframe that could not be assembled, until the official client emitted another
+one by itself (about every 20-30 s, the length of the freezes).
+
+Fix: window of 4096 packets with a 500 ms time bound
+(`with_max_time_delay`), so a lost packet still cannot stall reassembly. The
+unit test `a_keyframe_of_hundreds_of_packets_is_rebuilt_whole` packs a 250 KB
+IDR into about 210 packets; it fails with a window of 64 and passes with 4096.
+The `Full` errors may be a consequence (the retransmission-less loss path left
+the consumer waiting) or a separate burst effect; the next run's log shows
+whether they remain.
+
+### Eighth round: queue overflow (2026-11-13, night)
+
+With the 4096 window the first log shows `dropped=0` (it was in the hundreds)
+and about 55 fps decoded, with fewer freezes. The remaining ones coincide with
+`full` > 0: the decode queue (4 units, about 66 ms at 60 fps) overflowed while
+the decoder worked on a keyframe, and each overflow forces a wait for a
+keyframe. The queue is now 30 units (about 0.5 s). Decoder load is about 50 %,
+so it only needs to absorb bursts.
+
+### Stream audio (2026-11-13, night)
+
+The viewer already accepted the official offer's Opus m-line; it now plays it.
+`on_track` for an audio track spawns `play_audio`: Opus (stereo, 48 kHz,
+payload 111) is decoded with libopus, gaps of up to 3 packets are concealed,
+late and duplicate packets are skipped, and the mono downmix goes to a
+process-wide sink that the playback callback mixes in (`stream_audio.rs`:
+starts after 60 ms queued, restarts after running dry, drops the oldest past
+300 ms so sound cannot drift behind the picture). Closing the viewer clears the
+sink. Verified on loopback only (a 440 Hz tone from a webrtc-rs publisher
+reaches the mix); not yet heard from a real official share. Known gaps: no
+separate volume or mute, and the playback chain is mono.
+
