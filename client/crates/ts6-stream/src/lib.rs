@@ -9,5 +9,5 @@
 mod peer;
 mod signal;
 
-pub use peer::{Publisher, Viewer};
+pub use peer::{configuration, Publisher, Viewer, STUN_SERVERS};
 pub use signal::{Signal, SignalError, MAX_SIGNAL_BYTES};

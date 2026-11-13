@@ -11,7 +11,9 @@ use rtc::media::Sample;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264};
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::{
+    RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
+};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::rtp_transceiver::rtp_sender::{
@@ -159,6 +161,29 @@ async fn open_remote(connection: &Arc<dyn PeerConnection>, remote: &Remote) -> R
     Ok(())
 }
 
+/// The STUN servers the official TeamSpeak client uses. STUN only reveals the
+/// address the router shows to the internet; it never carries media, and the
+/// official client configures no TURN relay either.
+pub const STUN_SERVERS: [&str; 3] = [
+    "stun:turn.teamspeak.com:3478",
+    "stun:turn2.teamspeak.com:3478",
+    "stun:stun.l.google.com:19302",
+];
+
+/// The peer configuration for peers bound to `bind`. A peer bound to loopback
+/// talks only to this machine, so it gets no STUN servers (and no network
+/// traffic or delay while gathering candidates).
+pub fn configuration(bind: IpAddr) -> RTCConfiguration {
+    let mut builder = RTCConfigurationBuilder::new();
+    if !bind.is_loopback() {
+        builder = builder.with_ice_servers(vec![RTCIceServer {
+            urls: STUN_SERVERS.map(String::from).to_vec(),
+            ..Default::default()
+        }]);
+    }
+    builder.build()
+}
+
 async fn connect(
     bind: IpAddr,
     media: MediaEngine,
@@ -169,7 +194,7 @@ async fn connect(
         .map_err(|_| anyhow!("cannot register interceptors"))?;
     let runtime = default_runtime().ok_or_else(|| anyhow!("no async runtime available"))?;
     let connection = PeerConnectionBuilder::new()
-        .with_configuration(RTCConfigurationBuilder::new().build())
+        .with_configuration(configuration(bind))
         .with_media_engine(media)
         .with_interceptor_registry(registry)
         .with_handler(Arc::new(shared))
@@ -411,5 +436,32 @@ impl Viewer {
 
     pub async fn close(&self) {
         let _ = self.connection.close().await;
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn loopback_peers_use_no_stun_servers() {
+        for bind in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            assert!(configuration(bind).ice_servers().is_empty());
+        }
+    }
+
+    #[test]
+    fn network_peers_use_the_three_official_stun_servers() {
+        let config = configuration(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let servers = config.ice_servers();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].urls, STUN_SERVERS.map(String::from).to_vec());
+        // A TURN URL would fail here for lack of credentials; STUN needs none.
+        assert!(servers[0].urls().is_ok());
+        assert!(servers[0].urls.iter().all(|url| url.starts_with("stun:")));
     }
 }

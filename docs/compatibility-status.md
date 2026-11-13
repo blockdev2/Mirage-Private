@@ -184,7 +184,7 @@ with a CRLF-terminated offer, `streamsignaling`, `stopstream reason=1`.
 | Real monitor capture and hardware encoder through the worker to a loopback viewer | Passed once on one machine (ignored test, 61 RTP packets, counts only) |
 | Against a real TS6 server (`setupstream` accepted, join request answered, signaling relayed) | Passed once on a loopback TS6 server with `scripts/check_share_session.py`: the sharer reached `live` and a second bridge's native viewer reached `playing`. Both ends are this project's own code, so it says nothing about the official client |
 | Official TS6 client as viewer (ICE/DTLS, H.264 profile, re-offers) | Not verified; the native viewer already fails against the official client, so expect the same class of problem |
-| Cross-machine, NAT, STUN/TURN | Not verified; peers bind every interface and use no STUN server |
+| Cross-machine, NAT, STUN | Peers bound to a network address now gather candidates with the three STUN servers the official client uses (`stun:turn.teamspeak.com:3478`, `stun:turn2.teamspeak.com:3478`, `stun:stun.l.google.com:19302`; loopback peers use none). Unit-tested configuration, and the loopback share check still passes with it. Never run across two networks or through a NAT, so whether it connects is unverified. No TURN relay (the official client has none either) |
 | Stream audio | Not implemented (`audio=0`) |
 
 Names recovered from a reference implementation and not confirmed live:
