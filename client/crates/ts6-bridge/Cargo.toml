@@ -9,6 +9,8 @@ description = "Local WebSocket bridge that owns a TS6 session and feeds the desk
 ts6-core = { path = "../ts6-core" }
 ts6-audio = { path = "../ts6-audio" }
 ts6-input = { path = "../ts6-input" }
+ts6-capture = { path = "../ts6-capture" }
+ts6-stream = { path = "../ts6-stream" }
 
 anyhow = "1"
 futures = "0.3"

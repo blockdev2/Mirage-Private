@@ -184,6 +184,19 @@ pub enum BridgeEvent {
     },
     /// Progress of the stream (screen share) being watched.
     StreamState(StreamState),
+    /// Progress of our own screen share.
+    ShareState(ShareState),
+}
+
+/// `state`: starting, live, stopped or failed; `reason` (when failed):
+/// unsupported, capture, timeout, busy or offline; `viewers` are connected.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareState {
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub viewers: usize,
 }
 
 /// `state`: connecting, playing, ended or failed; `reason` (when failed):
@@ -270,6 +283,11 @@ pub enum Command {
         client: u16,
     },
     StopWatching,
+    /// Share a monitor (zero-based index) as our own screen stream.
+    ShareStart {
+        monitor: Option<usize>,
+    },
+    ShareStop,
 }
 
 #[cfg(test)]
@@ -297,6 +315,39 @@ mod tests {
             assert_eq!(parsed.state, state);
             assert_eq!(parsed.reason.as_deref(), reason);
         }
+    }
+
+    #[test]
+    fn share_state_events_parse() {
+        for (state, reason, viewers) in [
+            ("starting", None, 0),
+            ("live", None, 2),
+            ("stopped", None, 0),
+            ("failed", Some("unsupported"), 0),
+            ("failed", Some("capture"), 0),
+            ("failed", Some("timeout"), 0),
+        ] {
+            let json = serde_json::json!({"ev": "share_state", "state": state, "reason": reason, "viewers": viewers});
+            let event: BridgeEvent = serde_json::from_value(json).unwrap();
+            let BridgeEvent::ShareState(parsed) = event else {
+                panic!("not a share state");
+            };
+            assert_eq!(parsed.state, state);
+            assert_eq!(parsed.reason.as_deref(), reason);
+            assert_eq!(parsed.viewers, viewers);
+        }
+    }
+
+    #[test]
+    fn share_commands_serialize_like_the_bridge_expects() {
+        assert_eq!(
+            serde_json::to_value(Command::ShareStart { monitor: Some(1) }).unwrap(),
+            serde_json::json!({"op": "share_start", "monitor": 1})
+        );
+        assert_eq!(
+            serde_json::to_value(Command::ShareStop).unwrap(),
+            serde_json::json!({"op": "share_stop"})
+        );
     }
 
     #[test]

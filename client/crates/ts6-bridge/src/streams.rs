@@ -196,7 +196,9 @@ impl StreamRegistry {
                     json: json.clone(),
                 })]
             }
-            ControlKind::JoinRequested => Vec::new(),
+            ControlKind::JoinRequested | ControlKind::ClientJoined | ControlKind::ClientLeft => {
+                Vec::new()
+            }
         }
     }
 

@@ -336,3 +336,22 @@ interop is fixed, keep one implementation (likely `ts6-stream` for the peers,
 `ts6-bridge` for signaling and decoding). Note that `ts6-stream` holds remote
 candidates that arrive before the remote description; check whether that
 matters for the official client.
+
+## Our own screen share in the session (stage 3, 2026-11-13)
+
+The bridge now publishes a screen: `ts6-bridge/src/share.rs` (signaling state
+machine) and `share_media.rs` (worker with the `ts6-capture` capture and one
+`ts6-stream` publisher per viewer), driven by `share_start`/`share_stop` from
+the desktop share button. This resolves the overlap noted above in one
+direction: publishing uses `ts6-stream`; the viewer still uses its own peer in
+`ts6-bridge/src/stream_media`. Plan: `superpowers/plans/2026-11-13-screen-share-session.md`.
+
+Verified: the state machine and the worker against a loopback `ts6-stream`
+viewer, and once on one machine the real monitor capture and hardware encoder
+through the worker to a loopback viewer (61 RTP packets, counts only). Not
+verified: any run against a TS6 server or the official client, other machines,
+NAT, STUN/TURN, and the share picker on screen. Because the native viewer
+already fails against the official client (answer apparently not applied), a
+Mirage publisher may meet the same wall with an official viewer; check the
+direction `official viewer -> Mirage publisher` first when testing, and keep the
+candidate and signaling counts only, never SDP or addresses.

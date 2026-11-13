@@ -167,6 +167,31 @@ native chat surface was not driven in a rendered live-server interaction.
 
 See [channel chat](channel-chat.md) for the protocol and remaining limitations.
 
+## Screen sharing, session wiring (2026-11-13)
+
+Stage 3 connects `ts6-capture` and `ts6-stream` to the session through
+`ts6-bridge` (`share.rs`, `share_media.rs`) and the desktop share button.
+No new third-party dependency: `ts6-bridge` gains workspace edges to the two
+crates (the lockfile diff is only those edges). Wire details used, from
+`docs/protocol-ts6-astrum.md` section 2: `setupstream` (`type=2`, `mode=1`,
+`accessibility=1`, `viewer_limit=0`, `audio=0`), `respondjoinstreamrequest`
+with a CRLF-terminated offer, `streamsignaling`, `stopstream reason=1`.
+
+| Claim | Status |
+| --- | --- |
+| Signaling state machine (start, join, refuse, leave, stop, deadlines, reset) | Unit-tested |
+| Worker, publisher and keyframe gating against a loopback `ts6-stream` viewer | Tested (synthetic units) |
+| Real monitor capture and hardware encoder through the worker to a loopback viewer | Passed once on one machine (ignored test, 61 RTP packets, counts only) |
+| Against a real TS6 server (`setupstream` accepted, `notifystreamstarted` for our own id) | Not run in this stage; earlier CLI runs only proved `setupstream` acceptance |
+| Official TS6 client as viewer (ICE/DTLS, H.264 profile, re-offers) | Not verified; the native viewer already fails against the official client, so expect the same class of problem |
+| Cross-machine, NAT, STUN/TURN | Not verified; peers bind every interface and use no STUN server |
+| Stream audio | Not implemented (`audio=0`) |
+
+Names recovered from a reference implementation and not confirmed live:
+`notifystreamclientjoined`/`notifystreamclientleft`, and `is_remove` on
+`notifyjoinstreamrequest` (a viewer leaving). A failed `setupstream` result
+is not read; the share ends with a timeout after 15 s instead.
+
 ## Stream viewer dependencies (2026-11-13)
 
 Stage 1 of the native stream viewer adds `webrtc` 0.21.1 (webrtc-rs) and,

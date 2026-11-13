@@ -193,6 +193,16 @@ pub enum Command {
     /// Internal: a report from the stream viewer worker.
     #[serde(skip)]
     StreamWorker(crate::stream_media::WorkerEvent),
+    /// Share a monitor (`None`: the primary one) as a TS6 screen stream.
+    ShareStart {
+        #[serde(default)]
+        monitor: Option<usize>,
+    },
+    /// Stop sharing.
+    ShareStop,
+    /// Internal: a report from the screen share worker.
+    #[serde(skip)]
+    ShareWorker(crate::share_media::ShareEvent),
 }
 
 // Log only the operation, never credential-bearing fields or user content.
@@ -219,6 +229,9 @@ impl std::fmt::Debug for Command {
             Self::WatchStream { .. } => "WatchStream",
             Self::StopWatching => "StopWatching",
             Self::StreamWorker(_) => "StreamWorker",
+            Self::ShareStart { .. } => "ShareStart",
+            Self::ShareStop => "ShareStop",
+            Self::ShareWorker(_) => "ShareWorker",
             Self::Volume { .. } => "Volume",
             Self::ConnectionInfo { .. } => "ConnectionInfo",
         })
@@ -305,6 +318,14 @@ pub enum Event<'a> {
         client: u16,
         state: &'a str,
         reason: Option<&'a str>,
+    },
+    /// Our own screen share: `starting | live | stopped | failed`. `reason` is
+    /// `unsupported | capture | timeout | busy | offline` on failure; `viewers`
+    /// counts the connected viewers.
+    ShareState {
+        state: &'a str,
+        reason: Option<&'a str>,
+        viewers: usize,
     },
     Log {
         level: &'a str,
@@ -416,6 +437,26 @@ mod tests {
         assert_eq!(
             event,
             serde_json::json!({"ev":"stream_state","client":302,"state":"failed","reason":"refused"})
+        );
+    }
+
+    #[test]
+    fn share_commands_and_state_events_round_trip() {
+        let start: Command = serde_json::from_str(r#"{"op":"share_start","monitor":1}"#).unwrap();
+        assert!(matches!(start, Command::ShareStart { monitor: Some(1) }));
+        let primary: Command = serde_json::from_str(r#"{"op":"share_start"}"#).unwrap();
+        assert!(matches!(primary, Command::ShareStart { monitor: None }));
+        let stop: Command = serde_json::from_str(r#"{"op":"share_stop"}"#).unwrap();
+        assert!(matches!(stop, Command::ShareStop));
+        let event = serde_json::to_value(Event::ShareState {
+            state: "live",
+            reason: None,
+            viewers: 2,
+        })
+        .unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({"ev":"share_state","state":"live","reason":null,"viewers":2})
         );
     }
 

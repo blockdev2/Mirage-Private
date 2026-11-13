@@ -12,6 +12,8 @@ mod audio;
 mod media;
 mod probe;
 mod protocol;
+mod share;
+pub mod share_media;
 pub mod stream_media;
 mod streams;
 
@@ -439,6 +441,9 @@ async fn session_task(
     // (leaving it ends the watched stream).
     let mut streams = streams::StreamRegistry::default();
     let mut viewer: Option<stream_media::StreamWorker> = None;
+    // Our own screen share: signaling state and the capture/peer worker.
+    let mut share = share::ShareRegistry::default();
+    let mut sharer: Option<share_media::ShareWorker> = None;
     let mut own_channel: Option<u64> = None;
     let mut engine = audio::AudioEngine::new();
     let mut config = audio::AudioConfig::default();
@@ -503,6 +508,15 @@ async fn session_task(
                                         &internal,
                                     );
                                     streams.reset();
+                                    // Our stream belongs to the channel we left.
+                                    let actions = share.stop(std::time::Instant::now());
+                                    share_actions(
+                                        actions,
+                                        Some(&mut *active),
+                                        &mut sharer,
+                                        &events,
+                                        &internal,
+                                    );
                                 }
                                 own_channel = channel;
                             }
@@ -584,6 +598,14 @@ async fn session_task(
                                     &events,
                                     &internal,
                                 );
+                                let actions = share.on_event(&event, std::time::Instant::now());
+                                share_actions(
+                                    actions,
+                                    Some(&mut *active),
+                                    &mut sharer,
+                                    &events,
+                                    &internal,
+                                );
                             }
                         }
                         Item::Reconnecting => log(&events, "warn", "reconnecting..."),
@@ -616,6 +638,9 @@ async fn session_task(
             own_channel = None;
             streams.reset();
             viewer = None;
+            share.reset();
+            sharer = None;
+            publish_share(&events, "stopped", None, 0);
             stream_media::frame::frames().close();
             engine.stop();
             media.reset();
@@ -656,6 +681,29 @@ async fn session_task(
                 stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
                 None
             }
+            Some(Command::ShareStart { monitor }) => {
+                let own = session.as_ref().and_then(own_client_id);
+                let actions = match own {
+                    Some(own) => share.start(own, monitor, std::time::Instant::now()),
+                    None => vec![share::Action::Publish {
+                        state: "failed",
+                        reason: Some("offline"),
+                        viewers: 0,
+                    }],
+                };
+                share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
+                None
+            }
+            Some(Command::ShareStop) => {
+                let actions = share.stop(std::time::Instant::now());
+                share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
+                None
+            }
+            Some(Command::ShareWorker(report)) => {
+                let actions = share.on_worker(report, std::time::Instant::now());
+                share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
+                None
+            }
             other => other,
         };
         if let Some(command) = pending {
@@ -673,6 +721,8 @@ async fn session_task(
             if session.is_none() {
                 streams.reset();
                 viewer = None;
+                share.reset();
+                sharer = None;
                 own_channel = None;
                 stream_media::frame::frames().close();
             }
@@ -681,6 +731,10 @@ async fn session_task(
         let expired = streams.tick(std::time::Instant::now());
         if !expired.is_empty() {
             stream_actions(expired, session.as_mut(), &mut viewer, &events, &internal);
+        }
+        let expired = share.tick(std::time::Instant::now());
+        if !expired.is_empty() {
+            share_actions(expired, session.as_mut(), &mut sharer, &events, &internal);
         }
 
         if engine.stats_due() {
@@ -737,6 +791,96 @@ fn stream_actions(
                     reason,
                 },
             ),
+        }
+    }
+}
+
+/// Our own client id, which identifies our `notifystreamstarted`.
+fn own_client_id(session: &Session) -> Option<u16> {
+    session
+        .snapshot()
+        .ok()?
+        .clients
+        .iter()
+        .find(|client| client.is_self)
+        .map(|client| client.id)
+}
+
+fn publish_share(
+    events: &broadcast::Sender<String>,
+    state: &str,
+    reason: Option<&str>,
+    viewers: usize,
+) {
+    protocol::publish(
+        events,
+        &Event::ShareState {
+            state,
+            reason,
+            viewers,
+        },
+    );
+}
+
+/// Carries out what the share registry decided; like `stream_actions`, server
+/// commands never wait, so voice never waits on stream signaling.
+fn share_actions(
+    actions: Vec<share::Action>,
+    mut session: Option<&mut Session>,
+    sharer: &mut Option<share_media::ShareWorker>,
+    events: &broadcast::Sender<String>,
+    internal: &mpsc::Sender<Command>,
+) {
+    for action in actions {
+        match action {
+            share::Action::Send(name, args) => {
+                if let Some(active) = session.as_deref_mut() {
+                    if let Err(error) = active.send_command_no_wait(name, &args) {
+                        tracing::debug!(%error, name, "share command failed");
+                    }
+                }
+            }
+            share::Action::Worker(command) => {
+                if sharer.is_none() && matches!(command, share_media::ShareCommand::Start { .. }) {
+                    *sharer = spawn_sharer(internal);
+                }
+                match sharer.as_ref() {
+                    Some(worker) => {
+                        if worker.send(command).is_err() {
+                            tracing::warn!("screen share queue full; its deadline ends the share");
+                        }
+                    }
+                    // The worker could not start: report it as a capture failure.
+                    None => publish_share(events, "failed", Some("capture"), 0),
+                }
+            }
+            // Dropping the worker closes its peers and stops the capture.
+            share::Action::CloseWorker => *sharer = None,
+            share::Action::Publish {
+                state,
+                reason,
+                viewers,
+            } => publish_share(events, state, reason, viewers),
+        }
+    }
+}
+
+/// Starts the share worker; its reports come back as internal commands.
+fn spawn_sharer(internal: &mpsc::Sender<Command>) -> Option<share_media::ShareWorker> {
+    let (reports, mut incoming) = mpsc::channel(64);
+    let forward = internal.clone();
+    tokio::spawn(async move {
+        while let Some(report) = incoming.recv().await {
+            if forward.send(Command::ShareWorker(report)).await.is_err() {
+                break;
+            }
+        }
+    });
+    match share_media::ShareWorker::spawn(reports) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            tracing::warn!(%error, "screen share could not start");
+            None
         }
     }
 }
@@ -1150,7 +1294,12 @@ async fn apply_command(
         Command::Tick => {}
 
         // Handled by the session loop before this function.
-        Command::WatchStream { .. } | Command::StopWatching | Command::StreamWorker(_) => {}
+        Command::WatchStream { .. }
+        | Command::StopWatching
+        | Command::StreamWorker(_)
+        | Command::ShareStart { .. }
+        | Command::ShareStop
+        | Command::ShareWorker(_) => {}
 
         Command::Volume { client, volume } => engine.set_volume(client, volume),
 

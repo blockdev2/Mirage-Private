@@ -17,8 +17,12 @@ mod capture;
 mod convert;
 #[cfg(windows)]
 mod encoder;
+#[cfg(windows)]
+mod monitors;
 
 pub use config::{fit_size, CaptureConfig, EncodedUnit};
 
 #[cfg(windows)]
 pub use capture::ScreenCapture;
+#[cfg(windows)]
+pub use monitors::{list_monitors, MonitorInfo};

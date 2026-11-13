@@ -8,6 +8,10 @@ pub enum ControlKind {
     JoinRequested,
     JoinResponded,
     Signaling,
+    /// A viewer attached to our stream (`notifystreamclientjoined`).
+    ClientJoined,
+    /// A viewer detached from our stream (`notifystreamclientleft`).
+    ClientLeft,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +20,8 @@ pub struct ControlNotice {
     pub stream_id: String,
     pub client_id: u16,
     pub accepted: Option<bool>,
+    /// `is_remove=1` on a join request: the viewer is leaving, not asking.
+    pub removed: bool,
 }
 
 impl ControlNotice {
@@ -35,9 +41,12 @@ impl ControlNotice {
             b"notifyjoinstreamrequest" => ControlKind::JoinRequested,
             b"notifyrespondjoinstreamrequest" => ControlKind::JoinResponded,
             b"notifystreamsignaling" => ControlKind::Signaling,
+            b"notifystreamclientjoined" => ControlKind::ClientJoined,
+            b"notifystreamclientleft" => ControlKind::ClientLeft,
             _ => return None,
         };
         let (mut stream_id, mut client_id, mut accepted) = (None, None, None);
+        let mut removed = false;
         for argument in arguments {
             let CommandItem::Argument(argument) = argument else {
                 return None;
@@ -77,6 +86,7 @@ impl ControlNotice {
                         _ => return None,
                     });
                 }
+                b"is_remove" => removed = argument.value().get_str().ok()?.as_ref() == "1",
                 _ => {}
             }
         }
@@ -88,6 +98,7 @@ impl ControlNotice {
             stream_id: stream_id?,
             client_id: client_id?,
             accepted,
+            removed,
         })
     }
 }
@@ -210,6 +221,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(admitted.accepted, Some(true));
+    }
+
+    #[test]
+    fn recognizes_viewer_attach_detach_and_removal() {
+        for (name, kind) in [
+            ("notifystreamclientjoined", ControlKind::ClientJoined),
+            ("notifystreamclientleft", ControlKind::ClientLeft),
+        ] {
+            let notice = ControlNotice::parse(&format!("{name} id=s clid=7")).unwrap();
+            assert_eq!(notice.kind, kind);
+            assert!(!notice.removed);
+        }
+        let leaving =
+            ControlNotice::parse("notifyjoinstreamrequest id=s clid=7 is_remove=1").unwrap();
+        assert!(leaving.removed);
+        let asking =
+            ControlNotice::parse("notifyjoinstreamrequest id=s clid=7 is_remove=0").unwrap();
+        assert!(!asking.removed);
     }
 
     #[test]
