@@ -6206,6 +6206,7 @@ dependencies = [
  "serde_json",
  "ts6-bridge",
  "tungstenite 0.30.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

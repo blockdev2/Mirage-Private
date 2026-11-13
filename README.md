@@ -72,6 +72,11 @@ uploads `Mirage-windows-x64.zip` (with a `.sha256` file) as an artifact, and
 each push to `main` replaces the `nightly` pre-release with the newest build.
 The binary is unsigned, so Windows SmartScreen may warn; compare the hash.
 
+Mirage opens one window per computer: launching it again brings the running
+window forward. `Mirage.exe --new-instance` opens another, fully separate
+window (own bridge port, profiles and identity, stored under
+`%APPDATA%\Mirage\slots`), for example to join as a second user.
+
 ## Develop and verify
 
 ```powershell
