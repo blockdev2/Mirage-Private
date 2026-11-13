@@ -77,17 +77,16 @@ pub mod icon {
     pub const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
     pub const ARROW_RIGHT: &str = "\u{E06C}";
     pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
+    pub const X: &str = "\u{E4F6}";
+    pub const DOWNLOAD: &str = "\u{E20C}";
+    pub const PAPERCLIP: &str = "\u{E39A}";
     pub const EYE: &str = "\u{E220}";
+    pub const TRASH: &str = "\u{E4A6}";
     pub const IMAGE: &str = "\u{E2CA}";
     pub const REPLY: &str = "\u{E024}";
     pub const COPY: &str = "\u{E1CA}";
     pub const EYE_SLASH: &str = "\u{E224}";
     pub const CHECK: &str = "\u{E182}";
-    pub const PAPERCLIP: &str = "\u{E39A}";
-    pub const SMILEY: &str = "\u{E436}";
-    pub const CHATS: &str = "\u{E17C}";
-    pub const HASH: &str = "\u{E2A2}";
-    pub const FILE: &str = "\u{E230}";
 }
 
 const INTER_REGULAR: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");

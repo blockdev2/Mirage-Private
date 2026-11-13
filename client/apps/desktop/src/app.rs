@@ -70,6 +70,15 @@ const CHAT_TEXT: Color32 = Color32::from_rgb(205, 210, 219);
 const CHAT_SEND_SIZE: f32 = 28.0;
 /// Largest size a chat picture is drawn at.
 const CHAT_PICTURE_MAX: egui::Vec2 = egui::vec2(360.0, 240.0);
+/// Files per message, as the official client allows.
+const MAX_STAGED: usize = 10;
+
+struct ImageViewer {
+    file: String,
+    uri: String,
+    zoom: f32,
+    offset: egui::Vec2,
+}
 
 /// A chat attachment's local state.
 #[derive(Clone)]
@@ -175,10 +184,20 @@ pub struct App {
     chat_draft: String,
     /// The message being answered: author and its first line.
     chat_reply: Option<(String, String)>,
+    /// A chat picture opened large: cached file, texture uri, zoom and pan.
+    image_viewer: Option<ImageViewer>,
     /// Chat attachments by (channel, server path): fetched once, then shown.
     chat_files: HashMap<(String, String), ChatFile>,
     /// Attachment sends waiting for their `chat_result`, by request id.
     pending_attachments: HashMap<String, String>,
+    /// Files picked or pasted, waiting in the composer for a caption.
+    staged: Vec<std::path::PathBuf>,
+    /// Preview textures of staged pictures (None when not a picture).
+    staged_previews: HashMap<std::path::PathBuf, Option<egui::TextureHandle>>,
+    /// The composer's height last frame, to size the history above it.
+    composer_height: f32,
+    /// Staged files already sent off, uploaded one at a time in order.
+    upload_queue: std::collections::VecDeque<std::path::PathBuf>,
     /// Room chat history and the delivery state of what we sent.
     chat: ChatLog,
     /// Address of the server of the live session (also where its chat is kept).
@@ -269,12 +288,17 @@ impl App {
             output_muted: false,
             chat_draft: String::new(),
             chat_reply: None,
+            image_viewer: None,
             chat: ChatLog::default(),
             session_address: None,
             channel_chat: false,
             next_chat_request: 0,
             chat_files: HashMap::new(),
             pending_attachments: HashMap::new(),
+            staged: Vec::new(),
+            staged_previews: HashMap::new(),
+            composer_height: 56.0,
+            upload_queue: Default::default(),
             logo: None,
             chat_notice: None,
             connect_started: None,
@@ -735,6 +759,13 @@ impl eframe::App for App {
         self.ensure_profile_dialog();
         self.dialogs(&ctx);
         self.settings_window(&ctx);
+        self.image_viewer_window(&ctx);
+        // Uploads go one by one so they post in the order they were added.
+        if self.pending_attachments.is_empty() {
+            if let Some(file) = self.upload_queue.pop_front() {
+                self.attach_file(file);
+            }
+        }
         self.connection_window(&ctx);
     }
 }
@@ -1581,22 +1612,39 @@ impl App {
         ui.label(RichText::new(t.chat_heading).font(FontId::new(16.0, theme::semibold())));
         ui.add_space(8.0);
 
-        // Added first so the composer is anchored to the bottom and the
-        // history takes whatever height remains above it.
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            self.chat_composer(ui, channel_name);
-            if let Some(notice) = self.chat_notice {
-                ui.add_space(4.0);
-                ui.label(RichText::new(notice).small().color(theme::DANGER));
-            }
-            ui.add_space(8.0);
-
-            // The history is drawn only when there is room for it. Otherwise it
-            // is skipped, so its text can never run under the composer.
-            if ui.available_height() >= HISTORY_MIN_HEIGHT {
-                self.chat_history(ui, channel_id);
-            }
-        });
+        // Top-down: the history gets the room the composer (measured last
+        // frame) leaves, so the composer stays at the bottom and grows upward
+        // into the history when files are staged, never the other way around.
+        let notice = if self.chat_notice.is_some() {
+            22.0
+        } else {
+            0.0
+        };
+        let history = ui.available_height() - self.composer_height - notice - 8.0;
+        if history >= HISTORY_MIN_HEIGHT {
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), history),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_min_height(history);
+                    self.chat_history(ui, channel_id);
+                },
+            );
+        } else {
+            ui.add_space(history.max(0.0));
+        }
+        ui.add_space(8.0);
+        if let Some(notice) = self.chat_notice {
+            ui.label(RichText::new(notice).small().color(theme::DANGER));
+        }
+        let composer = ui
+            .scope(|ui| self.chat_composer(ui, channel_name))
+            .response
+            .rect;
+        if (composer.height() - self.composer_height).abs() > 0.5 {
+            self.composer_height = composer.height();
+            ui.ctx().request_repaint();
+        }
     }
 
     fn chat_composer(&mut self, ui: &mut egui::Ui, channel_name: &str) {
@@ -1626,6 +1674,10 @@ impl App {
                     });
                 });
             }
+            if !self.staged.is_empty() {
+                self.attachment_tray(ui);
+                ui.add_space(8.0);
+            }
             // A fixed-height row with centered items, so the placeholder text
             // and the send button share one baseline.
             ui.allocate_ui_with_layout(
@@ -1646,23 +1698,41 @@ impl App {
                         self.chat_notice = None;
                     }
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let can_send = self.channel_chat && !self.chat_draft.trim().is_empty();
-                    let can_attach = self.channel_chat && self.pending_attachments.is_empty();
+                    let can_send = self.channel_chat
+                        && (!self.chat_draft.trim().is_empty() || !self.staged.is_empty());
+                    let can_attach = self.channel_chat && self.staged.len() < MAX_STAGED;
                     let attach = ui
                         .add_enabled_ui(can_attach, |ui| {
-                            theme::icon_button(
-                                ui,
-                                icon::PAPERCLIP,
-                                t.chat_attach,
-                                false,
-                                CHAT_SEND_SIZE,
+                            ui.add_sized(
+                                vec2(CHAT_SEND_SIZE, CHAT_SEND_SIZE),
+                                egui::Button::new(
+                                    RichText::new(icon::PAPERCLIP)
+                                        .font(FontId::new(19.0, theme::icons()))
+                                        .color(theme::TEXT_2),
+                                )
+                                .frame(false),
                             )
+                            .on_hover_text(t.chat_attach)
                         })
                         .inner
                         .clicked();
                     if attach {
-                        if let Some(file) = rfd::FileDialog::new().pick_file() {
-                            self.attach_file(file);
+                        if let Some(files) = rfd::FileDialog::new().pick_files() {
+                            let room = MAX_STAGED - self.staged.len();
+                            self.staged.extend(files.into_iter().take(room));
+                        }
+                    }
+                    // Ctrl+V with a picture on the clipboard attaches it.
+                    // Ctrl+V with a picture on the clipboard attaches it.
+                    let pasted = ui.input(|i| {
+                        i.events.iter().find_map(|e| match e {
+                            egui::Event::PasteImage(image) => Some(image.clone()),
+                            _ => None,
+                        })
+                    });
+                    if let (Some(image), true) = (pasted, can_attach) {
+                        if let Some(file) = pasted_picture(&image) {
+                            self.staged.push(file);
                         }
                     }
                     let clicked = ui
@@ -1682,7 +1752,131 @@ impl App {
             );
         });
         if submit {
-            self.submit_chat();
+            // The caption goes first, then the files in the order added.
+            if !self.chat_draft.trim().is_empty() {
+                self.submit_chat();
+            }
+            self.upload_queue.extend(self.staged.drain(..));
+            self.staged_previews.clear();
+        }
+    }
+
+    /// The staged files above the composer, as in Discord: a card per file
+    /// with a preview, its name, and view/remove on hover.
+    fn attachment_tray(&mut self, ui: &mut egui::Ui) {
+        let t = self.t;
+        let mut remove = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("attachment-tray")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    for (index, path) in self.staged.iter().enumerate() {
+                        let (card, response) =
+                            ui.allocate_exact_size(vec2(168.0, 168.0), Sense::hover());
+                        let painter = ui.painter();
+                        painter.rect(
+                            card,
+                            CornerRadius::same(8),
+                            theme::SURFACE_RAISED,
+                            Stroke::new(1.0, theme::BORDER),
+                            egui::StrokeKind::Inside,
+                        );
+                        let preview = Rect::from_min_max(
+                            card.left_top() + vec2(10.0, 10.0),
+                            card.right_bottom() - vec2(10.0, 34.0),
+                        );
+                        let uri =
+                            format!("file://{}", path.display().to_string().replace('\\', "/"));
+                        let texture = self
+                            .staged_previews
+                            .entry(path.clone())
+                            .or_insert_with(|| staged_preview(ui.ctx(), path))
+                            .clone();
+                        if let Some(texture) = texture {
+                            // Contain: the whole picture, centered, no distortion.
+                            let size = texture.size_vec2();
+                            let scale = (preview.width() / size.x).min(preview.height() / size.y);
+                            let shown = Rect::from_center_size(preview.center(), size * scale);
+                            ui.painter().image(
+                                texture.id(),
+                                shown,
+                                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        } else {
+                            ui.painter().text(
+                                preview.center(),
+                                Align2::CENTER_CENTER,
+                                icon::PAPERCLIP,
+                                FontId::new(36.0, theme::icons()),
+                                theme::TEXT_3,
+                            );
+                        }
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let galley = ui.painter().layout_no_wrap(
+                            name,
+                            FontId::new(12.5, theme::medium()),
+                            theme::TEXT_2,
+                        );
+                        let clip = ui.painter().with_clip_rect(card.shrink(10.0));
+                        clip.galley(
+                            pos2(card.left() + 10.0, card.bottom() - 24.0),
+                            galley,
+                            theme::TEXT_2,
+                        );
+                        // View and remove float over the corner on hover.
+                        if ui.rect_contains_pointer(card) || response.hovered() {
+                            let bar = Rect::from_min_size(
+                                pos2(card.right() - 74.0, card.top() - 12.0),
+                                vec2(68.0, 32.0),
+                            );
+                            ui.painter().rect(
+                                bar,
+                                CornerRadius::same(6),
+                                theme::SIDEBAR,
+                                Stroke::new(1.0, theme::BORDER),
+                                egui::StrokeKind::Inside,
+                            );
+                            let mut tools = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(bar.shrink2(vec2(4.0, 1.0)))
+                                    .layout(Layout::left_to_right(Align::Center)),
+                            );
+                            tools.spacing_mut().item_spacing.x = 0.0;
+                            if theme::glyph_button(&mut tools, icon::EYE, t.image_open, 30.0, 0.0)
+                                .clicked()
+                                && is_picture(path)
+                            {
+                                self.image_viewer = Some(ImageViewer {
+                                    file: path.display().to_string(),
+                                    uri: uri.clone(),
+                                    zoom: 1.0,
+                                    offset: egui::Vec2::ZERO,
+                                });
+                            }
+                            if theme::glyph_button(
+                                &mut tools,
+                                icon::TRASH,
+                                t.attachment_remove,
+                                30.0,
+                                0.0,
+                            )
+                            .clicked()
+                            {
+                                remove = Some(index);
+                            }
+                        }
+                    }
+                });
+            });
+        if let Some(index) = remove {
+            let path = self.staged.remove(index);
+            self.staged_previews.remove(&path);
         }
     }
 
@@ -1853,7 +2047,7 @@ impl App {
                         } else if !grouped && index > 0 {
                             ui.add_space(12.0);
                         }
-                        self.chat_row(ui, entry, grouped, snapshot.as_ref());
+                        self.chat_row(ui, index, entry, grouped, snapshot.as_ref());
                     }
                 });
             });
@@ -1876,12 +2070,47 @@ impl App {
                     ChatFile::Ready {
                         uri, picture: true, ..
                     } => {
-                        ui.add(
-                            egui::Image::new(uri)
-                                .max_height(CHAT_PICTURE_MAX.y)
-                                .max_width(CHAT_PICTURE_MAX.x.min(ui.available_width()))
-                                .corner_radius(6),
-                        );
+                        let picture = ui
+                            .add(
+                                egui::Image::new(uri.clone())
+                                    .max_height(CHAT_PICTURE_MAX.y)
+                                    .max_width(CHAT_PICTURE_MAX.x.min(ui.available_width()))
+                                    .corner_radius(6)
+                                    .sense(Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::ZoomIn);
+                        let cached = match self.chat_file(file.channel_id, file.path()) {
+                            ChatFile::Ready { file, .. } => file,
+                            _ => String::new(),
+                        };
+                        if picture.clicked() {
+                            self.image_viewer = Some(ImageViewer {
+                                file: cached.clone(),
+                                uri: uri.clone(),
+                                zoom: 1.0,
+                                offset: egui::Vec2::ZERO,
+                            });
+                        }
+                        egui::Popup::context_menu(&picture).show(|ui| {
+                            ui.set_width(190.0);
+                            if peer::menu_item(ui, icon::MAGNIFYING_GLASS, t.image_open).clicked() {
+                                self.image_viewer = Some(ImageViewer {
+                                    file: cached.clone(),
+                                    uri: uri.clone(),
+                                    zoom: 1.0,
+                                    offset: egui::Vec2::ZERO,
+                                });
+                                ui.close();
+                            }
+                            if peer::menu_item(ui, icon::COPY, t.image_copy).clicked() {
+                                copy_picture(ui.ctx(), &cached);
+                                ui.close();
+                            }
+                            if peer::menu_item(ui, icon::DOWNLOAD, t.image_save).clicked() {
+                                save_picture(&cached);
+                                ui.close();
+                            }
+                        });
                     }
                     ChatFile::Loading => {
                         ui.label(
@@ -1942,16 +2171,24 @@ impl App {
     fn chat_row(
         &mut self,
         ui: &mut egui::Ui,
+        index: usize,
         entry: &Entry,
         grouped: bool,
         snapshot: Option<&Snapshot>,
     ) {
         let t = self.t;
         let segments = ts6_bridge::attachments::parse(&entry.text);
-        let display = display_text(&segments);
+        let display =
+            official_attachment(&entry.text, t).unwrap_or_else(|| display_text(&segments));
         let (quote, body) = split_quote(&display);
         // Reserved under the row, filled once we know it is hovered.
         let highlight = ui.painter().add(egui::Shape::Noop);
+        let menu_id = ui.scope_id().with(("chat-row", index));
+        let row_area = ui
+            .ctx()
+            .data(|d| d.get_temp::<Rect>(menu_id))
+            .unwrap_or(Rect::NOTHING);
+        let row_hit = ui.interact(row_area, menu_id, Sense::click());
         let row = ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CHAT_GAP;
             if grouped {
@@ -2037,13 +2274,6 @@ impl App {
                 }
             });
         });
-        let menu_id = ui.scope_id().with((
-            "chat-row",
-            entry.from_id,
-            &entry.author,
-            entry.time,
-            &entry.text,
-        ));
         // The whole line is one target: the chat column plus a small margin
         // on each side, and half the gap above and below.
         let column = ui.max_rect();
@@ -2051,7 +2281,10 @@ impl App {
             column.left() - 8.0..=column.right() + 8.0,
             row.response.rect.top() - 3.0..=row.response.rect.bottom() + 3.0,
         );
-        let response = ui.interact(area, menu_id, Sense::click());
+        // Registered under the row's widgets would steal the pictures' clicks,
+        // so the hit area is taken from last frame and added first (below).
+        ui.ctx().data_mut(|d| d.insert_temp(menu_id, area));
+        let response = row_hit;
         let reply = |app: &mut Self| {
             let line: String = body.lines().next().unwrap_or("").chars().take(80).collect();
             app.chat_reply = Some((entry.author.clone(), line));
@@ -2090,6 +2323,99 @@ impl App {
     }
 }
 
+/// Saves a pasted picture as `imagem.png` in a folder of its own, so the
+/// name others see is a plain one.
+/// shortcut: the temporary file is left for the OS to clean, since the bridge
+/// reads it later; delete it on the upload result if it matters.
+fn pasted_picture(picture: &egui::ColorImage) -> Option<std::path::PathBuf> {
+    let [width, height] = picture.size;
+    let image = image::RgbaImage::from_raw(
+        width as u32,
+        height as u32,
+        picture
+            .pixels
+            .iter()
+            .flat_map(|c| c.to_srgba_unmultiplied())
+            .collect(),
+    )?;
+    let dir = std::env::temp_dir().join(format!(
+        "mirage-paste-{}-{}",
+        crate::store::now_secs(),
+        crate::store::new_id()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("imagem.png");
+    image.save(&path).ok()?;
+    Some(path)
+}
+
+/// A small texture of a staged picture, decoded once; None for other files.
+fn staged_preview(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::TextureHandle> {
+    if !is_picture(path) {
+        return None;
+    }
+    let image = image::open(path).ok()?.thumbnail(320, 320).to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    Some(ctx.load_texture(
+        format!("staged-{}", path.display()),
+        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+/// Whether a staged file can be previewed as a picture, by extension.
+fn is_picture(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        )
+    })
+}
+
+/// Copies a cached chat picture to the clipboard as an image.
+fn copy_picture(ctx: &egui::Context, file: &str) {
+    if let Ok(image) = image::open(file) {
+        let rgba = image.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            rgba.as_raw(),
+        ));
+    }
+}
+
+/// Asks where to save a cached chat picture and copies it there.
+fn save_picture(file: &str) {
+    let name = std::path::Path::new(file)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imagem".into());
+    if let Some(target) = rfd::FileDialog::new().set_file_name(name).save_file() {
+        let _ = std::fs::copy(file, target);
+    }
+}
+
+/// The official TS6 client sends attachments as a JSON message pointing at
+/// the myTeamSpeak service, which needs an account Mirage does not have yet.
+/// Shows its name and size instead of the raw JSON.
+fn official_attachment(text: &str, t: &Strings) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    if value.get("msg_type")?.as_str()? != "ts.file.myts" {
+        return None;
+    }
+    let name = value
+        .get("file_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("arquivo");
+    let size = value
+        .get("file_size")
+        .and_then(|v| v.as_u64())
+        .map(|bytes| format!(" ({:.1} MB)", bytes as f64 / 1_000_000.0))
+        .unwrap_or_default();
+    Some(format!("📎 {name}{size}\n{}", t.chat_official_attachment))
+}
+
 /// Splits a leading "> quote" line off a message, as sent by replies.
 fn split_quote(text: &str) -> (Option<&str>, &str) {
     match text
@@ -2098,6 +2424,76 @@ fn split_quote(text: &str) -> (Option<&str>, &str) {
     {
         Some((quote, body)) => (Some(quote), body),
         None => (None, text),
+    }
+}
+
+// Picture viewer ---------------------------------------------------------------
+
+impl App {
+    /// A chat picture opened large over a dimmed app: wheel to zoom, drag to
+    /// pan, double-click to reset; copy, save and close on top.
+    fn image_viewer_window(&mut self, ctx: &egui::Context) {
+        let t = self.t;
+        let Some(view) = self.image_viewer.as_mut() else {
+            return;
+        };
+        let mut close = false;
+        let screen = ctx.content_rect();
+        let modal = egui::Modal::new(egui::Id::unique("image-viewer"))
+            .frame(Frame::NONE)
+            .backdrop_color(Color32::from_black_alpha(210))
+            .show(ctx, |ui| {
+                let stage = screen.shrink2(vec2(48.0, 64.0));
+                let (_, response) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
+                if response.dragged() {
+                    view.offset += response.drag_delta();
+                }
+                if response.double_clicked() {
+                    view.zoom = 1.0;
+                    view.offset = egui::Vec2::ZERO;
+                }
+                let scroll = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta).y);
+                if scroll != 0.0 {
+                    view.zoom = (view.zoom * (1.0 + scroll * 0.002)).clamp(0.5, 8.0);
+                }
+                let fitted = egui::Image::new(view.uri.clone())
+                    .load_for_size(ui.ctx(), stage.size())
+                    .ok()
+                    .and_then(|poll| poll.size())
+                    .map(|size| {
+                        let fit = (stage.width() / size.x)
+                            .min(stage.height() / size.y)
+                            .min(1.0);
+                        size * fit
+                    })
+                    .unwrap_or(stage.size() * 0.5);
+                let rect = Rect::from_center_size(stage.center() + view.offset, fitted * view.zoom);
+                egui::Image::new(view.uri.clone()).paint_at(ui, rect);
+
+                // Toolbar, top right.
+                let mut bar = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(Rect::from_min_size(
+                            pos2(screen.right() - 168.0, screen.top() + 16.0),
+                            vec2(152.0, 36.0),
+                        ))
+                        .layout(Layout::right_to_left(Align::Center)),
+                );
+                bar.spacing_mut().item_spacing.x = 8.0;
+                if theme::glyph_button(&mut bar, icon::X, t.close, 32.0, 0.0).clicked() {
+                    close = true;
+                }
+                if theme::glyph_button(&mut bar, icon::DOWNLOAD, t.image_save, 32.0, 0.0).clicked()
+                {
+                    save_picture(&view.file);
+                }
+                if theme::glyph_button(&mut bar, icon::COPY, t.image_copy, 32.0, 0.0).clicked() {
+                    copy_picture(bar.ctx(), &view.file);
+                }
+            });
+        if close || modal.should_close() {
+            self.image_viewer = None;
+        }
     }
 }
 
@@ -2472,7 +2868,7 @@ mod tests {
 
 #[cfg(test)]
 mod reply_tests {
-    use super::{invite_link, loss_label, split_quote};
+    use super::{invite_link, loss_label, official_attachment, split_quote};
 
     #[test]
     fn invite_links_point_at_the_channel_and_never_carry_secrets() {
@@ -2494,6 +2890,16 @@ mod reply_tests {
     fn packet_loss_reads_as_count_and_share() {
         assert_eq!(loss_label(0, 0), "0 (0.0%)");
         assert_eq!(loss_label(12, 3000), "12 (0.4%)");
+    }
+
+    #[test]
+    fn official_client_attachments_show_their_name() {
+        let t = &crate::strings::PT;
+        let json = r#"{"msg_type":"ts.file.myts","file_id":"x","file_name":"cat.gif","file_size":693210,"v2":true}"#;
+        let shown = official_attachment(json, t).unwrap();
+        assert!(shown.starts_with("📎 cat.gif (0.7 MB)"), "{shown}");
+        assert_eq!(official_attachment("plain text", t), None);
+        assert_eq!(official_attachment(r#"{"msg_type":"other"}"#, t), None);
     }
 
     #[test]
