@@ -182,7 +182,7 @@ with a CRLF-terminated offer, `streamsignaling`, `stopstream reason=1`.
 | Signaling state machine (start, join, refuse, leave, stop, deadlines, reset) | Unit-tested |
 | Worker, publisher and keyframe gating against a loopback `ts6-stream` viewer | Tested (synthetic units) |
 | Real monitor capture and hardware encoder through the worker to a loopback viewer | Passed once on one machine (ignored test, 61 RTP packets, counts only) |
-| Against a real TS6 server (`setupstream` accepted, `notifystreamstarted` for our own id) | Not run in this stage; earlier CLI runs only proved `setupstream` acceptance |
+| Against a real TS6 server (`setupstream` accepted, join request answered, signaling relayed) | Passed once on a loopback TS6 server with `scripts/check_share_session.py`: the sharer reached `live` and a second bridge's native viewer reached `playing`. Both ends are this project's own code, so it says nothing about the official client |
 | Official TS6 client as viewer (ICE/DTLS, H.264 profile, re-offers) | Not verified; the native viewer already fails against the official client, so expect the same class of problem |
 | Cross-machine, NAT, STUN/TURN | Not verified; peers bind every interface and use no STUN server |
 | Stream audio | Not implemented (`audio=0`) |

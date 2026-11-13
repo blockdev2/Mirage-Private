@@ -200,6 +200,14 @@ ignored `.audit-local/chat-attachments`. Exit code 2 means the server denied
 uploads, so the success path was not verified. Unit tests for the harnesses
 run with `python -m unittest discover -s scripts -p "test_*.py"`.
 
+## Screen share against a server
+
+`python scripts/check_share_session.py --binary <ts6-bridge.exe> --server-port PORT`
+starts two isolated bridges against a trusted loopback server you run: one
+shares its primary monitor, the other watches it. It passes when the sharer is
+`live` and the viewer is `playing`. It needs a hardware H.264 encoder and a
+monitor, and does not involve the official client.
+
 ## Driving the native window without a person
 
 Debug builds of `ts6-desktop` run a scripted plan from `MIRAGE_DEV_PLAN` (steps
