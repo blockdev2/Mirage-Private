@@ -7,9 +7,9 @@
 //! own command channel, which the session loop already polls. No new receiver
 //! competes with the session poll.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -22,6 +22,8 @@ use ts6_core::{Session, Snapshot};
 /// Transfers in flight at once; the rest wait for the next state change.
 const MAX_IN_FLIGHT: usize = 4;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(20);
+/// A missing picture is requested again after this long.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Cached files untouched for this long are removed at startup.
 const CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
 
@@ -62,8 +64,10 @@ pub struct Media {
     avatars: HashMap<String, PathBuf>,
     server_icon: Option<PathBuf>,
     in_flight: HashMap<u16, Target>,
-    /// Targets already tried in this session, so a failure is not retried in a loop.
-    attempted: HashSet<Target>,
+    /// When each target may be tried again, so a failure is retried later
+    /// instead of in a loop or never.
+    /// shortcut: retries only run on the next state change, add a timer if photos stay missing.
+    attempted: HashMap<Target, Instant>,
     /// Bytes waiting for the server to accept an upload, by handle.
     uploads: HashMap<u16, (Vec<u8>, String)>,
     /// Chat attachments waiting for the server to accept their upload.
@@ -126,7 +130,7 @@ impl Media {
             avatars: HashMap::new(),
             server_icon: None,
             in_flight: HashMap::new(),
-            attempted: HashSet::new(),
+            attempted: HashMap::new(),
             uploads: HashMap::new(),
             chat_uploads: HashMap::new(),
             chat_downloads: HashMap::new(),
@@ -232,11 +236,17 @@ impl Media {
             if self.in_flight.len() >= MAX_IN_FLIGHT {
                 break;
             }
-            if self.attempted.contains(&target) || self.in_flight.values().any(|t| t == &target) {
+            let now = Instant::now();
+            let waiting = self
+                .attempted
+                .get(&target)
+                .is_some_and(|retry| now < *retry);
+            if waiting || self.in_flight.values().any(|t| t == &target) {
                 continue;
             }
+            // Longer than a transfer can take, so a slow one is not doubled.
+            self.attempted.insert(target.clone(), now + RETRY_AFTER);
             if let Target::Web { url, .. } = &target {
-                self.attempted.insert(target.clone());
                 fetch_web(url.clone(), target.clone(), &dir, done);
                 continue;
             }
@@ -246,10 +256,8 @@ impl Media {
                 Target::Web { .. } => None,
             };
             let Some(remote) = remote else {
-                self.attempted.insert(target);
                 continue;
             };
-            self.attempted.insert(target.clone());
             match session.request_download(&remote) {
                 Ok(handle) => {
                     self.in_flight.insert(handle, target);
