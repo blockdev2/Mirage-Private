@@ -317,7 +317,10 @@ fn membership_cue(
         .map(|c| c.id)
         .collect();
     let previous = members.replace((own.channel_id, now.clone()));
-    let (channel, before) = previous?;
+    // The first snapshot of a session: we just entered the call.
+    let Some((channel, before)) = previous else {
+        return Some(Cue::Join);
+    };
     if channel != own.channel_id {
         return Some(Cue::Join);
     }
@@ -659,6 +662,10 @@ async fn session_task(
             other => other,
         };
         if let Some(command) = pending {
+            // A new or ended session: the next snapshot is our own join.
+            if matches!(command, Command::Connect { .. } | Command::Disconnect) {
+                members = None;
+            }
             apply_command(
                 command,
                 &mut session,
@@ -834,8 +841,11 @@ async fn apply_command(
 
         Command::Disconnect => {
             if let Some(active) = session.take() {
+                // Our own leave sound; playback stays up until it has played.
+                engine.play_cue(ts6_audio::cues::Cue::Leave);
                 let _ = active.disconnect().await;
                 log(events, "info", "disconnected");
+                tokio::time::sleep(std::time::Duration::from_millis(450)).await;
             }
             engine.stop();
             media.reset();
@@ -1418,10 +1428,10 @@ mod cue_tests {
     #[test]
     fn joins_and_leaves_in_our_channel_sound() {
         let mut members = None;
-        // First snapshot of a session is silent.
+        // We entered the call ourselves.
         assert_eq!(
             membership_cue(&mut members, &snapshot(&[(1, 5, true)])),
-            None
+            Some(Cue::Join)
         );
         // Someone in another channel does not count.
         assert_eq!(
