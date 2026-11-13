@@ -52,6 +52,22 @@ jobs:
             Mirage-windows-x64.zip.sha256
           retention-days: 30
           if-no-files-found: error
+      # The installer is packed on every run so a broken packaging step shows up
+      # before a release. The tool version must match the `velopack` crate.
+      - name: Pack the installer
+        shell: pwsh
+        run: |
+          dotnet tool install --global vpk --version 1.3.39-g8d2844f
+          "$HOME/.dotnet/tools" | Add-Content $env:GITHUB_PATH
+          $env:PATH += ";$HOME/.dotnet/tools"
+          $version = (Select-String -Path client/Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          ./scripts/pack_installer.ps1 -Version $version
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: Mirage-installer
+          path: dist/installer/*
+          retention-days: 30
+          if-no-files-found: error
   nightly:
     name: Refresh nightly pre-release
     needs: windows

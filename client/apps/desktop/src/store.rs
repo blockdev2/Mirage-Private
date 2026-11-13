@@ -282,6 +282,8 @@ pub struct Data {
     /// The server keeps no history for classic channel chat, so this is the
     /// only place it can come from. Keyed by `transcript_key`.
     pub transcripts: std::collections::HashMap<String, Vec<SavedMessage>>,
+    /// Do not look for an update when the app opens (the Updates page still can).
+    pub skip_update_check: bool,
 }
 
 /// One chat message as kept on disk.

@@ -1,4 +1,5 @@
-//! The settings window: your profile on top, then audio.
+//! The settings window: a navigation rail on the left and one page at a time
+//! on the right (profile, audio, updates, about).
 //!
 //! Your photo and name are shown large and edited where they are: click the
 //! photo to pick a new one, click the name to type a new one. Both apply at
@@ -6,7 +7,7 @@
 
 use egui::{
     pos2, vec2, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Layout, Margin, Rect,
-    RichText, Sense, Stroke, Ui,
+    RichText, Sense, Stroke, Ui, UiBuilder,
 };
 
 use super::App;
@@ -17,15 +18,30 @@ use crate::store::{
 };
 use crate::strings::Strings;
 use crate::theme::{self, icon, Tone};
+use crate::updater::UpdateState;
 
-const WINDOW_WIDTH: f32 = 520.0;
-const AVATAR_SIZE: f32 = 76.0;
-/// Width of the label column of a settings row.
-const LABEL_WIDTH: f32 = 96.0;
+/// The window's size on a roomy screen; it shrinks to fit a smaller one.
+const WINDOW_WIDTH: f32 = 940.0;
+const WINDOW_HEIGHT: f32 = 660.0;
+const RAIL_WIDTH: f32 = 220.0;
+const AVATAR_SIZE: f32 = 84.0;
+/// Width of the control side of a settings row.
+const CONTROL_WIDTH: f32 = 300.0;
 
-/// State of the profile block that lives only while the window is open.
+/// The pages of the window, in the order of the rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Page {
+    #[default]
+    Profile,
+    Audio,
+    Updates,
+    About,
+}
+
+/// State of the settings window that lives only while it is open.
 #[derive(Default)]
 pub struct ProfileEdit {
+    pub page: Page,
     /// The name being typed, while the name is being edited.
     pub name: Option<String>,
     /// Focus the name field on its first frame.
@@ -33,6 +49,8 @@ pub struct ProfileEdit {
     pub photo_error: Option<AvatarError>,
     /// A chosen photo waiting to be framed and confirmed.
     pub crop: Option<PhotoCrop>,
+    /// The updates page already looked once since the window opened.
+    pub updates_checked: bool,
 }
 
 /// The crop editor's state: the full image (cropped from on apply), a
@@ -51,30 +69,32 @@ const CROP_CIRCLE: f32 = 360.0;
 const CROP_MAX_ZOOM: f32 = 4.0;
 
 impl App {
+    /// Opens the settings window on a page.
+    pub(super) fn open_settings(&mut self, page: Page) {
+        self.show_settings = true;
+        self.profile_edit.page = page;
+    }
+
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
         }
-        let max_height = (ctx.content_rect().height() - 56.0).max(240.0);
-        // The window is the sidebar's color, the sections are the same cards
-        // the rest of the app uses, so it reads as part of the app and not as
-        // a foreign panel laid over it. The soft, long shadow lifts it off the
-        // dimmed page without a glow.
-        let frame = Frame::new()
-            .fill(theme::SIDEBAR)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(CornerRadius::same(14))
-            .shadow(egui::Shadow {
-                offset: [0, 18],
-                blur: 48,
-                spread: 0,
-                color: Color32::from_black_alpha(150),
-            })
-            .inner_margin(Margin::symmetric(24, 22));
+        let shadow = egui::Shadow {
+            offset: [0, 18],
+            blur: 48,
+            spread: 0,
+            color: Color32::from_black_alpha(150),
+        };
 
         // Framing a new photo gets its own, larger window in place of the
-        // settings, so the scroll wheel zooms instead of scrolling the list.
+        // settings, so the scroll wheel zooms instead of scrolling the page.
         if self.profile_edit.crop.is_some() {
+            let frame = Frame::new()
+                .fill(theme::SIDEBAR)
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(CornerRadius::same(14))
+                .shadow(shadow)
+                .inner_margin(Margin::symmetric(24, 22));
             let modal = egui::Modal::new(Id::unique("photo-crop"))
                 .frame(frame)
                 .backdrop_color(Color32::from_black_alpha(140))
@@ -88,50 +108,157 @@ impl App {
             return;
         }
 
+        let screen = ctx.content_rect();
+        let size = vec2(
+            WINDOW_WIDTH.min(screen.width() - 48.0).max(640.0),
+            WINDOW_HEIGHT.min(screen.height() - 56.0).max(420.0),
+        );
+        // The content pane is the page background; the rail is the sidebar's
+        // color, so the window reads as part of the app and not as a panel
+        // laid over it.
+        let frame = Frame::new()
+            .fill(theme::BG)
+            .stroke(Stroke::new(1.0, theme::BORDER))
+            .corner_radius(CornerRadius::same(14))
+            .shadow(shadow)
+            .inner_margin(Margin::ZERO);
         let modal = egui::Modal::new(Id::unique("settings"))
             .frame(frame)
             .backdrop_color(Color32::from_black_alpha(140))
             .show(ctx, |ui| {
-                ui.set_width(WINDOW_WIDTH);
-                self.settings_header(ui);
-                ui.add_space(18.0);
-                // A solid bar that is always drawn, so it is plain that the
-                // list goes on below.
-                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-                ui.spacing_mut().scroll.bar_width = 7.0;
-                egui::ScrollArea::vertical()
-                    .max_height(max_height - 96.0)
-                    .auto_shrink([false, true])
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                    .show(ui, |ui| {
-                        // The bar sits in its own column to the right.
-                        ui.spacing_mut().item_spacing.y = 12.0;
-                        ui.set_width(ui.available_width() - 10.0);
-                        section(ui, |ui| self.profile_block(ui));
-                        section(ui, |ui| self.audio_block(ui));
-                        self.footer_block(ui);
-                    });
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                let rail = Rect::from_min_size(rect.min, vec2(RAIL_WIDTH, size.y));
+                ui.painter().rect_filled(
+                    rail,
+                    CornerRadius {
+                        nw: 14,
+                        sw: 14,
+                        ne: 0,
+                        se: 0,
+                    },
+                    theme::SIDEBAR,
+                );
+                ui.painter().vline(
+                    rail.right(),
+                    rail.y_range(),
+                    Stroke::new(1.0, theme::BORDER_SOFT),
+                );
+                let mut rail_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(rail.shrink2(vec2(14.0, 24.0)))
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                self.settings_rail(&mut rail_ui);
+
+                let content =
+                    Rect::from_min_max(pos2(rail.right() + 36.0, rect.top() + 26.0), rect.max)
+                        .shrink2(vec2(0.0, 0.0));
+                let content = Rect::from_min_max(
+                    content.min,
+                    pos2(content.max.x - 30.0, content.max.y - 20.0),
+                );
+                let mut content_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(content)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                self.settings_page(&mut content_ui);
             });
 
         // Escape first cancels an open name edit; it only closes the window
         // when nothing is being edited.
         if modal.should_close() && self.profile_edit.name.is_none() {
-            self.show_settings = false;
-            self.profile_edit = ProfileEdit::default();
+            self.close_settings();
         }
     }
 
-    fn settings_header(&mut self, ui: &mut Ui) {
+    pub(super) fn close_settings(&mut self) {
+        self.show_settings = false;
+        self.profile_edit = ProfileEdit::default();
+    }
+
+    /// The left column: the title, the pages and the version at the bottom.
+    fn settings_rail(&mut self, ui: &mut Ui) {
         let t = self.t;
+        ui.label(RichText::new(t.settings_title).font(FontId::new(20.0, theme::semibold())));
+        ui.add_space(22.0);
+        let news = matches!(
+            self.updater.state(),
+            UpdateState::Available(_) | UpdateState::Ready(_)
+        );
+        let pages = [
+            (Page::Profile, t.page_profile),
+            (Page::Audio, t.page_audio),
+            (Page::Updates, t.page_updates),
+            (Page::About, t.page_about),
+        ];
+        ui.spacing_mut().item_spacing.y = 4.0;
+        for (page, label) in pages {
+            let dot = page == Page::Updates && news;
+            if rail_item(ui, label, self.profile_edit.page == page, dot).clicked() {
+                self.profile_edit.page = page;
+            }
+        }
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} {}",
+                    t.brand_name,
+                    self.updater.current_version()
+                ))
+                .small()
+                .color(theme::TEXT_3),
+            );
+        });
+    }
+
+    /// The right column: the page's title and one line about it, then the
+    /// page, which scrolls on its own when it is taller than the window.
+    fn settings_page(&mut self, ui: &mut Ui) {
+        let t = self.t;
+        let page = self.profile_edit.page;
+        let (title, lead) = match page {
+            Page::Profile => (t.page_profile, t.lead_profile),
+            Page::Audio => (t.page_audio, t.lead_audio),
+            Page::Updates => (t.page_updates, t.lead_updates),
+            Page::About => (t.page_about, t.lead_about),
+        };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(t.settings_title).font(FontId::new(22.0, theme::semibold())));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(title).font(FontId::new(28.0, theme::semibold())));
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if close_button(ui, t.close).clicked() {
-                    self.show_settings = false;
-                    self.profile_edit = ProfileEdit::default();
+                    self.close_settings();
                 }
             });
         });
+        ui.add_space(2.0);
+        ui.label(RichText::new(lead).size(13.5).color(theme::TEXT_2));
+        ui.add_space(10.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("settings-page", page as u8))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Room for the scroll bar, so it never covers a control.
+                ui.set_width(ui.available_width() - 14.0);
+                match page {
+                    Page::Profile => self.profile_page(ui),
+                    Page::Audio => self.audio_page(ui),
+                    Page::Updates => self.updates_page(ui),
+                    Page::About => self.about_page(ui),
+                }
+                ui.add_space(12.0);
+            });
+    }
+
+    fn profile_page(&mut self, ui: &mut Ui) {
+        ui.add_space(14.0);
+        self.profile_block(ui);
+        ui.add_space(18.0);
+        ui.label(
+            RichText::new(self.t.profile_note)
+                .size(13.0)
+                .color(theme::TEXT_3),
+        );
     }
 
     // Profile ---------------------------------------------------------------
@@ -433,134 +560,143 @@ impl App {
 
     // Audio -----------------------------------------------------------------
 
-    fn audio_block(&mut self, ui: &mut Ui) {
+    fn audio_page(&mut self, ui: &mut Ui) {
         let t = self.t;
         let level = self.audio.as_ref().and_then(|a| a.input_level_db);
         let transmitting = self.audio.as_ref().is_some_and(|a| a.transmitting);
         let mut changed_live = false;
+        let mut refresh = false;
+        let mut apply = false;
         let audio = &mut self.store.data.audio;
 
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(t.audio_section).font(FontId::new(16.0, theme::semibold())));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        group(ui, t.group_devices, |ui| {
+            setting_row(ui, t.enable_audio, None, |ui| {
                 theme::toggle(ui, &mut audio.enabled, t.enable_audio);
-                ui.label(RichText::new(t.enable_audio).color(theme::TEXT_2));
+            });
+            ui.add_enabled_ui(audio.enabled, |ui| {
+                setting_row(ui, t.input, None, |ui| {
+                    device_select(
+                        ui,
+                        t,
+                        "input",
+                        &mut audio.input_device,
+                        &self.devices.inputs,
+                    );
+                });
+                setting_row(ui, t.output, None, |ui| {
+                    device_select(
+                        ui,
+                        t,
+                        "output",
+                        &mut audio.output_device,
+                        &self.devices.outputs,
+                    );
+                });
+            });
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if theme::button(ui, t.apply_audio, None, Tone::Primary, 150.0).clicked() {
+                    apply = true;
+                }
+                if theme::button(ui, t.refresh_devices, None, Tone::Secondary, 200.0).clicked() {
+                    refresh = true;
+                }
             });
         });
-        ui.add_space(14.0);
 
         ui.add_enabled_ui(audio.enabled, |ui| {
-            device_row(
-                ui,
-                t,
-                t.input,
-                "input",
-                &mut audio.input_device,
-                &self.devices.inputs,
-            );
-            device_row(
-                ui,
-                t,
-                t.output,
-                "output",
-                &mut audio.output_device,
-                &self.devices.outputs,
-            );
-            ui.add_space(14.0);
-
-            sub_heading(ui, t.transmit_mode);
-            let modes = [
-                (TransmitMode::VoiceActivation, t.mode_voice),
-                (TransmitMode::PushToTalk, t.mode_ptt),
-                (TransmitMode::Continuous, t.mode_continuous),
-            ];
-            let selected = modes
-                .iter()
-                .position(|(mode, _)| *mode == audio.mode)
-                .unwrap_or(0);
-            if let Some(index) = segmented(ui, &modes.map(|(_, label)| label), selected) {
-                audio.mode = modes[index].0;
-            }
-            ui.add_space(12.0);
-            match audio.mode {
-                TransmitMode::VoiceActivation => {
-                    sub_heading(ui, t.vad_threshold);
-                    level_meter(ui, level, audio.threshold_db, transmitting);
-                    ui.add_space(6.0);
-                    ui.spacing_mut().slider_width = ui.available_width() - 110.0;
-                    let slider = ui.add(
-                        egui::Slider::new(&mut audio.threshold_db, VAD_MIN_DB..=VAD_MAX_DB)
-                            .suffix(" dB")
-                            .step_by(1.0),
-                    );
-                    changed_live |= slider.changed();
-                    ui.label(RichText::new(t.vad_hint).small().color(theme::TEXT_3));
+            group(ui, t.transmit_mode, |ui| {
+                let modes = [
+                    (TransmitMode::VoiceActivation, t.mode_voice),
+                    (TransmitMode::PushToTalk, t.mode_ptt),
+                    (TransmitMode::Continuous, t.mode_continuous),
+                ];
+                let selected = modes
+                    .iter()
+                    .position(|(mode, _)| *mode == audio.mode)
+                    .unwrap_or(0);
+                if let Some(index) = segmented(ui, &modes.map(|(_, label)| label), selected) {
+                    audio.mode = modes[index].0;
                 }
-                TransmitMode::PushToTalk => {
-                    sub_heading(ui, t.ptt_key);
-                    theme::input_frame().show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut audio.ptt)
-                                .hint_text("F13")
-                                .frame(Frame::NONE)
-                                .desired_width(f32::INFINITY),
+                ui.add_space(14.0);
+                match audio.mode {
+                    TransmitMode::VoiceActivation => {
+                        sub_heading(ui, t.vad_threshold);
+                        level_meter(ui, level, audio.threshold_db, transmitting);
+                        ui.add_space(6.0);
+                        ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(120.0);
+                        let slider = ui.add(
+                            egui::Slider::new(&mut audio.threshold_db, VAD_MIN_DB..=VAD_MAX_DB)
+                                .suffix(" dB")
+                                .step_by(1.0),
                         );
-                    });
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(t.ptt_hint).small().color(theme::TEXT_3));
+                        changed_live |= slider.changed();
+                        ui.label(RichText::new(t.vad_hint).small().color(theme::TEXT_3));
+                    }
+                    TransmitMode::PushToTalk => {
+                        sub_heading(ui, t.ptt_key);
+                        theme::input_frame().show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut audio.ptt)
+                                    .hint_text("F13")
+                                    .frame(Frame::NONE)
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(t.ptt_hint).small().color(theme::TEXT_3));
+                    }
+                    TransmitMode::Continuous => {}
                 }
-                TransmitMode::Continuous => {}
-            }
+            });
 
-            ui.add_space(16.0);
-            sub_heading(ui, t.noise_title);
-            let before = audio.noise;
-            noise_choices(ui, t, &mut audio.noise);
-            // Applies live as well: no microphone restart.
-            changed_live |= audio.noise != before;
-
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(t.monitor_title).color(theme::TEXT));
-                    ui.label(RichText::new(t.monitor_hint).small().color(theme::TEXT_3));
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            group(ui, t.group_voice, |ui| {
+                sub_heading(ui, t.noise_title);
+                let before = audio.noise;
+                noise_choices(ui, t, &mut audio.noise);
+                // Applies live as well: no microphone restart.
+                changed_live |= audio.noise != before;
+                ui.add_space(8.0);
+                setting_row(ui, t.monitor_title, Some(t.monitor_hint), |ui| {
                     changed_live |=
                         theme::toggle(ui, &mut audio.monitor, t.monitor_title).changed();
                 });
             });
         });
 
-        if changed_live {
+        if refresh {
+            self.send(Command::Devices);
+        }
+        if changed_live || apply {
             self.apply_audio();
         }
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if theme::button(ui, t.apply_audio, None, Tone::Primary, 150.0).clicked() {
-                self.apply_audio();
-            }
-            if theme::button(ui, t.refresh_devices, None, Tone::Secondary, 190.0).clicked() {
-                self.send(Command::Devices);
-            }
-        });
     }
 
-    fn footer_block(&mut self, ui: &mut Ui) {
+    // About -----------------------------------------------------------------
+
+    fn about_page(&mut self, ui: &mut Ui) {
         let t = self.t;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(t.show_diagnostics).color(theme::TEXT_2));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        group(ui, t.group_about, |ui| {
+            setting_row(ui, t.about_version, None, |ui| {
+                ui.label(RichText::new(self.updater.current_version()).color(theme::TEXT_2));
+            });
+            setting_row(ui, t.about_service, None, |ui| {
+                let service = match &self.bridge_version {
+                    Some(version) => t.bridge_version(version),
+                    None => t.bridge_offline_short.to_string(),
+                };
+                ui.label(RichText::new(service).color(theme::TEXT_2));
+            });
+            setting_row(ui, t.about_license, None, |ui| {
+                ui.label(RichText::new(t.about_license_value).color(theme::TEXT_2));
+            });
+        });
+        group(ui, t.diagnostics, |ui| {
+            setting_row(ui, t.show_diagnostics, None, |ui| {
                 theme::toggle(ui, &mut self.show_logs, t.show_diagnostics);
             });
         });
-        let version = match &self.bridge_version {
-            Some(v) => t.bridge_version(v),
-            None => t.bridge_offline_short.to_string(),
-        };
-        ui.add_space(4.0);
-        ui.label(RichText::new(version).small().color(theme::TEXT_3));
     }
 }
 
@@ -600,20 +736,6 @@ fn dim_outside_circle(painter: &egui::Painter, stage: Rect, radius: f32) {
         }
     }
     painter.add(mesh);
-}
-
-/// One block of the window: the same card as the app's content blocks, with a
-/// slightly rounder corner because the window around it is larger.
-fn section(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
-    Frame::new()
-        .fill(theme::SURFACE)
-        .stroke(Stroke::new(1.0, theme::BORDER_SOFT))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::same(18))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add_contents(ui);
-        });
 }
 
 /// Small muted text that lights up under the pointer.
@@ -903,37 +1025,6 @@ fn noise_choices(ui: &mut Ui, t: &Strings, current: &mut NoiseLevel) {
         });
 }
 
-/// Label on the left, selector filling the rest of the row.
-fn device_row(
-    ui: &mut Ui,
-    t: &Strings,
-    label: &str,
-    salt: &str,
-    selected: &mut String,
-    devices: &[Device],
-) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            vec2(LABEL_WIDTH, 28.0),
-            egui::Label::new(RichText::new(label).color(theme::TEXT_2)),
-        );
-        let shown = if selected.is_empty() {
-            t.system_default.to_string()
-        } else {
-            selected.clone()
-        };
-        egui::ComboBox::from_id_salt(salt)
-            .selected_text(shown)
-            .width(ui.available_width() - 14.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(selected, String::new(), t.system_default);
-                for device in devices {
-                    ui.selectable_value(selected, device.name.clone(), &device.name);
-                }
-            });
-    });
-}
-
 /// Horizontal microphone level bar with the voice activation threshold marked.
 /// Green while transmitting, so the user sees exactly when voice goes out.
 fn level_meter(ui: &mut Ui, level_db: Option<f32>, threshold_db: f32, transmitting: bool) {
@@ -956,4 +1047,119 @@ fn level_meter(ui: &mut Ui, level_db: Option<f32>, threshold_db: f32, transmitti
         [pos2(x, rect.top() - 3.0), pos2(x, rect.bottom() + 3.0)],
         Stroke::new(2.0, theme::TEXT),
     );
+}
+
+/// A titled group of rows. Groups are told apart by space and a heading, not
+/// by boxes: a settings page is a list, and a stack of identical cards hides
+/// that.
+pub(super) fn group(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
+    ui.add_space(24.0);
+    ui.label(RichText::new(title).font(FontId::new(15.0, theme::semibold())));
+    ui.add_space(6.0);
+    add_contents(ui);
+}
+
+/// One setting: its name (and a hint under it) on the left, the control on the
+/// right, a hairline underneath.
+pub(super) fn setting_row(
+    ui: &mut Ui,
+    label: &str,
+    hint: Option<&str>,
+    control: impl FnOnce(&mut Ui),
+) {
+    let width = ui.available_width();
+    let top = ui.cursor().top();
+    ui.horizontal(|ui| {
+        ui.set_min_height(54.0);
+        ui.vertical(|ui| {
+            ui.set_max_width((width - CONTROL_WIDTH - 24.0).max(160.0));
+            // Centered on the control when it is one line, as with the hint.
+            ui.add_space(if hint.is_some() { 8.0 } else { 17.0 });
+            ui.label(RichText::new(label).size(14.0).color(theme::TEXT));
+            if let Some(hint) = hint {
+                ui.label(RichText::new(hint).size(12.5).color(theme::TEXT_3));
+            }
+            ui.add_space(if hint.is_some() { 8.0 } else { 17.0 });
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), control);
+    });
+    let bottom = ui.cursor().top();
+    let _ = top;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        bottom,
+        Stroke::new(1.0, theme::BORDER_SOFT),
+    );
+}
+
+/// A page name in the rail: quiet text, with a bar and a soft fill when it is
+/// the current page. `news` adds a small dot (an update is waiting).
+fn rail_item(ui: &mut Ui, label: &str, selected: bool, news: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    let amount = ui
+        .ctx()
+        .animate_bool_with_time(response.id, selected || response.hovered(), 0.12);
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, CornerRadius::same(8), theme::SURFACE_RAISED);
+        let bar = Rect::from_min_size(
+            rect.left_top() + vec2(0.0, rect.height() / 2.0 - 9.0),
+            vec2(3.0, 18.0),
+        );
+        painter.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
+    } else if amount > 0.0 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(8),
+            theme::SURFACE.gamma_multiply(amount),
+        );
+    }
+    painter.text(
+        pos2(rect.left() + 16.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::new(
+            14.0,
+            if selected {
+                theme::semibold()
+            } else {
+                theme::medium()
+            },
+        ),
+        if selected {
+            theme::TEXT
+        } else {
+            theme::lerp_color(theme::TEXT_2, theme::TEXT, amount)
+        },
+    );
+    if news {
+        painter.circle_filled(
+            pos2(rect.right() - 16.0, rect.center().y),
+            4.0,
+            theme::SUCCESS,
+        );
+    }
+    if response.has_focus() {
+        theme::focus_ring(painter, rect);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The device list as a drop-down of the control width.
+fn device_select(ui: &mut Ui, t: &Strings, salt: &str, selected: &mut String, devices: &[Device]) {
+    let shown = if selected.is_empty() {
+        t.system_default.to_string()
+    } else {
+        selected.clone()
+    };
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(shown)
+        .width(CONTROL_WIDTH - 24.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(selected, String::new(), t.system_default);
+            for device in devices {
+                ui.selectable_value(selected, device.name.clone(), &device.name);
+            }
+        });
 }

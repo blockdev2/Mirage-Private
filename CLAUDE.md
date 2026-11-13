@@ -21,6 +21,7 @@ See [README](README.md) and [current audit](docs/AUDIT.md) for limits and blocke
 - `ts6-stream`: native WebRTC publisher/viewer for TS6 streams; signaling-agnostic, not yet wired to the session.
 - `ts6-capture`: Windows monitor capture (WGC) -> GPU NV12 -> hardware H.264 (Media Foundation) -> Annex-B units; not yet wired to the session.
 - `client/apps/desktop`: native eframe/egui desktop frontend; embeds a bridge without static-file serving.
+- `installer/`, `scripts/pack_installer.ps1`, `.github/workflows/release.yml`: Velopack installer and releases; read [releasing](docs/RELEASING.md) first (public feed, `velopack` crate = `vpk` version, no tokens in the client).
 - `client/apps/ui`: React 19 + TypeScript 7 + Vite 8; wire types in `src/types.ts`.
 - `client/vendor/tsclientlib`: third-party workspace; read `client/UPSTREAM.md` before changes.
 - `recon/probe-ts6`: independent early probe, outside the main workspace.

@@ -210,6 +210,21 @@ Coordinates are egui points (screenshot pixels divided by the display scale).
 so the real profile is untouched, and only a loopback test server.
 The code is compiled out of release builds.
 
+## Installer and updates while developing
+
+- A build run from `cargo run` is not an installed copy, so the updater reports
+  "unavailable" (the page offers the downloads link). To see the other states
+  without a release, run a debug build with
+  `MIRAGE_DEV_UPDATE=available|uptodate|failed|checking|downloading`; it
+  scripts a fake backend (compiled out of release builds).
+- To exercise the real updater, pack two versions into a folder and install the
+  older one; see "Local end-to-end test" in [releasing](RELEASING.md), which
+  also lists the `vpk` environment variables that avoid Windows path-length and
+  NuGet lock problems.
+- `MIRAGE_UPDATE_URL` overrides where an installed app looks (a GitHub
+  repository URL or a local feed folder).
+- The `velopack` crate and `vpk` must be the same version.
+
 `python scripts/check_ping_latency.py --binary <ts6-bridge.exe> --server 127.0.0.1:PORT`
 connects one bridge to a loopback server you run and fails when the median
 reported ping exceeds 5 ms; a regression of the session tick (see `SESSION_TICK` in `ts6-bridge`) shows up as
