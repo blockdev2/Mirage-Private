@@ -199,3 +199,18 @@ upload files: `python scripts/check_chat_attachments.py --binary .audit-local/fu
 ignored `.audit-local/chat-attachments`. Exit code 2 means the server denied
 uploads, so the success path was not verified. Unit tests for the harnesses
 run with `python -m unittest discover -s scripts -p "test_*.py"`.
+
+## Driving the native window without a person
+
+Debug builds of `ts6-desktop` run a scripted plan from `MIRAGE_DEV_PLAN` (steps
+separated by `;`): `wait:SECS`, `connect:HOST:PORT`, `chat:TEXT`,
+`attach:PATH`, `hover:X,Y`, `click:X,Y`, `key:Escape`, `shot:NAME`, `quit`.
+Coordinates are egui points (screenshot pixels divided by the display scale).
+`MIRAGE_DEV_OUT` is the folder for the screenshots. Use an isolated `APPDATA`
+so the real profile is untouched, and only a loopback test server.
+The code is compiled out of release builds.
+
+`python scripts/check_ping_latency.py --binary <ts6-bridge.exe> --server 127.0.0.1:PORT`
+connects one bridge to a loopback server you run and fails when the median
+reported ping exceeds 5 ms; a regression of the session tick (see `SESSION_TICK` in `ts6-bridge`) shows up as
+tens of milliseconds there.

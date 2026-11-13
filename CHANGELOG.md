@@ -4,6 +4,11 @@ No tagged releases have been established in this checkout. Entries describe repo
 
 ## Unreleased
 
+- Native desktop: one sidebar for every screen. The connected server stays in a "Servidores" list with its channels folded under it, so the call no longer disappears on Inicio; the separate "Canais de voz" entry, the list/squares switch, the participant count and the three-dot menu are gone.
+- Native desktop: the Convidar button copies a `ts3server://` link; the status bar is one button (connection, call time that resets per channel, ping graph, lost packets and percentage); chat rows align and no longer shift while hovered; channel chat is kept per server and channel on this computer and shown again after a restart (`profiles.json`, 200 messages per channel, removed with the server's history).
+- Fix an inflated ping (80-100 ms instead of about 10 ms): replies were only read at the next 100 ms session wake-up, so the session now ticks every 10 ms. A vendored tsproto patch adds cumulative packet-loss counters (`client/patches/packet-loss-counts.patch`); `scripts/check_ping_latency.py` verifies the reported ping against a loopback server.
+- Debug builds of the desktop client accept a scripted test plan (`MIRAGE_DEV_PLAN`, see `docs/DEVELOPMENT.md`) to drive and photograph the real window.
+- CI: `build.yml` builds the Windows client (artifact on every run; a push to main refreshes the rolling `nightly` pre-release).
 - Add channel chat attachments (photos, animated GIFs and files up to 5 MB) over classic channel file transfer with legacy BBCode references, `:shortcode:` emoji, cached `chat_fetch`, a distinct `upload_permission` refusal, and a two-bridge live check.
 - CI: cache the pinned cargo-audit binary instead of compiling it every run; lint, test and audit the native capture probe; run harness unit tests.
 - Let the native capture probe choose the encoder backend (hardware/software) and GPU (discrete, integrated, by index) with clean refusal of unsupported combinations.

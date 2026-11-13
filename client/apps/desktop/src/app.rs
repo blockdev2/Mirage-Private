@@ -21,6 +21,8 @@ use crate::strings::{Strings, PT};
 use crate::theme::{self, icon, Tone};
 
 mod chat;
+#[cfg(debug_assertions)]
+mod dev;
 mod home;
 mod peer;
 mod settings;
@@ -109,8 +111,10 @@ const CHAT_RENDER_LIMIT: usize = 200;
 const LOGO_WIDTH: f32 = 208.0;
 const LOGO: &[u8] = include_bytes!("../assets/logo.webp");
 const CONTROL_GAP: f32 = 8.0;
-/// "Convidar" (120) + gap (8) + options button (40).
-const HEADER_ACTIONS_WIDTH: f32 = 168.0;
+/// Width of the "Convidar" button.
+const HEADER_ACTIONS_WIDTH: f32 = 132.0;
+/// How long "Link copiado" replaces "Convidar".
+const INVITE_FEEDBACK: Duration = Duration::from_millis(1800);
 
 pub struct App {
     /// Active text table. Switch this reference to change language.
@@ -163,7 +167,15 @@ pub struct App {
     nickname: String,
 
     // Session view state.
-    grid_view: bool,
+    /// When the invite link was copied; the button says so for a moment.
+    invite_copied: Option<Instant>,
+    /// Scripted test plan and the input it injects (debug builds only).
+    #[cfg(debug_assertions)]
+    dev_plan: Option<dev::Plan>,
+    #[cfg(debug_assertions)]
+    dev_events: Vec<egui::Event>,
+    /// Channel the call timer belongs to; the timer restarts when it changes.
+    call_channel: Option<u64>,
     /// Height the user gave the chat by dragging the divider. `None` keeps the
     /// automatic layout, where the chat takes whatever the participants leave.
     chat_height: Option<f32>,
@@ -188,6 +200,8 @@ pub struct App {
     upload_queue: std::collections::VecDeque<std::path::PathBuf>,
     /// Room chat history and the delivery state of what we sent.
     chat: ChatLog,
+    /// Address of the server of the live session (also where its chat is kept).
+    session_address: Option<String>,
     /// Whether the bridge advertised the correlated channel-chat contract.
     channel_chat: bool,
     /// Counter for chat request ids, unique within this application run.
@@ -202,6 +216,8 @@ pub struct App {
     /// Expand/collapse overrides of the channel tree. A channel without an
     /// entry is open only while it is the one the user is in.
     open_channels: HashMap<u64, bool>,
+    /// Whether the connected server shows its channels in the sidebar.
+    server_open: bool,
 
     // Settings window and diagnostics.
     show_settings: bool,
@@ -261,7 +277,12 @@ impl App {
             session_started: None,
             address,
             password: String::new(),
-            grid_view: true,
+            invite_copied: None,
+            call_channel: None,
+            #[cfg(debug_assertions)]
+            dev_plan: dev::Plan::from_env(),
+            #[cfg(debug_assertions)]
+            dev_events: Vec::new(),
             chat_height: None,
             mic_muted: false,
             output_muted: false,
@@ -269,6 +290,7 @@ impl App {
             chat_reply: None,
             image_viewer: None,
             chat: ChatLog::default(),
+            session_address: None,
             channel_chat: false,
             next_chat_request: 0,
             chat_files: HashMap::new(),
@@ -281,6 +303,7 @@ impl App {
             chat_notice: None,
             connect_started: None,
             open_channels: HashMap::new(),
+            server_open: true,
             show_settings: false,
             show_addresses: false,
             address_focused: false,
@@ -311,7 +334,7 @@ impl App {
             .and_then(|mut slot| slot.take());
         // A meter read before a disconnect must not revive the call view.
         if let Some(meter) = meter.filter(|_| self.status.connected) {
-            self.apply_event(BridgeEvent::Audio(meter));
+            self.apply_event(BridgeEvent::Audio(Box::new(meter)));
         }
     }
 
@@ -338,12 +361,16 @@ impl App {
                     self.snapshot = None;
                     self.audio = None;
                     self.session_started = None;
+                    self.call_channel = None;
+                    self.ping_history.clear();
+                    self.ping_sampled = None;
                     self.volumes_sent.clear();
                     self.info_view = None;
                     self.media_avatars.clear();
                     self.server_icon = None;
                     self.media_textures.clear();
                     self.chat.clear();
+                    self.session_address = None;
                     self.chat_notice = None;
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
@@ -368,7 +395,13 @@ impl App {
                         .as_ref()
                         .and_then(|p| p.profile_id.clone())
                         .or_else(|| self.store.active_profile_id());
+                    self.session_address = self.pending.as_ref().map(|p| p.address.clone());
                     self.finish_connection(&snapshot.server.name);
+                    if let Some(address) = self.session_address.clone() {
+                        for (channel, saved) in self.store.transcripts_for(&address) {
+                            self.chat.restore(channel, saved);
+                        }
+                    }
                     // The voice identity is shared by every local profile, so the
                     // server avatar always follows the profile used to connect:
                     // its photo, or none.
@@ -397,7 +430,7 @@ impl App {
                     self.ping_history.push_back(ping as f32);
                     self.ping_sampled = Some(std::time::Instant::now());
                 }
-                self.audio = Some(audio);
+                self.audio = Some(*audio);
             }
             BridgeEvent::Devices { devices } => self.devices = devices,
             BridgeEvent::ConnectionInfo { client, info } => {
@@ -421,6 +454,7 @@ impl App {
                     };
                     self.chat
                         .receive(incoming, Instant::now(), clock::local_hour_minute());
+                    self.keep_chat();
                 }
             }
             BridgeEvent::ChatResult {
@@ -439,6 +473,7 @@ impl App {
                 }
                 let failure = error.map(|_| Failure::parse(code.as_deref()));
                 self.chat.resolve(&request_id, failure);
+                self.keep_chat();
             }
             BridgeEvent::ChatFile {
                 channel,
@@ -616,20 +651,6 @@ impl App {
             secs % 60
         )
     }
-
-    /// Status text and its color, shared by the list rows.
-    fn status_of(&self, client: &ClientInfo, speaking: bool) -> (&'static str, Color32) {
-        let t = self.t;
-        if client.input_muted {
-            (t.muted_state, theme::DANGER)
-        } else if speaking {
-            (t.speaking, theme::SUCCESS)
-        } else if client.is_self {
-            (t.you, theme::TEXT_2)
-        } else {
-            (t.listening, theme::TEXT_3)
-        }
-    }
 }
 
 impl eframe::App for App {
@@ -651,14 +672,29 @@ impl eframe::App for App {
         }
     }
 
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        raw_input.events.append(&mut self.dev_events);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         let ctx = ui.ctx().clone();
+        #[cfg(debug_assertions)]
+        self.dev_step(&ctx);
         if self.is_connecting() {
             // Re-enables the button when the wait times out.
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         let now = Instant::now();
+        let channel = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| self.own_channel(snapshot));
+        if channel != self.call_channel {
+            self.call_channel = channel;
+            self.session_started = channel.map(|_| now);
+        }
         self.chat.expire(now);
         if let Some(wait) = self.chat.next_expiry(now) {
             // Marks a message as unconfirmed the moment its wait runs out.
@@ -682,10 +718,7 @@ impl eframe::App for App {
                     .inner_margin(Margin::symmetric(16, 20))
                     .stroke(Stroke::new(1.0, theme::BORDER_SOFT)),
             )
-            .show(ui, |ui| match self.effective_section() {
-                Section::Voice => self.sidebar(ui),
-                _ => self.home_sidebar(ui),
-            });
+            .show(ui, |ui| self.sidebar(ui));
 
         egui::Panel::bottom("status_bar")
             .exact_size(STATUS_BAR_HEIGHT)
@@ -740,46 +773,6 @@ impl eframe::App for App {
 // Sidebar -------------------------------------------------------------------
 
 impl App {
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let t = self.t;
-        self.logo(ui);
-        ui.add_space(20.0);
-
-        self.server_header(ui);
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        if self.nav_item(ui, icon::HOUSE, t.nav_home, false) {
-            self.section = Section::Home;
-        }
-        self.nav_item(ui, icon::HEADPHONES, t.nav_voice, true);
-
-        ui.add_space(20.0);
-        theme::section_label(ui, &t.channels_heading.to_uppercase());
-        ui.add_space(8.0);
-
-        let remaining = (ui.available_height() - 76.0).max(80.0);
-        egui::ScrollArea::vertical()
-            .max_height(remaining)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if let Some(snapshot) = self.snapshot.clone() {
-                    self.channel_tree(ui, &snapshot);
-                } else {
-                    ui.label(
-                        RichText::new(t.no_channels_hint)
-                            .small()
-                            .color(theme::TEXT_3),
-                    );
-                }
-            });
-
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            self.user_card(ui);
-        });
-    }
-
     fn logo(&mut self, ui: &mut egui::Ui) {
         let ppp = ui.ctx().pixels_per_point();
         let key = (ppp * 100.0).round() as u32;
@@ -799,29 +792,109 @@ impl App {
         }
     }
 
-    /// Server avatar, name and description. A flat header, not a boxed card.
-    fn server_header(&mut self, ui: &mut egui::Ui) {
+    /// The connected server: a header row that opens the call view, with its
+    /// channels folded under it. It stays in the list on every screen, so the
+    /// call is never out of reach.
+    fn connected_server(&mut self, ui: &mut egui::Ui) {
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
         let t = self.t;
+        let active = self.effective_section() == Section::Voice;
         let icon = self
             .server_icon
             .clone()
             .and_then(|path| self.media_texture(ui.ctx(), &path));
-        let (name, subtitle) = match &self.snapshot {
-            Some(s) => (s.server.name.as_str(), t.private_server),
-            None => (t.no_server, t.offline),
-        };
-        ui.horizontal(|ui| {
-            theme::avatar_or_photo(ui, name, 36.0, icon.as_ref());
-            ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(name).font(FontId::new(14.0, theme::semibold())),
-                    )
-                    .truncate(),
-                );
-                ui.label(RichText::new(subtitle).small().color(theme::TEXT_3));
-            });
+        let name = snapshot.server.name.as_str();
+        let channel = self.own_channel(&snapshot).and_then(|id| {
+            snapshot
+                .channels
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.as_str())
         });
+
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, name));
+        let painter = ui.painter();
+        if response.has_focus() {
+            theme::focus_ring(painter, rect);
+        }
+        if active {
+            painter.rect_filled(rect, CornerRadius::same(6), theme::ACCENT_SOFT);
+            let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 16.0), vec2(3.0, 20.0));
+            painter.rect_filled(bar, CornerRadius::same(2), theme::ACCENT);
+        } else if response.hovered() {
+            painter.rect_filled(rect, CornerRadius::same(6), theme::SURFACE);
+        }
+        draw_avatar(
+            ui,
+            rect.left_center() + vec2(30.0, 0.0),
+            34.0,
+            name,
+            false,
+            icon.as_ref(),
+        );
+        let painter = ui.painter();
+        let text_left = rect.left() + 56.0;
+        let text_room = rect.width() - 56.0 - 34.0;
+        let title = theme::fit_text(
+            painter,
+            name,
+            FontId::new(14.0, theme::semibold()),
+            theme::TEXT,
+            text_room,
+        );
+        painter.galley(pos2(text_left, rect.center().y - 17.0), title, theme::TEXT);
+        // A live dot and the channel the call is in.
+        painter.circle_filled(
+            pos2(text_left + 4.0, rect.center().y + 10.0),
+            3.5,
+            theme::SUCCESS,
+        );
+        let line = theme::fit_text(
+            painter,
+            channel.unwrap_or(t.voice_connected),
+            FontId::new(12.0, theme::medium()),
+            theme::TEXT_2,
+            text_room - 14.0,
+        );
+        painter.galley(
+            pos2(
+                text_left + 14.0,
+                rect.center().y + 10.0 - line.size().y / 2.0,
+            ),
+            line,
+            theme::TEXT_2,
+        );
+        painter.text(
+            rect.right_center() - vec2(18.0, 0.0),
+            Align2::CENTER_CENTER,
+            if self.server_open {
+                icon::CARET_DOWN
+            } else {
+                icon::CARET_RIGHT
+            },
+            FontId::new(12.0, theme::icons()),
+            theme::TEXT_3,
+        );
+
+        if response.clicked() {
+            let on_caret = response
+                .interact_pointer_pos()
+                .is_some_and(|pos| pos.x > rect.right() - 36.0);
+            if active || on_caret {
+                self.server_open = !self.server_open;
+            } else {
+                self.section = Section::Voice;
+                self.server_open = true;
+            }
+        }
+        if self.server_open {
+            ui.add_space(2.0);
+            self.channel_tree(ui, &snapshot);
+        }
     }
 
     /// Sidebar navigation row. Returns true when it was clicked this frame.
@@ -985,6 +1058,9 @@ impl App {
                     channel: channel.id.to_string(),
                 });
             }
+            if !(on_caret && expandable) {
+                self.section = Section::Voice;
+            }
         }
 
         if !open {
@@ -1136,8 +1212,7 @@ impl App {
             .filter(|c| Some(c.channel_id) == channel_id)
             .collect();
 
-        // Count, view switch and cards share one centered column, so the
-        // switch stays next to the grid instead of at the window edge.
+        // The cards sit in one centered column.
         let width = ui.available_width().min(CONTENT_MAX_WIDTH);
         let left = ui.max_rect().left() + ((ui.available_width() - width) / 2.0).max(0.0);
         let area = Rect::from_min_size(
@@ -1152,19 +1227,6 @@ impl App {
             + 4.0 * ui.spacing().item_spacing.y;
         let mut split_room = 0.0;
         ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(t.participants_count(participants.len()))
-                        .font(FontId::new(14.0, theme::medium())),
-                );
-                ui.add_space((ui.available_width() - theme::SEGMENTED_WIDTH).max(0.0));
-                let selected = usize::from(self.grid_view);
-                let options = [(icon::LIST, t.view_list), (icon::SQUARES_FOUR, t.view_grid)];
-                if let Some(index) = theme::segmented(ui, options, selected) {
-                    self.grid_view = index == 1;
-                }
-            });
-            ui.add_space(12.0);
             // Everything from here down to the window edge: participants,
             // controls, divider and chat. The divider splits it.
             split_room = ui.available_height();
@@ -1223,19 +1285,31 @@ impl App {
             });
 
             ui.add_space((ui.available_width() - HEADER_ACTIONS_WIDTH).max(0.0));
-            ui.add_enabled_ui(false, |ui| {
-                theme::button(ui, t.invite, Some(icon::USER_PLUS), Tone::Secondary, 120.0)
-            })
-            .inner
-            .on_disabled_hover_text(t.invite_disabled);
-
-            let more = theme::icon_button(ui, icon::DOTS_THREE, t.more_options, false, 40.0);
-            egui::Popup::menu(&more).show(|ui| {
-                if ui.button(t.settings_title).clicked() {
-                    self.show_settings = true;
-                }
-                ui.checkbox(&mut self.show_logs, t.show_diagnostics);
-            });
+            let copied = self
+                .invite_copied
+                .is_some_and(|at| at.elapsed() < INVITE_FEEDBACK);
+            if copied {
+                // Back to "Convidar" once the confirmation has been read.
+                ui.ctx().request_repaint_after(INVITE_FEEDBACK);
+            }
+            let (label, glyph) = if copied {
+                (t.invite_copied, icon::CHECK)
+            } else {
+                (t.invite, icon::USER_PLUS)
+            };
+            let invite = theme::button(
+                ui,
+                label,
+                Some(glyph),
+                Tone::Secondary,
+                HEADER_ACTIONS_WIDTH,
+            )
+            .on_hover_text(t.invite_hint);
+            if invite.clicked() {
+                let address = self.status.address.clone().unwrap_or_default();
+                ui.ctx().copy_text(invite_link(&address, name));
+                self.invite_copied = Some(Instant::now());
+            }
         });
     }
 
@@ -1279,54 +1353,38 @@ impl App {
                 ui.add_space(((slot - visible) / 2.0 - ui.spacing().item_spacing.y).max(0.0));
             }
         };
-        if self.grid_view {
-            let available = ui.available_width();
-            let count = participants.len().max(1);
-            let columns = (((available + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)) as usize)
-                .clamp(1, count.min(MAX_COLUMNS));
-            let rows = count.div_ceil(columns);
-            let column_width = (available - CARD_GAP * (columns - 1) as f32) / columns as f32;
-            let row_room =
-                ((room - CARD_GAP * (rows - 1) as f32) / rows as f32).max(CARD_MIN_HEIGHT);
-            // 16:9 from the column width, limited by the height left; when height
-            // is the limit the width follows it, so cards never distort.
-            let card_height = (column_width * 9.0 / 16.0).min(row_room);
-            let card_width = (card_height * 16.0 / 9.0).min(column_width);
-            let content = rows as f32 * card_height + (rows - 1) as f32 * CARD_GAP;
-            let visible = content.min(room.max(card_height));
-            center(ui, visible);
-            egui::ScrollArea::vertical()
-                .id_salt("participants")
-                .max_height(visible)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = vec2(CARD_GAP, CARD_GAP);
-                    let inner = ui.available_width();
-                    for row in participants.chunks(columns) {
-                        let row_width =
-                            row.len() as f32 * card_width + (row.len() - 1) as f32 * CARD_GAP;
-                        ui.horizontal(|ui| {
-                            ui.add_space(((inner - row_width) / 2.0).max(0.0));
-                            for client in row {
-                                self.participant_card(ui, client, card_width, card_height);
-                            }
-                        });
-                    }
-                });
-        } else {
-            let visible = (participants.len() as f32 * 53.0).min(room.max(106.0));
-            center(ui, visible);
-            egui::ScrollArea::vertical()
-                .id_salt("participants")
-                .max_height(visible)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for client in participants {
-                        self.participant_row(ui, client);
-                    }
-                });
-        }
+        let available = ui.available_width();
+        let count = participants.len().max(1);
+        let columns = (((available + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)) as usize)
+            .clamp(1, count.min(MAX_COLUMNS));
+        let rows = count.div_ceil(columns);
+        let column_width = (available - CARD_GAP * (columns - 1) as f32) / columns as f32;
+        let row_room = ((room - CARD_GAP * (rows - 1) as f32) / rows as f32).max(CARD_MIN_HEIGHT);
+        // 16:9 from the column width, limited by the height left; when height
+        // is the limit the width follows it, so cards never distort.
+        let card_height = (column_width * 9.0 / 16.0).min(row_room);
+        let card_width = (card_height * 16.0 / 9.0).min(column_width);
+        let content = rows as f32 * card_height + (rows - 1) as f32 * CARD_GAP;
+        let visible = content.min(room.max(card_height));
+        center(ui, visible);
+        egui::ScrollArea::vertical()
+            .id_salt("participants")
+            .max_height(visible)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(CARD_GAP, CARD_GAP);
+                let inner = ui.available_width();
+                for row in participants.chunks(columns) {
+                    let row_width =
+                        row.len() as f32 * card_width + (row.len() - 1) as f32 * CARD_GAP;
+                    ui.horizontal(|ui| {
+                        ui.add_space(((inner - row_width) / 2.0).max(0.0));
+                        for client in row {
+                            self.participant_card(ui, client, card_width, card_height);
+                        }
+                    });
+                }
+            });
     }
 
     /// Avatar centered, name (and "Você" for the local user) bottom-left,
@@ -1400,56 +1458,6 @@ impl App {
 
         let corner = pos2(rect.right() - 16.0, baseline);
         self.voice_badge(painter, corner - vec2(0.0, 9.0), 18.0, client, speaking);
-    }
-
-    /// A table row: hairline between rows, status as plain colored text.
-    fn participant_row(&mut self, ui: &mut egui::Ui, client: &ClientInfo) {
-        let photo = self.client_photo(ui.ctx(), client);
-        let speaking = self.is_speaking(client.id);
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
-        self.peer_menu(&response, client);
-        let painter = ui.painter();
-        if speaking {
-            painter.rect_stroke(
-                rect.shrink(1.0),
-                CornerRadius::same(6),
-                Stroke::new(1.5, theme::SUCCESS),
-                egui::StrokeKind::Inside,
-            );
-        }
-        painter.line_segment(
-            [rect.left_bottom(), rect.right_bottom()],
-            Stroke::new(1.0, theme::BORDER_SOFT),
-        );
-        draw_avatar(
-            ui,
-            rect.left_center() + vec2(24.0, 0.0),
-            32.0,
-            &client.name,
-            false,
-            photo.as_ref(),
-        );
-        let name = theme::fit_text(
-            painter,
-            &client.name,
-            FontId::new(14.0, theme::medium()),
-            theme::TEXT,
-            rect.width() - 50.0 - 120.0,
-        );
-        painter.galley(
-            pos2(rect.left() + 50.0, rect.center().y - name.size().y / 2.0),
-            name,
-            theme::TEXT,
-        );
-        let (label, color) = self.status_of(client, speaking);
-        painter.text(
-            rect.right_center() - vec2(16.0, 0.0),
-            Align2::RIGHT_CENTER,
-            label,
-            FontId::new(12.5, theme::medium()),
-            color,
-        );
     }
 
     /// The divider between participants and chat. Drag the grip up to give the
@@ -1914,6 +1922,16 @@ impl App {
         ChatFile::Loading
     }
 
+    /// Writes the delivered conversations to disk when they changed.
+    fn keep_chat(&mut self) {
+        let Some(address) = self.session_address.clone() else {
+            return;
+        };
+        if self.store.save_transcripts(&address, self.chat.saved()) {
+            self.store.save();
+        }
+    }
+
     /// Hands the draft to the bridge, correlated with this session and channel,
     /// and shows it as pending until its `chat_result` (or an echo) arrives.
     fn submit_chat(&mut self) {
@@ -2007,8 +2025,26 @@ impl App {
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     for (index, entry) in entries.iter().enumerate() {
-                        let grouped = index > 0 && entry.groups_with(&entries[index - 1]);
-                        if !grouped && index > 0 {
+                        let previous = index.checked_sub(1).map(|i| &entries[i]);
+                        let boundary = previous.is_some_and(|p| p.restored && !entry.restored);
+                        let grouped = !boundary && previous.is_some_and(|p| entry.groups_with(p));
+                        if boundary {
+                            // Where the kept conversation ends and this session begins.
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let line = Stroke::new(1.0, theme::BORDER);
+                                let label = ui.label(
+                                    RichText::new(t.chat_new_messages)
+                                        .small()
+                                        .color(theme::TEXT_3),
+                                );
+                                let y = label.rect.center().y;
+                                let right = ui.max_rect().right();
+                                ui.painter()
+                                    .hline(label.rect.right() + 8.0..=right, y, line);
+                            });
+                            ui.add_space(8.0);
+                        } else if !grouped && index > 0 {
                             ui.add_space(12.0);
                         }
                         self.chat_row(ui, index, entry, grouped, snapshot.as_ref());
@@ -2156,7 +2192,8 @@ impl App {
         let row = ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CHAT_GAP;
             if grouped {
-                ui.add_space(CHAT_AVATAR);
+                // Allocated (not add_space) so the gap after it applies too.
+                ui.allocate_exact_size(vec2(CHAT_AVATAR, 0.0), Sense::hover());
             } else {
                 // Received messages carry only the sender's name, so fall
                 // back to it when there is no client id.
@@ -2237,13 +2274,12 @@ impl App {
                 }
             });
         });
-        // The whole line, edge to edge and into half the gap around it, is
-        // one target, as in Discord.
-        // Square and edge to edge across the chat, as in Discord.
-        let clip = ui.clip_rect();
+        // The whole line is one target: the chat column plus a small margin
+        // on each side, and half the gap above and below.
+        let column = ui.max_rect();
         let area = Rect::from_x_y_ranges(
-            clip.left()..=clip.right(),
-            row.response.rect.top() - 4.0..=row.response.rect.bottom() + 4.0,
+            column.left() - 8.0..=column.right() + 8.0,
+            row.response.rect.top() - 3.0..=row.response.rect.bottom() + 3.0,
         );
         // Registered under the row's widgets would steal the pictures' clicks,
         // so the hit area is taken from last frame and added first (below).
@@ -2257,17 +2293,17 @@ impl App {
         if active {
             ui.painter().set(
                 highlight,
-                egui::Shape::rect_filled(area, CornerRadius::ZERO, theme::SURFACE),
+                egui::Shape::rect_filled(area, CornerRadius::same(6), theme::SURFACE),
             );
-            // Quick reply: a bare glyph at the row's right, like the gear.
-            let spot = Rect::from_min_size(
-                pos2(area.right() - 44.0, area.top() + 4.0),
-                vec2(30.0, 30.0),
+            // Quick reply: a bare glyph at the row's right, centered on it.
+            let spot = Rect::from_center_size(
+                pos2(area.right() - 20.0, area.center().y),
+                vec2(24.0, 24.0),
             );
-            // A detached child: `ui.put` advanced the layout cursor, so every
-            // later message jumped down while a row was hovered.
+            // A detached child, not `ui.put`: that would move the layout
+            // cursor to the button and drag the rows below it upwards.
             let mut overlay = ui.new_child(egui::UiBuilder::new().max_rect(spot));
-            let button = theme::glyph_button(&mut overlay, icon::REPLY, t.chat_reply, 30.0, 0.0);
+            let button = theme::glyph_button(&mut overlay, icon::REPLY, t.chat_reply, 24.0, 0.0);
             if button.clicked() {
                 reply(self);
             }
@@ -2464,69 +2500,15 @@ impl App {
 // Status bar ---------------------------------------------------------------
 
 impl App {
-    /// Connection state, server and session time on the left; the push-to-talk
-    /// key on the right.
+    /// The connection on the left (one button during a call, one line
+    /// otherwise) and the push-to-talk key on the right.
     fn status_bar(&self, ui: &mut egui::Ui) {
         let t = self.t;
-        let in_session = self.in_session();
         ui.horizontal_centered(|ui| {
-            let (bars, _) = ui.allocate_exact_size(vec2(16.0, 14.0), Sense::hover());
-            let ink = if in_session {
-                theme::SUCCESS
+            if self.in_session() {
+                self.connection_button(ui);
             } else {
-                theme::TEXT_3
-            };
-            for step in 0..3 {
-                let height = 5.0 + 4.5 * step as f32;
-                let x = bars.left() + step as f32 * 6.0;
-                ui.painter().rect_filled(
-                    Rect::from_min_max(
-                        pos2(x, bars.bottom() - height),
-                        pos2(x + 4.0, bars.bottom()),
-                    ),
-                    CornerRadius::same(1),
-                    ink,
-                );
-            }
-            let label = if in_session {
-                t.voice_connected
-            } else {
-                t.disconnected
-            };
-            ui.label(
-                RichText::new(label)
-                    .font(FontId::new(13.0, theme::semibold()))
-                    .color(ink),
-            );
-            if !in_session {
-                let (text, color) = if self.socket != SocketState::Open {
-                    (t.bridge_offline_short, theme::WARNING)
-                } else if self.is_connecting() {
-                    (t.connecting, theme::TEXT_2)
-                } else {
-                    (t.ready_to_connect, theme::TEXT_2)
-                };
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(text).small().color(color));
-                });
-            }
-
-            if let Some(snapshot) = self.snapshot.as_ref().filter(|_| in_session) {
-                ui.separator();
-                ui.label(
-                    RichText::new(&snapshot.server.name)
-                        .small()
-                        .color(theme::TEXT_2),
-                );
-                ui.label(
-                    RichText::new(self.elapsed_label())
-                        .font(FontId::new(12.0, egui::FontFamily::Monospace))
-                        .color(theme::TEXT_3),
-                );
-                if let Some(audio) = self.audio.as_ref().filter(|a| a.ping_ms.is_some()) {
-                    ui.separator();
-                    self.ping_badge(ui, &snapshot.server.name, audio);
-                }
+                self.offline_status(ui);
             }
 
             let binding = self
@@ -2542,87 +2524,188 @@ impl App {
             }
         });
     }
-}
 
-impl App {
-    /// The ping, colored by quality; a click opens its graph and details.
-    fn ping_badge(&self, ui: &mut egui::Ui, server: &str, audio: &crate::protocol::AudioEvent) {
+    /// Signal bars, drawn as three rising pillars.
+    fn signal_bars(painter: &egui::Painter, rect: Rect, ink: Color32) {
+        for step in 0..3 {
+            let height = 5.0 + 4.5 * step as f32;
+            let x = rect.left() + step as f32 * 6.0;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(x, rect.bottom() - height),
+                    pos2(x + 4.0, rect.bottom()),
+                ),
+                CornerRadius::same(1),
+                ink,
+            );
+        }
+    }
+
+    fn offline_status(&self, ui: &mut egui::Ui) {
         let t = self.t;
-        let ping = audio.ping_ms.unwrap_or(0.0).round() as u32;
-        let color = peer::ping_color(ping as f32);
-        let badge = ui
-            .add(
-                egui::Button::new(
-                    RichText::new(t.ping_label(ping))
-                        .font(FontId::new(12.0, egui::FontFamily::Monospace))
-                        .color(color),
-                )
-                .frame(false),
-            )
+        let (bars, _) = ui.allocate_exact_size(vec2(16.0, 14.0), Sense::hover());
+        Self::signal_bars(ui.painter(), bars, theme::TEXT_3);
+        ui.label(
+            RichText::new(t.disconnected)
+                .font(FontId::new(13.0, theme::semibold()))
+                .color(theme::TEXT_3),
+        );
+        let (text, color) = if self.socket != SocketState::Open {
+            (t.bridge_offline_short, theme::WARNING)
+        } else if self.is_connecting() {
+            (t.connecting, theme::TEXT_2)
+        } else {
+            (t.ready_to_connect, theme::TEXT_2)
+        };
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(text).small().color(color));
+        });
+    }
+
+    /// "Voz conectada", the time in this call and the ping as one button; a
+    /// click opens the details. Everything about the call's link lives here.
+    fn connection_button(&self, ui: &mut egui::Ui) {
+        const PAD: f32 = 10.0;
+        const GAP: f32 = 14.0;
+        let t = self.t;
+        let ping = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.ping_ms)
+            .map(|ms| ms.round() as u32);
+        let mono = FontId::new(12.0, egui::FontFamily::Monospace);
+        let painter = ui.painter().clone();
+        let state = painter.layout_no_wrap(
+            t.voice_connected.to_string(),
+            FontId::new(13.0, theme::semibold()),
+            theme::SUCCESS,
+        );
+        let time = painter.layout_no_wrap(self.elapsed_label(), mono.clone(), theme::TEXT_2);
+        let ping = ping
+            .map(|ms| painter.layout_no_wrap(t.ping_label(ms), mono, peer::ping_color(ms as f32)));
+        let mut width = PAD + 16.0 + 8.0 + state.size().x + GAP + time.size().x + PAD;
+        if let Some(ping) = &ping {
+            width += GAP + ping.size().x;
+        }
+
+        let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, t.connection_title)
+        });
+        let response = response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(t.ping_hint);
-        egui::Popup::from_toggle_button_response(&badge)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                ui.set_width(300.0);
-                ui.label(
-                    RichText::new(t.connection_title)
-                        .strong()
-                        .color(theme::TEXT),
-                );
-                ui.add_space(6.0);
-                let (area, _) = ui.allocate_exact_size(vec2(300.0, 90.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(area, CornerRadius::same(6), theme::SURFACE_RAISED);
-                let values: Vec<f32> = self.ping_history.iter().copied().collect();
-                peer::sparkline(ui.painter(), area.shrink(8.0), &values, peer::ping_color);
-                if let Some(max) = values.iter().copied().reduce(f32::max) {
-                    ui.painter().text(
-                        area.right_top() + vec2(-6.0, 4.0),
-                        Align2::RIGHT_TOP,
-                        format!("{max:.0}"),
-                        FontId::new(10.0, egui::FontFamily::Monospace),
-                        theme::TEXT_3,
-                    );
-                }
-                ui.add_space(8.0);
-                ui.label(RichText::new(server).strong().color(theme::TEXT));
-                ui.add_space(2.0);
-                let average = if values.is_empty() {
-                    ping as f32
-                } else {
-                    values.iter().sum::<f32>() / values.len() as f32
-                };
-                let row = |ui: &mut egui::Ui, label: &str, value: String| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(label).color(theme::TEXT_2));
-                        ui.label(RichText::new(value).strong().color(theme::TEXT));
-                    })
-                    .response
-                };
-                row(ui, t.ping_average, format!("{average:.0} ms"));
-                row(ui, t.ping_last, format!("{ping} ms"));
-                row(
-                    ui,
-                    t.ping_loss_out,
-                    format!("{:.1}%", audio.loss_out.unwrap_or(0.0) * 100.0),
-                );
-                row(
-                    ui,
-                    t.ping_voice_delay,
-                    format!("~{} ms", voice_delay_ms(ping)),
-                )
-                .on_hover_text(t.voice_delay_hint);
+        let popup = egui::Popup::from_toggle_button_response(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        if response.hovered() || popup.is_open() || response.has_focus() {
+            painter.rect_filled(rect, CornerRadius::same(6), theme::SURFACE);
+        }
+        if response.has_focus() {
+            theme::focus_ring(&painter, rect);
+        }
+        let bars = Rect::from_min_size(
+            pos2(rect.left() + PAD, rect.center().y - 7.0),
+            vec2(16.0, 14.0),
+        );
+        Self::signal_bars(&painter, bars, theme::SUCCESS);
+        let mut x = bars.right() + 8.0;
+        for galley in [Some(state), Some(time), ping].into_iter().flatten() {
+            let y = rect.center().y - galley.size().y / 2.0;
+            let advance = galley.size().x + GAP;
+            painter.galley(pos2(x, y), galley, theme::TEXT);
+            x += advance;
+        }
+        popup.show(|ui| self.connection_details(ui));
+    }
+
+    /// Ping, its graph and the packets lost since the call began.
+    fn connection_details(&self, ui: &mut egui::Ui) {
+        let t = self.t;
+        ui.set_width(300.0);
+        let server = self
+            .snapshot
+            .as_ref()
+            .map_or("", |snapshot| snapshot.server.name.as_str());
+        ui.label(
+            RichText::new(t.connection_title)
+                .strong()
+                .color(theme::TEXT),
+        );
+        ui.label(RichText::new(server).small().color(theme::TEXT_3));
+        ui.add_space(8.0);
+        let (area, _) = ui.allocate_exact_size(vec2(300.0, 90.0), Sense::hover());
+        ui.painter()
+            .rect_filled(area, CornerRadius::same(6), theme::SURFACE_RAISED);
+        let values: Vec<f32> = self.ping_history.iter().copied().collect();
+        peer::sparkline(ui.painter(), area.shrink(8.0), &values, peer::ping_color);
+        if let Some(max) = values.iter().copied().reduce(f32::max) {
+            ui.painter().text(
+                area.right_top() + vec2(-6.0, 4.0),
+                Align2::RIGHT_TOP,
+                format!("{max:.0}"),
+                FontId::new(10.0, egui::FontFamily::Monospace),
+                theme::TEXT_3,
+            );
+        }
+        ui.add_space(8.0);
+        let ping = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.ping_ms)
+            .unwrap_or(0.0);
+        let average = if values.is_empty() {
+            ping as f32
+        } else {
+            values.iter().sum::<f32>() / values.len() as f32
+        };
+        let row = |ui: &mut egui::Ui, label: &str, value: String| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).color(theme::TEXT_2));
+                ui.label(RichText::new(value).strong().color(theme::TEXT));
             });
+        };
+        row(ui, t.ping_average, format!("{average:.0} ms"));
+        row(ui, t.ping_last, format!("{ping:.0} ms"));
+        let (lost, counted) = self.audio.as_ref().map_or((0, 0), |audio| {
+            (
+                audio.lost_packets.unwrap_or(0),
+                audio.counted_packets.unwrap_or(0),
+            )
+        });
+        row(ui, t.ping_lost, loss_label(lost, counted));
     }
 }
 
-/// Rough mouth-to-ear delay in a call, from our ping to the server.
-/// shortcut: assumes the other person has the same ping and a fixed local
-/// pipeline (20 ms capture frame, about 60 ms of jitter and device buffers);
-/// upgrade by measuring the live jitter buffer depth if precision matters.
-fn voice_delay_ms(ping_ms: u32) -> u32 {
-    ping_ms + 80
+/// "12 (0.4%)": packets lost and their share of the packets counted.
+fn loss_label(lost: u64, counted: u64) -> String {
+    let share = if counted == 0 {
+        0.0
+    } else {
+        lost as f64 * 100.0 / counted as f64
+    };
+    format!("{lost} ({share:.1}%)")
+}
+
+/// The `ts3server://` link every TeamSpeak client opens, pointing at a channel.
+/// Carries neither a nickname nor a password.
+fn invite_link(address: &str, channel: &str) -> String {
+    let (host, port) = match address.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => (host, Some(port)),
+        _ => (address, None),
+    };
+    let mut link = format!("ts3server://{}", host.trim_matches(['[', ']']));
+    let mut sep = '?';
+    if let Some(port) = port {
+        link.push_str(&format!("{sep}port={port}"));
+        sep = '&';
+    }
+    if !channel.is_empty() {
+        link.push_str(&format!(
+            "{sep}channel={}",
+            ts6_bridge::attachments::encode(channel)
+        ));
+    }
+    link
 }
 
 // Settings and diagnostics -----------------------------------------------------
@@ -2785,7 +2868,29 @@ mod tests {
 
 #[cfg(test)]
 mod reply_tests {
-    use super::{official_attachment, split_quote};
+    use super::{invite_link, loss_label, official_attachment, split_quote};
+
+    #[test]
+    fn invite_links_point_at_the_channel_and_never_carry_secrets() {
+        assert_eq!(
+            invite_link("voice.example.com:9987", "Sala 1"),
+            "ts3server://voice.example.com?port=9987&channel=Sala%201"
+        );
+        assert_eq!(
+            invite_link("voice.example.com", ""),
+            "ts3server://voice.example.com"
+        );
+        assert_eq!(
+            invite_link("[::1]:9987", "A"),
+            "ts3server://::1?port=9987&channel=A"
+        );
+    }
+
+    #[test]
+    fn packet_loss_reads_as_count_and_share() {
+        assert_eq!(loss_label(0, 0), "0 (0.0%)");
+        assert_eq!(loss_label(12, 3000), "12 (0.4%)");
+    }
 
     #[test]
     fn official_client_attachments_show_their_name() {

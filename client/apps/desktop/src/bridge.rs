@@ -228,7 +228,7 @@ fn route(
     match event {
         BridgeEvent::Audio(meter) => {
             if let Ok(mut slot) = audio.lock() {
-                *slot = Some(meter);
+                *slot = Some(*meter);
             }
             Forward::Sent
         }
@@ -287,7 +287,10 @@ mod queue_tests {
                 rx_packets: packets,
                 ..AudioEvent::default()
             };
-            assert_eq!(route(&tx, &slot, BridgeEvent::Audio(meter)), Forward::Sent);
+            assert_eq!(
+                route(&tx, &slot, BridgeEvent::Audio(Box::new(meter))),
+                Forward::Sent
+            );
         }
         assert_eq!(slot.lock().unwrap().as_ref().unwrap().rx_packets, 9_999);
         // The queue is still free for an event that must not be lost.

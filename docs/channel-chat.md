@@ -45,8 +45,13 @@ Drafts stay editable after a rejected send. During a pending send they are
 disabled; after 20 seconds without confirmation the UI warns the user to check
 the conversation before retrying. Requests are not automatically retried.
 This is not an exactly-once or offline-delivery guarantee. Switching channel or
-session resets the composer. Frontend history is limited to 200 received
-messages in memory and is not restored after page/application reload.
+session resets the composer. The browser frontend keeps 200 received
+messages in memory and does not restore them after a reload. The native
+client also keeps the delivered messages of each channel on this computer
+(at most 200 per channel and 40 channels, in `profiles.json`) and shows them
+again on the next visit, above a "Nesta sessão" divider. The server keeps no
+history of classic channel chat, so messages sent while you were away cannot
+be recovered; forgetting a server in the history also forgets its chat.
 
 ## Attachments and emoji
 

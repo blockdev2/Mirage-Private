@@ -7,8 +7,10 @@
 //! send is shown locally, marked by its result, and a matching echo only
 //! confirms it instead of appearing twice. Sends are never retried.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+
+use crate::store::SavedMessage;
 
 /// How long to wait for the server's answer before giving up on a message.
 /// The bridge itself stops waiting after 15 seconds.
@@ -85,6 +87,8 @@ pub struct Entry {
     echoed: bool,
     /// Bridge request id of a message we sent.
     request: Option<String>,
+    /// Loaded from the copy kept on disk, not received in this session.
+    pub restored: bool,
 }
 
 impl Entry {
@@ -117,6 +121,47 @@ pub struct ChatLog {
 impl ChatLog {
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Puts back messages kept from an earlier session. Call it before any
+    /// live message: they are shown first, marked as restored.
+    pub fn restore(&mut self, channel: u64, saved: &[SavedMessage]) {
+        for message in saved {
+            self.push(Entry {
+                scope: Scope::Channel,
+                channel: Some(channel),
+                from_id: None,
+                author: message.author.clone(),
+                text: message.text.clone(),
+                mine: message.mine,
+                delivery: Delivery::Delivered,
+                time: (message.hour, message.minute),
+                sent: None,
+                echoed: false,
+                request: None,
+                restored: true,
+            });
+        }
+    }
+
+    /// What is worth keeping: delivered channel messages, grouped by channel.
+    pub fn saved(&self) -> HashMap<u64, Vec<SavedMessage>> {
+        let mut chats: HashMap<u64, Vec<SavedMessage>> = HashMap::new();
+        for entry in &self.entries {
+            let (Scope::Channel, Some(channel), Delivery::Delivered) =
+                (entry.scope, entry.channel, entry.delivery)
+            else {
+                continue;
+            };
+            chats.entry(channel).or_default().push(SavedMessage {
+                author: entry.author.clone(),
+                text: entry.text.clone(),
+                mine: entry.mine,
+                hour: entry.time.0,
+                minute: entry.time.1,
+            });
+        }
+        chats
     }
 
     /// A message from the server. If it is the echo of one we sent, it only
@@ -155,6 +200,7 @@ impl ChatLog {
             sent: None,
             echoed: false,
             request: None,
+            restored: false,
         });
     }
 
@@ -182,6 +228,7 @@ impl ChatLog {
             sent: Some(now),
             echoed: false,
             request: Some(request),
+            restored: false,
         });
     }
 
@@ -429,6 +476,29 @@ mod tests {
         let shown = log.visible(None, MAX_ENTRIES + 20);
         assert_eq!(shown.len(), MAX_ENTRIES);
         assert_eq!(shown.last().unwrap().text, (MAX_ENTRIES + 19).to_string());
+    }
+
+    #[test]
+    fn delivered_channel_messages_survive_a_restart_before_new_ones() {
+        let now = Instant::now();
+        let mut log = ChatLog::default();
+        log.receive(incoming("ana", 3, "antes", false), now, (9, 5));
+        let mut pending = log_with_pending("não entregue", now);
+        pending.receive(incoming("ana", 3, "depois", false), now, TIME);
+        // Only delivered messages are kept.
+        let saved = log.saved();
+        assert_eq!(saved[&1].len(), 1);
+        assert!(!pending.saved()[&1].iter().any(|m| m.text == "não entregue"));
+
+        let mut next = ChatLog::default();
+        next.restore(1, &saved[&1]);
+        next.receive(incoming("bia", 4, "novo", false), now, TIME);
+        let shown = next.visible(Some(1), 10);
+        assert_eq!(shown[0].text, "antes");
+        assert_eq!(shown[0].time, (9, 5));
+        assert!(shown[0].restored && !shown[1].restored);
+        // Still in the same conversation when saved again.
+        assert_eq!(next.saved()[&1].len(), 2);
     }
 
     #[test]

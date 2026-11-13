@@ -10,14 +10,9 @@ pub struct Strings {
     pub nav_home: &'static str,
     pub nav_history: &'static str,
     pub nav_voice: &'static str,
-    pub channels_heading: &'static str,
-    pub no_channels_hint: &'static str,
-    pub favorites_heading: &'static str,
+    pub servers_heading: &'static str,
     pub favorites_selected: &'static str,
     pub add_server: &'static str,
-    pub no_server: &'static str,
-    pub private_server: &'static str,
-    pub offline: &'static str,
     pub you: &'static str,
     pub available: &'static str,
     pub disconnected: &'static str,
@@ -54,12 +49,12 @@ pub struct Strings {
     pub server_address: &'static str,
     pub show_address: &'static str,
     pub ping_hint: &'static str,
-    pub voice_delay_hint: &'static str,
     pub connection_title: &'static str,
     pub ping_average: &'static str,
     pub ping_last: &'static str,
-    pub ping_loss_out: &'static str,
-    pub ping_voice_delay: &'static str,
+    pub ping_lost: &'static str,
+    pub invite_copied: &'static str,
+    pub invite_hint: &'static str,
     pub monitor_title: &'static str,
     pub monitor_hint: &'static str,
     pub hide_address: &'static str,
@@ -134,16 +129,13 @@ pub struct Strings {
     // Voice session.
     pub no_channel: &'static str,
     pub channel_kind: &'static str,
-    pub participant_one: &'static str,
-    pub participant_many: &'static str,
-    pub view_list: &'static str,
-    pub view_grid: &'static str,
     pub invite: &'static str,
-    pub invite_disabled: &'static str,
     pub chat_heading: &'static str,
     pub resize_chat: &'static str,
     pub resize_chat_hint: &'static str,
     pub chat_empty_title: &'static str,
+    /// Divider between messages kept from before and this session's.
+    pub chat_new_messages: &'static str,
     pub chat_empty_body: &'static str,
     pub chat_placeholder_prefix: &'static str,
     pub chat_send: &'static str,
@@ -181,9 +173,6 @@ pub struct Strings {
     pub more_options: &'static str,
     pub leave_call: &'static str,
     pub brand_name: &'static str,
-    pub muted_state: &'static str,
-    pub speaking: &'static str,
-    pub listening: &'static str,
 
     // Settings window and diagnostics.
     pub settings_title: &'static str,
@@ -239,16 +228,6 @@ pub struct Strings {
 }
 
 impl Strings {
-    /// "1 participante" / "2 participantes".
-    pub fn participants_count(&self, count: usize) -> String {
-        let noun = if count == 1 {
-            self.participant_one
-        } else {
-            self.participant_many
-        };
-        format!("{count} {noun}")
-    }
-
     /// "Server / Voice channels" breadcrumb.
     pub fn breadcrumb(&self, server: &str) -> String {
         format!("{server} / {}", self.nav_voice)
@@ -323,14 +302,9 @@ pub const PT: Strings = Strings {
     nav_home: "Início",
     nav_history: "Histórico",
     nav_voice: "Canais de voz",
-    channels_heading: "Canais de voz",
-    no_channels_hint: "Conecte-se a um servidor para ver os canais.",
-    favorites_heading: "Favoritos",
+    servers_heading: "Servidores",
     favorites_selected: "Favorito selecionado",
     add_server: "Adicionar servidor",
-    no_server: "Nenhum servidor",
-    private_server: "Servidor privado",
-    offline: "Offline",
     you: "Você",
     available: "Disponível",
     disconnected: "Desconectado",
@@ -364,13 +338,13 @@ pub const PT: Strings = Strings {
     use_saved_profile: "Usar o perfil salvo",
     server_address: "Endereço do servidor",
     show_address: "Mostrar endereço",
-    ping_hint: "Tempo de ida e volta até o servidor. Clique para detalhes",
-    voice_delay_hint: "Atraso estimado entre alguém falar e você ouvir (e vice-versa)",
+    ping_hint: "Detalhes da conexão com o servidor",
     connection_title: "Conexão",
     ping_average: "Ping médio:",
     ping_last: "Último ping:",
-    ping_loss_out: "Perda de pacotes enviados:",
-    ping_voice_delay: "Atraso de voz estimado:",
+    ping_lost: "Pacotes perdidos:",
+    invite_copied: "Link copiado",
+    invite_hint: "Copia um link que leva direto a este canal",
     monitor_title: "Ouvir meu microfone",
     monitor_hint: "Toca sua voz já processada nos fones. Use fones para evitar eco.",
     hide_address: "Ocultar endereço",
@@ -448,16 +422,12 @@ pub const PT: Strings = Strings {
 
     no_channel: "Sem canal",
     channel_kind: "Canal de voz",
-    participant_one: "participante",
-    participant_many: "participantes",
-    view_list: "Lista",
-    view_grid: "Grade",
     invite: "Convidar",
-    invite_disabled: "Convites ainda não estão disponíveis.",
     chat_heading: "Conversa da sala",
     resize_chat: "Redimensionar o chat",
     resize_chat_hint: "Arraste para ajustar. Clique duas vezes para restaurar.",
     chat_empty_title: "Ainda sem mensagens",
+    chat_new_messages: "Nesta sessão",
     chat_empty_body: "Comece a conversa com quem está na sala.",
     chat_placeholder_prefix: "Conversar em",
     chat_send: "Enviar mensagem",
@@ -495,9 +465,6 @@ pub const PT: Strings = Strings {
     more_options: "Mais opções",
     leave_call: "Sair da chamada",
     brand_name: "Mirage",
-    muted_state: "Mudo",
-    speaking: "Falando",
-    listening: "Ouvindo",
 
     settings_title: "Ajustes",
     audio_section: "Áudio",

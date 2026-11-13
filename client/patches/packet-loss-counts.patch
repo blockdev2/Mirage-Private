@@ -1,0 +1,91 @@
+diff --git a/client/vendor/tsclientlib/tsproto/src/resend.rs b/client/vendor/tsclientlib/tsproto/src/resend.rs
+index d1ca8b0..6c7331a 100644
+--- a/client/vendor/tsclientlib/tsproto/src/resend.rs
++++ b/client/vendor/tsclientlib/tsproto/src/resend.rs
+@@ -159,6 +159,10 @@ pub struct ConnectionStats {
+ 	pub rtt: Duration,
+ 	/// Deviation of the rtt.
+ 	pub rtt_dev: Duration,
++	/// Packets counted for loss over the whole connection, and how many of
++	/// them were lost. Each one-second window is added once.
++	pub total_counted: u64,
++	pub total_lost: u64,
+ 	/// Total count of packets since start of the connection. Indexed by `PacketStat`.
+ 	pub total_packets: [u64; 6],
+ 	/// Total count of bytes since start of the connection. Indexed by `PacketStat`.
+@@ -825,6 +829,9 @@ impl Resender {
+ 				stats.last_second_bytes[second_index as usize] = counter.bytes;
+ 				stats.next_second_index = (second_index + 1) % stats.last_second_bytes.len() as u8;
+ 				stats.packet_loss = counter.packet_loss;
++				let (lost, counted) = stats.packetloss_counts();
++				stats.total_lost += u64::from(lost);
++				stats.total_counted += u64::from(counted);
+ 				counter.reset();
+ 
+ 				con.stream_items.push_back(StreamItem::NetworkStatsUpdated);
+@@ -970,8 +977,8 @@ impl ConnectionStats {
+ 		}
+ 	}
+ 
+-	/// Compute the average incoming and outgoing packet loss.
+-	pub fn get_packetloss(&self) -> f32 {
++	/// Lost and counted packets of the last one-second window.
++	pub fn packetloss_counts(&self) -> (u32, u32) {
+ 		let count = self.packet_loss[PacketLossStat::VoiceInCount as usize]
+ 			+ self.packet_loss[PacketLossStat::PingInCount as usize]
+ 			+ self.packet_loss[PacketLossStat::PongInCount as usize]
+@@ -979,22 +986,25 @@ impl ConnectionStats {
+ 			+ self.packet_loss[PacketLossStat::AckOutCount as usize]
+ 			+ self.packet_loss[PacketLossStat::CommandOutCount as usize];
+ 		// Do not use ping count, it is unreliable
+-		if count == 0 {
+-			0.0
+-		} else {
+-			let command_out_lost = min(
+-				self.packet_loss[PacketLossStat::AckInOrCommandOutLost as usize]
+-					.saturating_sub(self.packet_loss[PacketLossStat::AckInLost as usize]),
+-				self.packet_loss[PacketLossStat::CommandOutCount as usize],
+-			);
++		let command_out_lost = min(
++			self.packet_loss[PacketLossStat::AckInOrCommandOutLost as usize]
++				.saturating_sub(self.packet_loss[PacketLossStat::AckInLost as usize]),
++			self.packet_loss[PacketLossStat::CommandOutCount as usize],
++		);
++		let lost = self.packet_loss[PacketLossStat::VoiceInLost as usize]
++			+ self.packet_loss[PacketLossStat::PingInLost as usize]
++			+ self.packet_loss[PacketLossStat::PongInLost as usize]
++			+ self.packet_loss[PacketLossStat::AckInLost as usize]
++			+ self.packet_loss[PacketLossStat::AckOutLost as usize]
++			+ command_out_lost;
++		(lost, count)
++	}
+ 
+-			(self.packet_loss[PacketLossStat::VoiceInLost as usize] as f32
+-				+ self.packet_loss[PacketLossStat::PingInLost as usize] as f32
+-				+ self.packet_loss[PacketLossStat::PongInLost as usize] as f32
+-				+ self.packet_loss[PacketLossStat::AckInLost as usize] as f32
+-				+ self.packet_loss[PacketLossStat::AckOutLost as usize] as f32
+-				+ command_out_lost as f32)
+-				/ count as f32
++	/// Compute the average incoming and outgoing packet loss.
++	pub fn get_packetloss(&self) -> f32 {
++		match self.packetloss_counts() {
++			(_, 0) => 0.0,
++			(lost, count) => lost as f32 / count as f32,
+ 		}
+ 	}
+ }
+@@ -1017,6 +1027,8 @@ impl Default for ConnectionStats {
+ 		Self {
+ 			rtt: Duration::from_millis(0),
+ 			rtt_dev: Duration::from_millis(0),
++			total_counted: 0,
++			total_lost: 0,
+ 			total_packets: Default::default(),
+ 			total_bytes: Default::default(),
+ 			packet_loss: Default::default(),
+@@ -1071,3 +1083,4 @@ impl PacketStat {
+ 		}
+ 	}
+ }
++
