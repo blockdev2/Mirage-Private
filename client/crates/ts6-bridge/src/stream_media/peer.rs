@@ -326,6 +326,17 @@ fn spawn_decoder(
     Ok(units)
 }
 
+/// Reassembles RTP packets into access units. A 1080p keyframe spans well over
+/// a hundred packets, so the window must be far larger than the 64 the first
+/// version used: that size dropped every keyframe, and with no keyframe the
+/// picture froze until the sender happened to produce another one.
+fn new_sample_builder() -> SampleBuilder<H264Packet> {
+    SampleBuilder::new(BUILDER_WINDOW, H264Packet::default(), 90_000)
+        .with_max_time_delay(Duration::from_millis(500))
+}
+
+const BUILDER_WINDOW: u16 = 4096;
+
 /// Whether an Annex B access unit holds an IDR slice (NAL type 5).
 fn is_keyframe(unit: &[u8]) -> bool {
     unit.windows(4)
@@ -373,7 +384,7 @@ impl PeerConnectionEventHandler for Viewer {
         let decode = self.decode.clone();
         let keyframe = Arc::clone(&self.keyframe);
         self.runtime.spawn(Box::pin(async move {
-            let mut builder = SampleBuilder::new(64, H264Packet::default(), 90_000);
+            let mut builder = new_sample_builder();
             let mut waiting_key = true;
             let mut last_pli: Option<Instant> = None;
             let mut fir_sequence = 0u8;
@@ -474,6 +485,41 @@ mod tests {
         assert_eq!(parsed.sdp_mline_index, Some(0));
         assert!(parse_candidate(r#"{"cmd":"answer","args":{}}"#).is_none());
         assert!(parse_candidate(&"x".repeat(MAX_ICE_JSON + 1)).is_none());
+    }
+
+    #[test]
+    fn a_keyframe_of_hundreds_of_packets_is_rebuilt_whole() {
+        use rtc::rtp::codec::h264::H264Payloader;
+        use rtc::rtp::packetizer::Payloader;
+        // About 250 KB of IDR slice: roughly 210 packets at a 1200-byte MTU.
+        let mut unit = vec![0, 0, 0, 1, 0x65];
+        unit.extend((0..250_000u32).map(|i| (i % 251) as u8 | 1));
+        let payloads = H264Payloader::default()
+            .payload(1200, &unit.into())
+            .unwrap();
+        assert!(payloads.len() > 64, "{} packets", payloads.len());
+        let mut builder = new_sample_builder();
+        let now = Instant::now();
+        let last = payloads.len() - 1;
+        for (i, payload) in payloads.into_iter().enumerate() {
+            let mut packet = rtc::rtp::packet::Packet::default();
+            packet.header.sequence_number = 100 + i as u16;
+            packet.header.timestamp = 9000;
+            packet.header.marker = i == last;
+            packet.payload = payload;
+            builder.push(now, packet);
+        }
+        // The next frame's first packet releases the previous one.
+        let mut next = rtc::rtp::packet::Packet::default();
+        next.header.sequence_number = 100 + last as u16 + 1;
+        next.header.timestamp = 12000;
+        next.header.marker = true;
+        next.payload = vec![0x41, 9].into();
+        builder.push(now, next);
+        let sample = builder.pop(now).expect("the keyframe is complete");
+        assert_eq!(sample.prev_dropped_packets, 0);
+        assert!(is_keyframe(&sample.data));
+        assert_eq!(sample.data.len(), 250_000 + 5);
     }
 
     #[test]

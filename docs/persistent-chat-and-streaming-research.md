@@ -484,7 +484,7 @@ NACK left later frames without their reference, and the viewer only asked for
 a keyframe on a full queue or a decode error. It now also waits for a keyframe
 (and sends a PLI) when the sample builder reports dropped packets. The desktop
 exe now writes `mirage.log` (stream connection state and decoder frames per 5
-s; no chat, no credentials) to `%APPDATA%	s6client` by default, trimmed at 2 MB.
+s; no chat, no credentials) to `%APPDATA%\ts6client` by default, trimmed at 2 MB.
 Gathering was ruled out as a delay on our side: host candidates leave within
 6 ms and srflx within 16 ms.
 
@@ -500,4 +500,30 @@ official client does not send for a PLI. Added: FIR next to PLI (both are
 negotiated), and a 5 s `stream track` log line with packets, samples, dropped,
 skipped (waiting for a keyframe), queue-full, keyframes and keyframe requests,
 which tells packet loss, an unanswered request and a local stall apart.
-Not confirmed yet.
+Not confirmed at that point.
+
+### Seventh round: the 64-packet window (2026-11-13, night)
+
+The `stream track` lines from a 100 s run settled it. Packets arrived at a
+steady 600-1500 per 5 s and about 58 frames per 5 s were assembled, but after
+the first keyframe `keys` stayed 0 and `skipped` equalled `samples` for the
+whole run, with `waiting_key=true` and a keyframe request every second. The
+decoder never received anything. `dropped` was in the hundreds per report, and
+`webrtc::peer_connection::driver` logged about 5000 `Failed to send RtpPacket
+to track remote: Full(...)` errors in the same period.
+
+Cause: the viewer built access units with `SampleBuilder::new(64, ...)`, and
+`max_late` is a count of buffered packets. A 1080p keyframe is well over 64
+packets, so the builder forced the head of the frame out before the rest
+arrived and every keyframe was reported as lost. The first keyframe survived
+only because it was smaller. Any later loss then made the viewer wait for a
+keyframe that could not be assembled, until the official client emitted another
+one by itself (about every 20-30 s, the length of the freezes).
+
+Fix: window of 4096 packets with a 500 ms time bound
+(`with_max_time_delay`), so a lost packet still cannot stall reassembly. The
+unit test `a_keyframe_of_hundreds_of_packets_is_rebuilt_whole` packs a 250 KB
+IDR into about 210 packets; it fails with a window of 64 and passes with 4096.
+The `Full` errors may be a consequence (the retransmission-less loss path left
+the consumer waiting) or a separate burst effect; the next run's log shows
+whether they remain.
