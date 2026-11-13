@@ -65,6 +65,13 @@ cargo run --locked -p ts6-cli -- probe 127.0.0.1:9987 5 --name tester
 
 `ALLOW_PRIVATE_TARGETS` disables the vendored resolver's private-address guard for that process. Do not enable it for untrusted remote callers. A server is not included. Download and configure a server separately under the ignored `testbed/` directory if needed; keep administrative query interfaces disabled unless your isolated test requires them.
 
+## Download a build
+
+The `Build client` workflow compiles the native Windows client. Every run
+uploads `Mirage-windows-x64.zip` (with a `.sha256` file) as an artifact, and
+each push to `main` replaces the `nightly` pre-release with the newest build.
+The binary is unsigned, so Windows SmartScreen may warn; compare the hash.
+
 ## Develop and verify
 
 ```powershell
