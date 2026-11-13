@@ -1355,14 +1355,25 @@ impl App {
         };
         let available = ui.available_width();
         let count = participants.len().max(1);
-        let columns = (((available + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)) as usize)
+        let fit = |columns: usize| {
+            let rows = count.div_ceil(columns);
+            let column_width = (available - CARD_GAP * (columns - 1) as f32) / columns as f32;
+            let row_room = (room - CARD_GAP * (rows - 1) as f32) / rows as f32;
+            // 16:9 from the column width, limited by the height left; when height
+            // is the limit the width follows it, so cards never distort.
+            let height = (column_width * 9.0 / 16.0).min(row_room);
+            (rows, column_width, height)
+        };
+        // The column count that gives the biggest cards for this room, so the
+        // grid wraps into more rows when the chat leaves height to spare.
+        let most = (((available + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)) as usize)
             .clamp(1, count.min(MAX_COLUMNS));
-        let rows = count.div_ceil(columns);
-        let column_width = (available - CARD_GAP * (columns - 1) as f32) / columns as f32;
-        let row_room = ((room - CARD_GAP * (rows - 1) as f32) / rows as f32).max(CARD_MIN_HEIGHT);
-        // 16:9 from the column width, limited by the height left; when height
-        // is the limit the width follows it, so cards never distort.
-        let card_height = (column_width * 9.0 / 16.0).min(row_room);
+        let columns = (1..=most)
+            .max_by(|a, b| fit(*a).2.total_cmp(&fit(*b).2).then(a.cmp(b)))
+            .unwrap_or(1);
+        let (rows, column_width, card_height) = fit(columns);
+        // Never smaller than a readable card; past that the grid scrolls.
+        let card_height = card_height.max(CARD_MIN_HEIGHT);
         let card_width = (card_height * 16.0 / 9.0).min(column_width);
         let content = rows as f32 * card_height + (rows - 1) as f32 * CARD_GAP;
         let visible = content.min(room.max(card_height));
@@ -1410,20 +1421,6 @@ impl App {
         };
         painter.rect_filled(rect, CornerRadius::same(8), theme::SURFACE);
         let avatar = (height * 0.40).clamp(36.0, 80.0);
-        // Each person's own color glows behind them, brighter while they talk.
-        let strength = ui.ctx().animate_value_with_time(
-            response.id.with("aura"),
-            if speaking { 3.2 } else { 1.0 },
-            0.18,
-        );
-        theme::aura(
-            painter,
-            rect,
-            pos2(rect.center().x, rect.center().y - 10.0),
-            avatar * 1.7,
-            theme::avatar_color(&client.name),
-            strength,
-        );
         painter.rect_stroke(
             rect,
             CornerRadius::same(8),

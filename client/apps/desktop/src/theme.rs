@@ -742,27 +742,6 @@ pub fn avatar_tiny(painter: &egui::Painter, center: egui::Pos2, size: f32, name:
     );
 }
 
-/// A soft halo of `color` behind a participant's avatar: stacked, fading
-/// circles, so it needs no texture. `strength` is about 1 at rest and rises
-/// while the person speaks. Clipped to `rect` so it never spills out of a tile.
-pub fn aura(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    center: egui::Pos2,
-    radius: f32,
-    color: Color32,
-    strength: f32,
-) {
-    let painter = painter.with_clip_rect(rect.shrink(1.0));
-    const STEPS: u32 = 28;
-    for step in 0..STEPS {
-        let t = step as f32 / (STEPS - 1) as f32;
-        let alpha = (2.6 * strength).round().clamp(0.0, 255.0) as u8;
-        let ring = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
-        painter.circle_filled(center, radius * (1.0 - 0.85 * t), ring);
-    }
-}
-
 /// Stable avatar color for a name, so a participant keeps the same color.
 pub fn avatar_color(name: &str) -> Color32 {
     let hash = name.bytes().fold(0usize, |acc, byte| {
