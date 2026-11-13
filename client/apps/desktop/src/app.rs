@@ -1409,13 +1409,27 @@ impl App {
             (theme::BORDER_SOFT, 1.0)
         };
         painter.rect_filled(rect, CornerRadius::same(8), theme::SURFACE);
+        let avatar = (height * 0.40).clamp(36.0, 80.0);
+        // Each person's own color glows behind them, brighter while they talk.
+        let strength = ui.ctx().animate_value_with_time(
+            response.id.with("aura"),
+            if speaking { 3.2 } else { 1.0 },
+            0.18,
+        );
+        theme::aura(
+            painter,
+            rect,
+            pos2(rect.center().x, rect.center().y - 10.0),
+            avatar * 1.7,
+            theme::avatar_color(&client.name),
+            strength,
+        );
         painter.rect_stroke(
             rect,
             CornerRadius::same(8),
             Stroke::new(border_width, border),
             egui::StrokeKind::Inside,
         );
-        let avatar = (height * 0.40).clamp(36.0, 80.0);
         draw_avatar(
             ui,
             pos2(rect.center().x, rect.center().y - 10.0),
@@ -2130,7 +2144,7 @@ impl App {
                 Segment::File(file) => {
                     let size = file
                         .size
-                        .map(|bytes| format!(" ({:.1} MB)", bytes as f64 / 1_000_000.0))
+                        .map(|bytes| format!(" ({} MB)", decimal(bytes as f64 / 1_000_000.0, 1)))
                         .unwrap_or_default();
                     let label = format!("📎 {}{size}", file.name);
                     if ui
@@ -2411,7 +2425,7 @@ fn official_attachment(text: &str, t: &Strings) -> Option<String> {
     let size = value
         .get("file_size")
         .and_then(|v| v.as_u64())
-        .map(|bytes| format!(" ({:.1} MB)", bytes as f64 / 1_000_000.0))
+        .map(|bytes| format!(" ({} MB)", decimal(bytes as f64 / 1_000_000.0, 1)))
         .unwrap_or_default();
     Some(format!("📎 {name}{size}\n{}", t.chat_official_attachment))
 }
@@ -2620,34 +2634,13 @@ impl App {
 
     /// Ping, its graph and the packets lost since the call began.
     fn connection_details(&self, ui: &mut egui::Ui) {
+        const WIDTH: f32 = 296.0;
         let t = self.t;
-        ui.set_width(300.0);
         let server = self
             .snapshot
             .as_ref()
             .map_or("", |snapshot| snapshot.server.name.as_str());
-        ui.label(
-            RichText::new(t.connection_title)
-                .strong()
-                .color(theme::TEXT),
-        );
-        ui.label(RichText::new(server).small().color(theme::TEXT_3));
-        ui.add_space(8.0);
-        let (area, _) = ui.allocate_exact_size(vec2(300.0, 90.0), Sense::hover());
-        ui.painter()
-            .rect_filled(area, CornerRadius::same(6), theme::SURFACE_RAISED);
         let values: Vec<f32> = self.ping_history.iter().copied().collect();
-        peer::sparkline(ui.painter(), area.shrink(8.0), &values, peer::ping_color);
-        if let Some(max) = values.iter().copied().reduce(f32::max) {
-            ui.painter().text(
-                area.right_top() + vec2(-6.0, 4.0),
-                Align2::RIGHT_TOP,
-                format!("{max:.0}"),
-                FontId::new(10.0, egui::FontFamily::Monospace),
-                theme::TEXT_3,
-            );
-        }
-        ui.add_space(8.0);
         let ping = self
             .audio
             .as_ref()
@@ -2658,21 +2651,63 @@ impl App {
         } else {
             values.iter().sum::<f32>() / values.len() as f32
         };
-        let row = |ui: &mut egui::Ui, label: &str, value: String| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(label).color(theme::TEXT_2));
-                ui.label(RichText::new(value).strong().color(theme::TEXT));
-            });
-        };
-        row(ui, t.ping_average, format!("{average:.0} ms"));
-        row(ui, t.ping_last, format!("{ping:.0} ms"));
         let (lost, counted) = self.audio.as_ref().map_or((0, 0), |audio| {
             (
                 audio.lost_packets.unwrap_or(0),
                 audio.counted_packets.unwrap_or(0),
             )
         });
-        row(ui, t.ping_lost, loss_label(lost, counted));
+
+        Frame::new().inner_margin(Margin::same(14)).show(ui, |ui| {
+            ui.set_width(WIDTH);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.add(
+                egui::Label::new(
+                    RichText::new(t.connection_title).font(FontId::new(15.0, theme::semibold())),
+                )
+                .selectable(false),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(server).small().color(theme::TEXT_3))
+                    .truncate()
+                    .selectable(false),
+            );
+            ui.add_space(6.0);
+            let (area, _) = ui.allocate_exact_size(vec2(WIDTH, 88.0), Sense::hover());
+            ui.painter()
+                .rect_filled(area, CornerRadius::same(6), theme::SURFACE_RAISED);
+            peer::sparkline(ui.painter(), area.shrink(8.0), &values, peer::ping_color);
+            if let Some(max) = values.iter().copied().reduce(f32::max) {
+                ui.painter().text(
+                    area.right_top() + vec2(-8.0, 6.0),
+                    Align2::RIGHT_TOP,
+                    format!("{max:.0} ms"),
+                    FontId::new(10.5, egui::FontFamily::Monospace),
+                    theme::TEXT_3,
+                );
+            }
+            ui.add_space(6.0);
+            // Label at the left edge, value at the right edge, one line each.
+            let row = |ui: &mut egui::Ui, label: &str, value: String| {
+                ui.allocate_ui_with_layout(
+                    vec2(WIDTH, 22.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.label(
+                            RichText::new(value)
+                                .font(FontId::new(13.0, theme::semibold()))
+                                .color(theme::TEXT),
+                        );
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.label(RichText::new(label).color(theme::TEXT_2));
+                        });
+                    },
+                );
+            };
+            row(ui, t.ping_average, format!("{average:.0} ms"));
+            row(ui, t.ping_last, format!("{ping:.0} ms"));
+            row(ui, t.ping_lost, loss_label(lost, counted));
+        });
     }
 }
 
@@ -2683,7 +2718,12 @@ fn loss_label(lost: u64, counted: u64) -> String {
     } else {
         lost as f64 * 100.0 / counted as f64
     };
-    format!("{lost} ({share:.1}%)")
+    format!("{lost} ({}%)", decimal(share, 1))
+}
+
+/// A number the way the interface language writes it: comma as the decimal mark.
+fn decimal(value: f64, places: usize) -> String {
+    format!("{value:.places$}").replace('.', ",")
 }
 
 /// The `ts3server://` link every TeamSpeak client opens, pointing at a channel.
@@ -2888,8 +2928,8 @@ mod reply_tests {
 
     #[test]
     fn packet_loss_reads_as_count_and_share() {
-        assert_eq!(loss_label(0, 0), "0 (0.0%)");
-        assert_eq!(loss_label(12, 3000), "12 (0.4%)");
+        assert_eq!(loss_label(0, 0), "0 (0,0%)");
+        assert_eq!(loss_label(12, 3000), "12 (0,4%)");
     }
 
     #[test]
@@ -2897,7 +2937,7 @@ mod reply_tests {
         let t = &crate::strings::PT;
         let json = r#"{"msg_type":"ts.file.myts","file_id":"x","file_name":"cat.gif","file_size":693210,"v2":true}"#;
         let shown = official_attachment(json, t).unwrap();
-        assert!(shown.starts_with("📎 cat.gif (0.7 MB)"), "{shown}");
+        assert!(shown.starts_with("📎 cat.gif (0,7 MB)"), "{shown}");
         assert_eq!(official_attachment("plain text", t), None);
         assert_eq!(official_attachment(r#"{"msg_type":"other"}"#, t), None);
     }
