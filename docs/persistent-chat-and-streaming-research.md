@@ -487,3 +487,17 @@ exe now writes `mirage.log` (stream connection state and decoder frames per 5
 s; no chat, no credentials) to `%APPDATA%	s6client` by default, trimmed at 2 MB.
 Gathering was ruled out as a delay on our side: host candidates leave within
 6 ms and srflx within 16 ms.
+
+### Sixth round: freezes of about 20 s (2026-11-13, evening)
+
+Watching the official stream now works but freezes. `mirage.log` (decoder
+line is printed on the first decode after 5 s, so a long gap between lines is a
+freeze): reports at 21:21:16 and 21:21:45, 21:22:13 and 21:22:31, with 236-291
+frames per report and decoder load about 40 % (so the decoder is not the
+limit). Connection state stayed `Connected`. So media stops for about 20 s
+while ICE is healthy, which looks like the viewer waiting for a keyframe the
+official client does not send for a PLI. Added: FIR next to PLI (both are
+negotiated), and a 5 s `stream track` log line with packets, samples, dropped,
+skipped (waiting for a keyframe), queue-full, keyframes and keyframe requests,
+which tells packet loss, an unanswered request and a local stall apart.
+Not confirmed yet.

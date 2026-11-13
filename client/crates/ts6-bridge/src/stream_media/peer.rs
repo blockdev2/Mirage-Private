@@ -14,6 +14,7 @@ use rtc::peer_connection::configuration::media_engine::{
 use rtc::peer_connection::event::RTCPeerConnectionIceEvent;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
+use rtc::rtcp::payload_feedbacks::full_intra_request::{FirEntry, FullIntraRequest};
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp::codec::h264::H264Packet;
 use rtc::rtp_transceiver::rtp_sender::{
@@ -375,6 +376,11 @@ impl PeerConnectionEventHandler for Viewer {
             let mut builder = SampleBuilder::new(64, H264Packet::default(), 90_000);
             let mut waiting_key = true;
             let mut last_pli: Option<Instant> = None;
+            let mut fir_sequence = 0u8;
+            // Counters for the 5 s log line: where a freeze happens.
+            let (mut packets, mut samples, mut dropped, mut skipped, mut full, mut keys, mut asked) =
+                (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+            let mut since = Instant::now();
             while let Some(event) = track.poll().await {
                 let packet = match event {
                     TrackRemoteEvent::OnRtpPacket(packet) => packet,
@@ -382,8 +388,26 @@ impl PeerConnectionEventHandler for Viewer {
                     _ => continue,
                 };
                 let now = Instant::now();
+                packets += 1;
+                if since.elapsed() >= Duration::from_secs(5) {
+                    tracing::info!(
+                        packets,
+                        samples,
+                        dropped,
+                        skipped,
+                        full,
+                        keys,
+                        asked,
+                        waiting_key,
+                        "stream track, last 5 s"
+                    );
+                    (packets, samples, dropped, skipped, full, keys, asked) = (0, 0, 0, 0, 0, 0, 0);
+                    since = now;
+                }
                 builder.push(now, packet);
                 while let Some(sample) = builder.pop(now) {
+                    samples += 1;
+                    dropped += u32::from(sample.prev_dropped_packets);
                     if keyframe.swap(false, Ordering::Relaxed) {
                         waiting_key = true;
                     }
@@ -394,12 +418,17 @@ impl PeerConnectionEventHandler for Viewer {
                         waiting_key = true;
                     }
                     if waiting_key && !is_keyframe(&sample.data) {
+                        skipped += 1;
                         continue;
                     }
+                    keys += u32::from(is_keyframe(&sample.data));
                     waiting_key = false;
                     match decode.try_send(sample.data.to_vec()) {
                         Ok(()) => {}
-                        Err(TrySendError::Full(_)) => waiting_key = true,
+                        Err(TrySendError::Full(_)) => {
+                            full += 1;
+                            waiting_key = true;
+                        }
                         Err(TrySendError::Disconnected(_)) => return,
                     }
                 }
@@ -409,7 +438,18 @@ impl PeerConnectionEventHandler for Viewer {
                         sender_ssrc: 0,
                         media_ssrc,
                     };
-                    let _ = track.write_rtcp(vec![Box::new(pli)]).await;
+                    fir_sequence = fir_sequence.wrapping_add(1);
+                    let fir = FullIntraRequest {
+                        sender_ssrc: 0,
+                        media_ssrc,
+                        fir: vec![FirEntry {
+                            ssrc: media_ssrc,
+                            sequence_number: fir_sequence,
+                        }],
+                    };
+                    asked += 1;
+                    // Both are negotiated (`nack pli`, `ccm fir`); either may be honored.
+                    let _ = track.write_rtcp(vec![Box::new(pli), Box::new(fir)]).await;
                 }
             }
         }));
