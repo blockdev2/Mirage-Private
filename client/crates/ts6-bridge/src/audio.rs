@@ -70,6 +70,9 @@ pub struct AudioEngine {
     /// Per-client playback volume, reapplied when playback restarts.
     volumes: std::collections::HashMap<u16, f32>,
     monitor: ts6_audio::Monitor,
+    /// A cue asked for before playback started (our own join: the UI turns
+    /// audio on a moment after the session connects).
+    pending_cue: Option<ts6_audio::cues::Cue>,
 }
 
 impl AudioEngine {
@@ -95,6 +98,7 @@ impl AudioEngine {
             applied: None,
             volumes: Default::default(),
             monitor: Default::default(),
+            pending_cue: None,
         }
     }
 
@@ -189,6 +193,9 @@ impl AudioEngine {
                     for (client, volume) in &self.volumes {
                         playback.set_volume(*client, *volume);
                     }
+                    if let Some(cue) = self.pending_cue.take() {
+                        playback.play_cue(cue);
+                    }
                     self.playback = Some(playback);
                 }
                 Err(error) => tracing::warn!(%error, "playback unavailable"),
@@ -252,9 +259,10 @@ impl AudioEngine {
     }
 
     /// Play a join or leave sound, when the speakers are open.
-    pub fn play_cue(&self, cue: ts6_audio::cues::Cue) {
-        if let Some(playback) = &self.playback {
-            playback.play_cue(cue);
+    pub fn play_cue(&mut self, cue: ts6_audio::cues::Cue) {
+        match &self.playback {
+            Some(playback) => playback.play_cue(cue),
+            None => self.pending_cue = Some(cue),
         }
     }
 
@@ -296,6 +304,7 @@ impl AudioEngine {
             playback.stop();
         }
         self.speaking.clear();
+        self.pending_cue = None;
     }
 
     /// Snapshot of the counters for the UI, refreshed at most every 400 ms.
@@ -416,6 +425,16 @@ pub fn device_lists() -> crate::protocol::DeviceLists {
 #[cfg(test)]
 mod safety_tests {
     use super::*;
+
+    #[test]
+    fn a_cue_before_playback_waits_for_it() {
+        let mut engine = AudioEngine::new();
+        engine.play_cue(ts6_audio::cues::Cue::Join);
+        assert_eq!(engine.pending_cue, Some(ts6_audio::cues::Cue::Join));
+        // Leaving the call drops a cue that never played.
+        engine.stop();
+        assert_eq!(engine.pending_cue, None);
+    }
 
     #[test]
     fn invalid_ptt_never_starts_a_transmitting_source() {
