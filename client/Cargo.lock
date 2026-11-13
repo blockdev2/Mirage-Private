@@ -6785,9 +6785,11 @@ name = "ts6-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "futures",
  "reqwest",
+ "rtc",
  "serde",
  "serde_json",
  "tokio",
@@ -6798,6 +6800,8 @@ dependencies = [
  "ts6-audio",
  "ts6-core",
  "ts6-input",
+ "webrtc",
+ "windows",
 ]
 
 [[package]]

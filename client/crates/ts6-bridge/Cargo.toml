@@ -21,6 +21,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }
 reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
+# Watching TS6 screen streams (WebRTC from the official client).
+webrtc = "=0.21.1"
+rtc = "=0.21.1"
+async-trait = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }

@@ -21,6 +21,7 @@ use ts6_core::{ChatTarget, ClientConfig, Item, Session};
 
 mod stream_check;
 mod stream_media;
+mod stream_offer;
 
 const HELP: &str = "\
 ts6-cli — diagnostic client for the TeamSpeak 6 core
@@ -40,6 +41,8 @@ COMMANDS:
                                           two-peer control test, no screen capture
   stream-media-check <addr> <private-directory> --channel <test-channel>
                                           optional Chromium synthetic video test
+  stream-offer <addr> <private-directory> --channel <channel>
+                                          ask to watch the next stream, print its offer's codecs
   audio-send <addr> [seconds]             send a 440 Hz Opus tone; Windows timer is scoped to the test
   audio-recv <addr> [seconds]             decode incoming voice and report RMS/peak
   audio-call <addr> [seconds]             full duplex with real mic/speakers
@@ -146,14 +149,17 @@ async fn main() -> Result<()> {
 
     let addr = positional.next().context("missing server address")?;
     let cfg = opts.config(&addr);
-    if command == "stream-check" || command == "stream-media-check" {
+    if matches!(
+        command.as_str(),
+        "stream-check" | "stream-media-check" | "stream-offer"
+    ) {
         let directory = positional
             .next()
             .context("missing private test directory")?;
-        return if command == "stream-check" {
-            stream_check::run(cfg, directory.into()).await
-        } else {
-            stream_media::run(cfg, directory.into()).await
+        return match command.as_str() {
+            "stream-check" => stream_check::run(cfg, directory.into()).await,
+            "stream-offer" => stream_offer::run(cfg, directory.into()).await,
+            _ => stream_media::run(cfg, directory.into()).await,
         };
     }
     let mut session = Session::connect(cfg).await?;

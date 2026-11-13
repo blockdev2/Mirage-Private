@@ -144,7 +144,19 @@ impl Owner {
         stream: Option<&str>,
         client: u16,
     ) -> Result<StreamEvent> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        self.event_within(kind, stream, Some(client), Duration::from_secs(10))
+            .await
+    }
+
+    /// Like `event`, with its own wait and any client when `client` is None.
+    pub(super) async fn event_within(
+        &mut self,
+        kind: ControlKind,
+        stream: Option<&str>,
+        client: Option<u16>,
+        wait: Duration,
+    ) -> Result<StreamEvent> {
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 bail!("stream notification deadline exceeded");
@@ -154,7 +166,7 @@ impl Owner {
                 .context("stream notification deadline exceeded")?
                 .context("stream notification owner ended")?;
             if notice.control.kind == kind
-                && notice.control.client_id == client
+                && client.is_none_or(|client| notice.control.client_id == client)
                 && stream.is_none_or(|stream| notice.control.stream_id == stream)
             {
                 return Ok(notice);

@@ -26,6 +26,7 @@ mod dev;
 mod home;
 mod peer;
 mod settings;
+mod stream;
 use chat::{ChatLog, Delivery, Entry, Failure, Incoming as ChatIncoming, Scope, MAX_MESSAGE_BYTES};
 use home::{Dialog, PendingConnect, Section};
 
@@ -210,6 +211,8 @@ pub struct App {
     logo: Option<LogoTexture>,
     /// Why the last attempt to send was refused before it left, if it was.
     chat_notice: Option<&'static str>,
+    /// The screen stream being watched, if any.
+    watching: Option<stream::Watching>,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
     connect_started: Option<Instant>,
@@ -234,6 +237,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx);
+        stream::install_waker(&cc.egui_ctx);
         let store = Store::open();
         // Start from the server used last, if any.
         let address = store
@@ -301,6 +305,7 @@ impl App {
             upload_queue: Default::default(),
             logo: None,
             chat_notice: None,
+            watching: None,
             connect_started: None,
             open_channels: HashMap::new(),
             server_open: true,
@@ -360,6 +365,7 @@ impl App {
                     }
                     self.snapshot = None;
                     self.audio = None;
+                    self.watching = None;
                     self.session_started = None;
                     self.call_channel = None;
                     self.ping_history.clear();
@@ -410,6 +416,7 @@ impl App {
                     self.apply_audio();
                 }
                 self.snapshot = Some(snapshot);
+                self.check_watched();
                 self.sync_volumes();
             }
             BridgeEvent::Log(line) => {
@@ -498,6 +505,7 @@ impl App {
                 self.media_avatars = avatars;
                 self.server_icon = server_icon;
             }
+            BridgeEvent::StreamState(update) => self.on_stream_state(update),
         }
     }
 
@@ -1332,6 +1340,11 @@ impl App {
         let room = slot
             .unwrap_or_else(|| ui.available_height() - reserve)
             .max(CARD_MIN_HEIGHT);
+        if self.watching.is_some() {
+            let room = slot.unwrap_or(room);
+            self.watching_area(ui, participants, room);
+            return;
+        }
         let Some(slot) = slot else {
             self.participants_content(ui, participants, room, None);
             return;
@@ -1472,6 +1485,40 @@ impl App {
 
         let corner = pos2(rect.right() - 16.0, baseline);
         self.voice_badge(painter, corner - vec2(0.0, 9.0), 18.0, client, speaking);
+
+        // Someone sharing their screen: badge, and a click watches it.
+        if client.is_streaming {
+            stream::live_badge(painter, rect.left_top() + vec2(10.0, 10.0), t.live_badge);
+            let watched = self
+                .watching
+                .as_ref()
+                .is_some_and(|w| w.client == client.id);
+            if !client.is_self && !watched {
+                let response = response.on_hover_text(t.watch_stream);
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    let pill = Rect::from_center_size(
+                        pos2(rect.center().x, rect.bottom() - 40.0),
+                        vec2(96.0, 28.0),
+                    );
+                    painter.rect_filled(
+                        pill,
+                        CornerRadius::same(14),
+                        Color32::from_black_alpha(190),
+                    );
+                    painter.text(
+                        pill.center(),
+                        Align2::CENTER_CENTER,
+                        t.watch_stream,
+                        FontId::new(13.0, theme::semibold()),
+                        Color32::WHITE,
+                    );
+                }
+                if response.clicked() {
+                    self.watch_stream(client.id);
+                }
+            }
+        }
     }
 
     /// The divider between participants and chat. Drag the grip up to give the

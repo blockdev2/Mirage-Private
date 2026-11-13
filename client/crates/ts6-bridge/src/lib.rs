@@ -12,6 +12,8 @@ mod audio;
 mod media;
 mod probe;
 mod protocol;
+pub mod stream_media;
+mod streams;
 
 /// Chat attachment parsing, shared with the native frontend.
 pub use ts6_core::attachments;
@@ -433,6 +435,11 @@ async fn session_task(
     let mut info_requested: Option<std::time::Instant> = None;
     // Our channel and who is in it, to sound joins and leaves.
     let mut members: Option<(u64, std::collections::HashSet<u16>)> = None;
+    // Screen streams: signaling state, the viewer worker, and our channel
+    // (leaving it ends the watched stream).
+    let mut streams = streams::StreamRegistry::default();
+    let mut viewer: Option<stream_media::StreamWorker> = None;
+    let mut own_channel: Option<u64> = None;
     let mut engine = audio::AudioEngine::new();
     let mut config = audio::AudioConfig::default();
     // Diagnostic counter (docs/verification.md V-21): tells "packets never arrive"
@@ -481,6 +488,23 @@ async fn session_task(
                                 if let Some(cue) = membership_cue(&mut members, &snapshot) {
                                     engine.play_cue(cue);
                                 }
+                                let channel = snapshot
+                                    .clients
+                                    .iter()
+                                    .find(|client| client.is_self)
+                                    .map(|client| client.channel_id);
+                                if own_channel.is_some() && channel != own_channel {
+                                    let actions = streams.stop();
+                                    stream_actions(
+                                        actions,
+                                        Some(&mut *active),
+                                        &mut viewer,
+                                        &events,
+                                        &internal,
+                                    );
+                                    streams.reset();
+                                }
+                                own_channel = channel;
                             }
                             if let Some(client) = watched {
                                 publish_connection_info(active, client, &events);
@@ -551,6 +575,16 @@ async fn session_task(
                             // Payloads may carry signalling or transfer credentials: log the
                             // command name and size only, never the raw content.
                             tracing::debug!(%name, bytes = content.len(), "unknown server command");
+                            if let Some(event) = ts6_core::streams::StreamEvent::parse(&content) {
+                                let actions = streams.on_event(&event, std::time::Instant::now());
+                                stream_actions(
+                                    actions,
+                                    Some(&mut *active),
+                                    &mut viewer,
+                                    &events,
+                                    &internal,
+                                );
+                            }
                         }
                         Item::Reconnecting => log(&events, "warn", "reconnecting..."),
                         Item::IdentityLevel(level) => {
@@ -579,6 +613,10 @@ async fn session_task(
             log(&events, "warn", "connection closed");
             session = None;
             members = None;
+            own_channel = None;
+            streams.reset();
+            viewer = None;
+            stream_media::frame::frames().close();
             engine.stop();
             media.reset();
             publish_media(&media, &events);
@@ -600,6 +638,26 @@ async fn session_task(
             }
         }
 
+        // Stream commands need the registry and the viewer, which the
+        // generic command handler does not own.
+        let pending = match pending {
+            Some(Command::WatchStream { client }) => {
+                let actions = streams.watch(client, std::time::Instant::now());
+                stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
+                None
+            }
+            Some(Command::StopWatching) => {
+                let actions = streams.stop();
+                stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
+                None
+            }
+            Some(Command::StreamWorker(report)) => {
+                let actions = streams.on_worker(report);
+                stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
+                None
+            }
+            other => other,
+        };
         if let Some(command) = pending {
             apply_command(
                 command,
@@ -611,6 +669,18 @@ async fn session_task(
                 &internal,
             )
             .await;
+            // A disconnect (or a new connection) ends any watched stream.
+            if session.is_none() {
+                streams.reset();
+                viewer = None;
+                own_channel = None;
+                stream_media::frame::frames().close();
+            }
+        }
+        // Signaling deadlines; the loop wakes at least every tick.
+        let expired = streams.tick(std::time::Instant::now());
+        if !expired.is_empty() {
+            stream_actions(expired, session.as_mut(), &mut viewer, &events, &internal);
         }
 
         if engine.stats_due() {
@@ -621,6 +691,72 @@ async fn session_task(
             let own = session.as_ref().and_then(|active| active.own_network());
             publish_audio(&mut engine, &events, tx_frames, own);
             engine.mark_published();
+        }
+    }
+}
+
+/// Carries out what the stream registry decided: server commands (fired
+/// without waiting, so voice never waits on stream signaling), viewer
+/// commands, and UI state.
+fn stream_actions(
+    actions: Vec<streams::Action>,
+    mut session: Option<&mut Session>,
+    viewer: &mut Option<stream_media::StreamWorker>,
+    events: &broadcast::Sender<String>,
+    internal: &mpsc::Sender<Command>,
+) {
+    use stream_media::WorkerCommand;
+    for action in actions {
+        match action {
+            streams::Action::Send(name, args) => {
+                if let Some(active) = session.as_deref_mut() {
+                    if let Err(error) = active.send_command_no_wait(name, &args) {
+                        tracing::debug!(%error, name, "stream command failed");
+                    }
+                }
+            }
+            streams::Action::Worker(command) => {
+                if viewer.is_none() && matches!(command, WorkerCommand::Offer { .. }) {
+                    *viewer = spawn_viewer(internal);
+                }
+                if let Some(worker) = viewer.as_ref() {
+                    if worker.send(command).is_err() {
+                        tracing::warn!("stream viewer queue full; its deadline ends the watch");
+                    }
+                }
+            }
+            streams::Action::Publish {
+                client,
+                state,
+                reason,
+            } => protocol::publish(
+                events,
+                &Event::StreamState {
+                    client,
+                    state,
+                    reason,
+                },
+            ),
+        }
+    }
+}
+
+/// Starts the viewer worker; its reports come back as internal commands.
+fn spawn_viewer(internal: &mpsc::Sender<Command>) -> Option<stream_media::StreamWorker> {
+    let (reports, mut incoming) = mpsc::channel(64);
+    let forward = internal.clone();
+    tokio::spawn(async move {
+        while let Some(report) = incoming.recv().await {
+            if forward.send(Command::StreamWorker(report)).await.is_err() {
+                break;
+            }
+        }
+    });
+    match stream_media::StreamWorker::spawn(reports) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            tracing::warn!(%error, "stream viewer could not start");
+            None
         }
     }
 }
@@ -1013,6 +1149,9 @@ async fn apply_command(
         // Nothing to do: waking the loop lets it publish fresh audio counters.
         Command::Tick => {}
 
+        // Handled by the session loop before this function.
+        Command::WatchStream { .. } | Command::StopWatching | Command::StreamWorker(_) => {}
+
         Command::Volume { client, volume } => engine.set_volume(client, volume),
 
         // Handled by the session loop before commands are applied.
@@ -1270,6 +1409,7 @@ mod cue_tests {
                     is_self,
                     avatar_hash: None,
                     myteamspeak_avatar: None,
+                    is_streaming: false,
                 })
                 .collect(),
         }

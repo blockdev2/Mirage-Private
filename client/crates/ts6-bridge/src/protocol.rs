@@ -184,6 +184,15 @@ pub enum Command {
     /// when nobody is talking and no other event arrives.
     #[serde(skip)]
     Tick,
+    /// Watch the TS6 stream (screen share) of this client.
+    WatchStream {
+        client: u16,
+    },
+    /// Leave the watched stream.
+    StopWatching,
+    /// Internal: a report from the stream viewer worker.
+    #[serde(skip)]
+    StreamWorker(crate::stream_media::WorkerEvent),
 }
 
 // Log only the operation, never credential-bearing fields or user content.
@@ -207,6 +216,9 @@ impl std::fmt::Debug for Command {
             Self::AttachmentSent { .. } => "AttachmentSent",
             Self::ChatFileDone { .. } => "ChatFileDone",
             Self::Tick => "Tick",
+            Self::WatchStream { .. } => "WatchStream",
+            Self::StopWatching => "StopWatching",
+            Self::StreamWorker(_) => "StreamWorker",
             Self::Volume { .. } => "Volume",
             Self::ConnectionInfo { .. } => "ConnectionInfo",
         })
@@ -286,6 +298,13 @@ pub enum Event<'a> {
     },
     State {
         snapshot: &'a ts6_core::Snapshot,
+    },
+    /// Watching a stream: `connecting | playing | ended | failed`; `reason`
+    /// is `refused | timeout | unsupported | network | no_decoder` on failure.
+    StreamState {
+        client: u16,
+        state: &'a str,
+        reason: Option<&'a str>,
     },
     Log {
         level: &'a str,
@@ -380,6 +399,24 @@ mod tests {
         )
         .expect("channel chat command");
         assert!(!format!("{command:?}").contains("private fixture text"));
+    }
+
+    #[test]
+    fn stream_watch_commands_and_state_events_round_trip() {
+        let watch: Command = serde_json::from_str(r#"{"op":"watch_stream","client":302}"#).unwrap();
+        assert!(matches!(watch, Command::WatchStream { client: 302 }));
+        let stop: Command = serde_json::from_str(r#"{"op":"stop_watching"}"#).unwrap();
+        assert!(matches!(stop, Command::StopWatching));
+        let event = serde_json::to_value(Event::StreamState {
+            client: 302,
+            state: "failed",
+            reason: Some("refused"),
+        })
+        .unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({"ev":"stream_state","client":302,"state":"failed","reason":"refused"})
+        );
     }
 
     #[test]

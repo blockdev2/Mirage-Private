@@ -50,6 +50,8 @@ pub struct ClientInfo {
     /// HTTPS address of the myTeamSpeak account avatar that official TS6
     /// clients announce instead of a file-transfer avatar.
     pub myteamspeak_avatar: Option<String>,
+    /// Whether the client is sharing a TS6 stream (screen) right now.
+    pub is_streaming: bool,
 }
 
 /// Connection statistics of one client, as the server reports them after a
@@ -119,6 +121,7 @@ impl Snapshot {
                     .my_team_speak_avatar
                     .as_deref()
                     .and_then(crate::media::myteamspeak_avatar_url),
+                is_streaming: c.is_streaming.unwrap_or(false),
             })
             .collect();
 
@@ -216,6 +219,24 @@ mod tests {
         assert_eq!(s.find_channel("permanent channel").map(|c| c.id), Some(3));
         assert_eq!(s.find_channel("DEFAULT CHANNEL").map(|c| c.id), Some(1));
         assert!(s.find_channel("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn clients_carry_the_streaming_flag_on_the_wire() {
+        let client = ClientInfo {
+            id: 302,
+            channel_id: 1,
+            name: "novalloy".into(),
+            uid: None,
+            input_muted: false,
+            output_muted: false,
+            is_self: false,
+            avatar_hash: None,
+            myteamspeak_avatar: None,
+            is_streaming: true,
+        };
+        let json = serde_json::to_value(&client).unwrap();
+        assert_eq!(json["is_streaming"], serde_json::json!(true));
     }
 
     #[test]

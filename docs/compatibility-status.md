@@ -166,3 +166,13 @@ dependencies, through `scripts/check_chat_browser.py`. Audio stayed disabled. Na
 native chat surface was not driven in a rendered live-server interaction.
 
 See [channel chat](channel-chat.md) for the protocol and remaining limitations.
+
+## Stream viewer dependencies (2026-11-13)
+
+Stage 1 of the native stream viewer adds `webrtc` 0.21.1 (webrtc-rs) and,
+on Windows, `windows` 0.62.2 (Media Foundation) to `ts6-bridge`. The lockfile
+gained 57 packages and no existing package changed version; the bridge's
+normal dependency tree grew from 430 to 520 unique entries. Every new license
+is permissive (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode-3.0; `self_cell` is
+used under its Apache-2.0 option). `cargo audit` exited zero with the same six
+pre-existing unmaintained-crate warnings and no vulnerabilities.

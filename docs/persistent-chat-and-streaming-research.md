@@ -274,3 +274,65 @@ See [native streaming architecture](native-streaming-architecture.md) for the
 owner's subsequent GPU/capture/audio direction, verified library capabilities
 and the Windows process-loopback version constraint. Chromium is a diagnostic
 engine here, not the selected production native media stack.
+
+## Native viewer against the official client (2026-11-13) — NOT WORKING YET
+
+Stage 1 of the native stream viewer
+([spec](superpowers/specs/2026-11-13-stream-viewer-design.md),
+[plan](superpowers/plans/2026-11-13-stream-viewer.md)) is implemented in
+`ts6-bridge` (`streams.rs`, `stream_media/`) and the desktop (`app/stream.rs`),
+but **watching a stream from the official TS6 client does not connect yet**.
+The "AO VIVO" badge and "Assistir" are visible; clicking ends with "Não foi
+possível conectar à transmissão (rede bloqueada?)". To be fixed later.
+
+What works, observed live on the owner's beta13.1 server (same machine for
+the viewer, official client on another PC):
+
+- `client_is_streaming` reaches the UI; a stream already running when we join
+  is found through `requeststreaminfo` → `notifystreaminfo`.
+- `joinstreamrequest` is admitted automatically; the libwebrtc offer arrives
+  (≈4.1 KB, AV1/H.264/VP9/VP8 + Opus stereo) and ~30 trickled candidates follow.
+- webrtc-rs 0.21.1 accepts the offer, answers H.264 High (pt 102) and sends its
+  answer and candidates through `streamsignaling` in the reference format
+  (`{"cmd":"answer","args":{"answer":…}}`, `iceCandidate` with `sdp/mid/mLine`).
+- Mirage ↔ Mirage on loopback (webrtc-rs both sides) connects and decodes.
+
+What fails, from ICE traces (counts only; addresses were never recorded):
+
+1. First attempts: our connectivity checks reached the publisher and some got
+   success responses, but the publisher **never sent a single check of its
+   own**, so nothing was nominated. Others were answered with STUN
+   **401 Unauthorized** (read with a temporary diagnostic build of rtc-ice).
+2. About 15 s after the first offer the official client sends a **new offer**
+   through `streamsignaling` (`offer`/`reconnectOffer`, ≈4.3 KB). Mirage used
+   to ignore it; it now answers it with a fresh peer.
+3. After two fixes (accepting the audio m-line like a browser instead of
+   rejecting it, and answering re-offers) the last attempt showed **no 401s**
+   and four negotiations, but still no connection.
+
+Reading: the official client behaves as if it never applies our answer (no
+remote ICE credentials, hence no checks of its own, then a re-offer). Leads for
+next time, in order:
+
+- Confirm whether the server delivers our `streamsignaling` answer: send it
+  with `send_command` (awaited) in a diagnostic and record the result code.
+- Compare with what an official viewer sends: the answer may need another
+  key, an extra argument, or the candidates may be expected inside the SDP
+  (non-trickle answer after gathering completes).
+- Bind only real LAN interfaces (WSL/Hyper-V 172.x and VPN adapters produce
+  "network unreachable" noise) and add a STUN server for cross-home tests.
+- If webrtc-rs ↔ libwebrtc DTLS/ICE interop is the blocker, the spec's
+  fallback is LiveKit's libwebrtc bindings.
+
+Diagnostic command kept for this work: `ts6-cli stream-offer <addr> <dir>
+--channel <name>` asks to watch the next stream and prints only the offer's
+codec/feedback/extension lines and candidate-type counts.
+
+Overlap to resolve: PR #12 added a separate `ts6-stream` crate (webrtc-rs
+publisher and viewer peers with the same `streamsignaling` JSON, tested on
+loopback, not wired to the session). The bridge viewer in
+`ts6-bridge/src/stream_media` is wired end to end. When the official-client
+interop is fixed, keep one implementation (likely `ts6-stream` for the peers,
+`ts6-bridge` for signaling and decoding). Note that `ts6-stream` holds remote
+candidates that arrive before the remote description; check whether that
+matters for the official client.

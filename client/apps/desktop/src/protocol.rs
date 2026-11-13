@@ -44,6 +44,9 @@ pub struct ClientInfo {
     /// Avatar flag; older bridges do not send it.
     #[serde(default)]
     pub avatar_hash: Option<String>,
+    /// Sharing a TS6 stream; older bridges do not send it.
+    #[serde(default)]
+    pub is_streaming: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,6 +182,18 @@ pub enum BridgeEvent {
         #[serde(default)]
         server_icon: Option<String>,
     },
+    /// Progress of the stream (screen share) being watched.
+    StreamState(StreamState),
+}
+
+/// `state`: connecting, playing, ended or failed; `reason` (when failed):
+/// refused, timeout, unsupported, network or no_decoder.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamState {
+    pub client: u16,
+    pub state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Commands sent to the bridge. The `op` field is the discriminant.
@@ -250,11 +265,51 @@ pub enum Command {
     SetAvatar {
         path: Option<String>,
     },
+    /// Watch the screen stream this client is sharing.
+    WatchStream {
+        client: u16,
+    },
+    StopWatching,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_state_events_parse() {
+        for (state, reason) in [
+            ("connecting", None),
+            ("playing", None),
+            ("ended", None),
+            ("failed", Some("refused")),
+            ("failed", Some("timeout")),
+            ("failed", Some("unsupported")),
+            ("failed", Some("network")),
+            ("failed", Some("no_decoder")),
+        ] {
+            let json = serde_json::json!({"ev": "stream_state", "client": 302, "state": state, "reason": reason});
+            let event: BridgeEvent = serde_json::from_value(json).unwrap();
+            let BridgeEvent::StreamState(parsed) = event else {
+                panic!("not a stream state");
+            };
+            assert_eq!(parsed.client, 302);
+            assert_eq!(parsed.state, state);
+            assert_eq!(parsed.reason.as_deref(), reason);
+        }
+    }
+
+    #[test]
+    fn watch_commands_serialize() {
+        assert_eq!(
+            serde_json::to_value(Command::WatchStream { client: 302 }).unwrap(),
+            serde_json::json!({"op": "watch_stream", "client": 302})
+        );
+        assert_eq!(
+            serde_json::to_value(Command::StopWatching).unwrap(),
+            serde_json::json!({"op": "stop_watching"})
+        );
+    }
 
     #[test]
     fn channel_chat_events_preserve_scope_and_request_results() {
