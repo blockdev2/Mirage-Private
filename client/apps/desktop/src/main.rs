@@ -31,10 +31,22 @@ fn main() -> eframe::Result {
         }
         instance::Outcome::TooMany => return Ok(()),
     };
+    // Debug builds only: MIRAGE_DEV_SIZE=1000x640 opens the window that small, to check layouts.
+    let mut size = [1280.0, 820.0];
+    #[cfg(debug_assertions)]
+    if let Some((w, h)) = std::env::var("MIRAGE_DEV_SIZE")
+        .ok()
+        .as_deref()
+        .and_then(|v| v.split_once('x'))
+    {
+        if let (Ok(w), Ok(h)) = (w.parse(), h.parse()) {
+            size = [w, h];
+        }
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(instance::window_title(instance.slot))
-            .with_inner_size([1280.0, 820.0])
+            .with_inner_size(size)
             .with_min_inner_size([1000.0, 640.0])
             .with_drag_and_drop(true),
         ..Default::default()
