@@ -70,6 +70,17 @@ feed (used for the end-to-end test below).
 The `Build client` workflow also packs the installer on every run (artifact
 `Mirage-installer`), so a broken packaging step shows up long before a tag.
 
+## Releasing by hand (no Actions)
+
+When the Actions workflow cannot run (for example the account's billing is
+blocked), build and pack locally and hand out `Mirage-win-Setup.exe`
+(`Mirage-win-Setup.exe.sha256` lets people verify it). Nothing needs a release
+feed for that: an installed copy whose feed has no release simply finds no
+update. Steps: `cargo build --release --locked -p ts6-desktop` in `client`,
+then `./scripts/pack_installer.ps1 -Version X.Y.Z -Vpk <vpk.exe> -Notes <file>`
+with the environment from "Local end-to-end test". Keep `## Unreleased` as the
+heading in `CHANGELOG.md` while the workflow is the thing that reads it.
+
 ## Version pairing
 
 The `velopack` crate (`client/apps/desktop/Cargo.toml`) and the `vpk` tool must
