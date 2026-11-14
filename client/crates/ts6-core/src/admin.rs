@@ -181,6 +181,20 @@ pub enum AdminOp {
         token: String,
     },
     ServerGroups,
+    /// A new regular server group (no permissions yet).
+    ServerGroupCreate {
+        name: String,
+    },
+    ServerGroupRename {
+        group: u64,
+        name: String,
+    },
+    /// `force` also removes the group from the people who still have it.
+    ServerGroupDelete {
+        group: u64,
+        #[serde(default)]
+        force: bool,
+    },
     ChannelGroups,
     ServerGroupMembers {
         group: u64,
@@ -369,6 +383,26 @@ impl AdminOp {
             }
             UseToken { token } => Request::new("privilegekeyuse").text("token", token)?,
             ServerGroups => Request::new("servergrouplist").replies(&["notifyservergrouplist"]),
+            ServerGroupCreate { name } => {
+                if name.trim().is_empty() {
+                    return Err("a group needs a name".into());
+                }
+                // 1: a regular group (0 is a template, 2 a query group).
+                Request::new("servergroupadd")
+                    .text("name", name)?
+                    .arg("type", 1)
+            }
+            ServerGroupRename { group, name } => {
+                if name.trim().is_empty() {
+                    return Err("a group needs a name".into());
+                }
+                Request::new("servergrouprename")
+                    .arg("sgid", group)
+                    .text("name", name)?
+            }
+            ServerGroupDelete { group, force } => Request::new("servergroupdel")
+                .arg("sgid", group)
+                .arg("force", u8::from(*force)),
             ChannelGroups => Request::new("channelgrouplist").replies(&["notifychannelgrouplist"]),
             ServerGroupMembers { group } => Request::new("servergroupclientlist")
                 .arg("sgid", group)
@@ -546,6 +580,41 @@ mod tests {
             .unwrap();
         assert_eq!(arg(&temporary, "channel_flag_semi_permanent"), Some("1"));
         assert_eq!(arg(&temporary, "cpid"), None);
+    }
+
+    #[test]
+    fn server_groups_can_be_created_renamed_and_deleted() {
+        let create = op(r#"{"action":"server_group_create","name":"Moderadores"}"#)
+            .request()
+            .unwrap();
+        assert_eq!(create.name, "servergroupadd");
+        assert_eq!(arg(&create, "name"), Some("Moderadores"));
+        assert_eq!(arg(&create, "type"), Some("1"));
+        let rename = op(r#"{"action":"server_group_rename","group":9,"name":"Mods"}"#)
+            .request()
+            .unwrap();
+        assert_eq!(rename.name, "servergrouprename");
+        assert_eq!(arg(&rename, "sgid"), Some("9"));
+        let delete = op(r#"{"action":"server_group_delete","group":9,"force":true}"#)
+            .request()
+            .unwrap();
+        assert_eq!(delete.name, "servergroupdel");
+        assert_eq!(arg(&delete, "force"), Some("1"));
+        assert_eq!(
+            arg(
+                &op(r#"{"action":"server_group_delete","group":9}"#)
+                    .request()
+                    .unwrap(),
+                "force"
+            ),
+            Some("0")
+        );
+        for json in [
+            r#"{"action":"server_group_create","name":"  "}"#,
+            r#"{"action":"server_group_rename","group":1,"name":""}"#,
+        ] {
+            assert!(op(json).request().is_err(), "{json}");
+        }
     }
 
     #[test]

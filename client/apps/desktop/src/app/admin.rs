@@ -39,6 +39,8 @@ pub(super) enum Purpose {
     Done(&'static str),
     /// Say this, then read the group's permissions again.
     Edited(u64, &'static str),
+    /// Say this, then read the list of groups again.
+    GroupsChanged(&'static str),
     Groups,
     Catalog,
     GroupPermissions(u64),
@@ -101,6 +103,15 @@ pub(super) enum AdminDialog {
         name: String,
         password: String,
     },
+    /// A new server group (`id` None) or a new name for one.
+    GroupName {
+        id: Option<u64>,
+        name: String,
+    },
+    GroupDelete {
+        id: u64,
+        name: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +129,8 @@ pub(super) struct Panel {
     filter: String,
     new_name: String,
     new_value: i32,
+    /// A dialog the window asked for; moved to `Admin::dialog` each frame.
+    ask: Option<AdminDialog>,
 }
 
 struct Toast {
@@ -252,6 +265,10 @@ impl App {
                     json!({ "group": group }),
                 );
             }
+            Purpose::GroupsChanged(text) => {
+                self.toast(text, false);
+                self.admin_send(Purpose::Groups, "server_groups", json!({}));
+            }
             Purpose::MemberChanged(db_id, text) => {
                 self.toast(text, false);
                 self.admin_send(
@@ -298,6 +315,13 @@ impl App {
                     panel
                         .groups
                         .sort_by_key(|g| number(g, "sortid").unwrap_or(0));
+                    // The chosen group may have just been deleted.
+                    if panel.group.is_some_and(|id| {
+                        !panel.groups.iter().any(|g| number(g, "sgid") == Some(id))
+                    }) {
+                        panel.group = None;
+                        panel.permissions.clear();
+                    }
                 }
             }
             Purpose::GroupPermissions(group) => {
@@ -336,7 +360,10 @@ impl App {
                     }
                 }
             }
-            Purpose::Done(_) | Purpose::Edited(..) | Purpose::MemberChanged(..) => {}
+            Purpose::Done(_)
+            | Purpose::Edited(..)
+            | Purpose::GroupsChanged(_)
+            | Purpose::MemberChanged(..) => {}
         }
     }
 
@@ -398,6 +425,7 @@ impl App {
             filter: String::new(),
             new_name: String::new(),
             new_value: 1,
+            ask: None,
         });
         self.admin_send(Purpose::Groups, "server_groups", json!({}));
         if !self.admin.catalog_asked {
@@ -670,6 +698,50 @@ impl App {
                     }
                 });
             }
+            AdminDialog::GroupName { id, name } => {
+                let title = if id.is_some() {
+                    "Renomear grupo"
+                } else {
+                    "Novo grupo"
+                };
+                dialog_window(ctx, title, |ui| {
+                    ui.label("Nome");
+                    first_field(ui, egui::TextEdit::singleline(name));
+                    ui.add_space(12.0);
+                    let go = buttons(ui, t, t.save, Tone::Primary, &mut keep);
+                    if go && name.trim().is_empty() {
+                        keep = true; // a group needs a name
+                    } else if go {
+                        send = Some(match id {
+                            Some(group) => (
+                                Purpose::GroupsChanged("Grupo renomeado."),
+                                "server_group_rename",
+                                json!({ "group": *group, "name": name.trim() }),
+                            ),
+                            None => (
+                                Purpose::GroupsChanged("Grupo criado."),
+                                "server_group_create",
+                                json!({ "name": name.trim() }),
+                            ),
+                        });
+                    }
+                });
+            }
+            AdminDialog::GroupDelete { id, name } => {
+                dialog_window(ctx, "Excluir grupo", |ui| {
+                    ui.label(format!(
+                        "Excluir o grupo \"{name}\"? Quem está nele perde o grupo e as permissões que ele dava. Isso não pode ser desfeito."
+                    ));
+                    ui.add_space(12.0);
+                    if buttons(ui, t, t.delete, Tone::Danger, &mut keep) {
+                        send = Some((
+                            Purpose::GroupsChanged("Grupo excluído."),
+                            "server_group_delete",
+                            json!({ "group": *id, "force": true }),
+                        ));
+                    }
+                });
+            }
             AdminDialog::JoinPassword {
                 channel,
                 name,
@@ -733,6 +805,9 @@ impl App {
         for (purpose, action, args) in requests {
             self.admin_send(purpose, action, args);
         }
+        if let Some(dialog) = panel.ask.take() {
+            self.admin.dialog = Some(dialog);
+        }
         if open {
             self.admin.panel = Some(panel);
         }
@@ -755,6 +830,38 @@ impl App {
                             if panel.groups.is_empty() {
                                 ui.label(RichText::new("Nenhum grupo lido.").color(theme::TEXT_3));
                             }
+                            let chosen = panel.group.and_then(|id| {
+                                panel
+                                    .groups
+                                    .iter()
+                                    .find(|g| number(g, "sgid") == Some(id))
+                                    // Templates and query groups are not ours to change.
+                                    .filter(|g| field(g, "type") == "1")
+                                    .map(|g| (id, field(g, "name")))
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Novo").clicked() {
+                                    panel.ask = Some(AdminDialog::GroupName {
+                                        id: None,
+                                        name: String::new(),
+                                    });
+                                }
+                                if let Some((id, name)) = &chosen {
+                                    if ui.small_button("Renomear").clicked() {
+                                        panel.ask = Some(AdminDialog::GroupName {
+                                            id: Some(*id),
+                                            name: name.clone(),
+                                        });
+                                    }
+                                    if ui.small_button("Excluir").clicked() {
+                                        panel.ask = Some(AdminDialog::GroupDelete {
+                                            id: *id,
+                                            name: name.clone(),
+                                        });
+                                    }
+                                }
+                            });
+                            ui.separator();
                             for group in &panel.groups {
                                 let Some(id) = number(group, "sgid") else {
                                     continue;

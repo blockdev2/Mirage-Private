@@ -102,6 +102,19 @@ def main():
         boss.until(lambda e: e.get("ev") == "state" and not any(c["id"] == channel["id"] for c in e["snapshot"]["channels"]))
         print("PASS: a client was moved and poked, then the channel was deleted")
 
+        made = admin(boss, "server_group_create", name="Grupo do teste")
+        if made["ok"]:
+            row = next(r for r in expect(admin(boss, "server_groups"), what="groups") if r.get("name") == "Grupo do teste")
+            assert row.get("type") == "1", row
+            gid = int(row["sgid"])
+            expect(admin(boss, "server_group_rename", group=gid, name="Grupo renomeado"), what="rename")
+            assert any(r.get("name") == "Grupo renomeado" for r in expect(admin(boss, "server_groups"), what="groups"))
+            expect(admin(boss, "server_group_delete", group=gid, force=True), what="delete")
+            assert not any(r.get("sgid") == str(gid) for r in expect(admin(boss, "server_groups"), what="groups"))
+            print("PASS: a server group was created, renamed and deleted")
+        else:
+            print("INFO: creating a group refused:", made["error"])
+
         bad = admin(boss, "server_group_remove_permission", group=1, permission="Not A Perm")
         assert bad["ok"] is False and bad["code"] == "invalid", bad
         print("PASS: a malformed permission name is rejected locally")
