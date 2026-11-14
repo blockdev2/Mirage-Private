@@ -156,6 +156,20 @@ pub enum Error {
 	HandshakeWait(#[source] tsproto::client::Error),
 }
 
+/// Reply commands whose raw line is also passed up as [`StreamItem::UnknownCommand`].
+const RAW_REPLIES: &[&str] = &[
+	"notifybanlist",
+	"notifychannelgrouplist",
+	"notifychannelgrouppermlist",
+	"notifychannelpermlist",
+	"notifyclientpermlist",
+	"notifypermissionlist",
+	"notifyservergroupclientlist",
+	"notifyservergrouplist",
+	"notifyservergrouppermlist",
+	"notifyservergroupsbyclientid",
+];
+
 /// The reason for a temporary disconnect.
 #[derive(Clone, Copy, Debug)]
 pub enum TemporaryDisconnectReason {
@@ -1581,6 +1595,21 @@ impl ConnectedConnection {
 		&mut self, book: &mut data::Connection, stream_items: &mut VecDeque<Result<StreamItem>>,
 		options: &mut ConnectOptions, cmd: InCommandBuf,
 	) -> Option<TemporaryDisconnectReason> {
+		// Replies to administration list commands (groups, permissions, bans) are
+		// parsed and used by the book or dropped, but a frontend wants the rows
+		// themselves. Hand the raw line up as well, then continue as usual.
+		{
+			let content = cmd.data().packet().content();
+			let end = content.iter().position(|&b| b == b' ').unwrap_or(content.len());
+			if let Ok(name) = std::str::from_utf8(&content[..end]) {
+				if RAW_REPLIES.contains(&name) {
+					stream_items.push_back(Ok(StreamItem::UnknownCommand {
+						name: name.to_string(),
+						content: String::from_utf8_lossy(content).into_owned(),
+					}));
+				}
+			}
+		}
 		let msg = match InMessage::new(cmd.data().packet().header(), cmd.data().packet().content())
 		{
 			Ok(r) => r,

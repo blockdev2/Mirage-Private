@@ -21,6 +21,7 @@ The fork branch provides exactly that, as `StreamItem::UnknownCommand { name, co
 - `client_is_streaming` on client info (TS6 state),
 - fixes to filetransfer/license parsing and to the DNS resolver,
 - TeaSpeak identity support (`tsclientlib/src/teaspeak_identity.rs`).
+- Local patch (this repository): replies to administration list commands (`notifyservergrouplist`, `notifybanlist`, the `*permlist` family and a few more; see `RAW_REPLIES` in `tsclientlib/src/lib.rs`) are also handed up as `StreamItem::UnknownCommand`, because the typed messages are consumed by the book or dropped and `ts6-core::admin` needs the rows.
 
 It also adds an SSRF guard that refuses private/loopback targets. That is opt-out with the
 environment variable `ALLOW_PRIVATE_TARGETS=1`, which our local testbed needs (see

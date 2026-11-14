@@ -9,6 +9,7 @@
 //! are sent through [`Session::send_command`], the same raw path the type-safe
 //! commands use, so the TS6 layer can live entirely in this crate.
 
+pub mod admin;
 pub mod attachments;
 pub mod config;
 pub mod identity;

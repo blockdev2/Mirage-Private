@@ -111,6 +111,9 @@ impl App {
         let mut volume = self.saved_volume(client);
         let mut changed = false;
         let mut open_info = false;
+        let mut moderation: Option<super::admin::AdminDialog> = None;
+        let mut write_to: Option<u16> = None;
+        let mut groups_of: Option<(u64, String)> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -206,7 +209,31 @@ impl App {
                     open_info = true;
                     ui.close();
                 }
+                if !client.is_self {
+                    if menu_item(ui, icon::REPLY, t.user_message).clicked() {
+                        write_to = Some(client.id);
+                        ui.close();
+                    }
+                    if client.db_id != 0
+                        && menu_item(ui, icon::USER_PLUS, "Grupos do servidor").clicked()
+                    {
+                        groups_of = Some((client.db_id, client.name.clone()));
+                        ui.close();
+                    }
+                    ui.add_space(2.0);
+                    ui.separator();
+                    moderation = moderation_items(ui, client);
+                }
             });
+        if moderation.is_some() {
+            self.admin.dialog = moderation;
+        }
+        if let Some((db_id, name)) = groups_of {
+            self.open_memberships(db_id, name);
+        }
+        if let Some(id) = write_to {
+            self.chat_to = super::chat::Target::Person(id);
+        }
         if changed {
             self.set_saved_volume(client, volume);
         }
@@ -730,6 +757,50 @@ fn bytes(value: u64) -> String {
     } else {
         format!("{value} B")
     }
+}
+
+/// Poke, kick and ban entries of a participant's menu; the chosen one opens its dialog.
+fn moderation_items(ui: &mut egui::Ui, client: &ClientInfo) -> Option<super::admin::AdminDialog> {
+    use super::admin::AdminDialog;
+    let name = client.name.clone();
+    let id = client.id;
+    let mut chosen = None;
+    if menu_item(ui, icon::ARROW_RIGHT, "Cutucar").clicked() {
+        chosen = Some(AdminDialog::Poke {
+            client: id,
+            name: name.clone(),
+            text: String::new(),
+        });
+        ui.close();
+    }
+    if menu_item(ui, icon::X, "Expulsar do canal").clicked() {
+        chosen = Some(AdminDialog::Kick {
+            client: id,
+            name: name.clone(),
+            from_server: false,
+            reason: String::new(),
+        });
+        ui.close();
+    }
+    if menu_item(ui, icon::X, "Expulsar do servidor").clicked() {
+        chosen = Some(AdminDialog::Kick {
+            client: id,
+            name: name.clone(),
+            from_server: true,
+            reason: String::new(),
+        });
+        ui.close();
+    }
+    if menu_item(ui, icon::TRASH, "Banir").clicked() {
+        chosen = Some(AdminDialog::Ban {
+            client: id,
+            name,
+            choice: 1,
+            reason: String::new(),
+        });
+        ui.close();
+    }
+    chosen
 }
 
 #[cfg(test)]

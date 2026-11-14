@@ -30,6 +30,9 @@ pub struct ChannelInfo {
     pub topic: Option<String>,
     pub codec: String,
     pub clients: usize,
+    /// Joining needs a password. Older bridges do not send it.
+    #[serde(default)]
+    pub has_password: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +50,12 @@ pub struct ClientInfo {
     /// Sharing a TS6 stream; older bridges do not send it.
     #[serde(default)]
     pub is_streaming: bool,
+    /// Marked away; older bridges do not send it.
+    #[serde(default)]
+    pub away: bool,
+    /// The server's database id (group operations); 0 when unknown.
+    #[serde(default)]
+    pub db_id: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,6 +184,15 @@ pub enum BridgeEvent {
         #[serde(default)]
         kind: Option<String>,
     },
+    /// Answer to one `admin` command: `error` is set when it failed, `rows`
+    /// holds what a list operation returned.
+    AdminResult {
+        request_id: String,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        rows: Vec<std::collections::BTreeMap<String, String>>,
+    },
     /// Local paths of cached avatars (by client uid) and of the server icon.
     Media {
         #[serde(default)]
@@ -217,9 +235,15 @@ pub struct StreamState {
 pub enum Command {
     Chat {
         session_id: String,
+        /// The current channel; ignored by the bridge for other scopes.
         channel: String,
         text: String,
         request_id: String,
+        /// Omitted for the channel, so older bridges still understand it.
+        #[serde(skip_serializing_if = "ChatScope::is_channel")]
+        scope: ChatScope,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<u16>,
     },
     /// Send a local file to the current channel (photo, GIF or any file).
     ChatAttach {
@@ -243,9 +267,24 @@ pub enum Command {
     Disconnect,
     Join {
         channel: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+    /// A server administration operation; `args` is a JSON object.
+    Admin {
+        request_id: String,
+        action: &'static str,
+        #[serde(flatten)]
+        args: serde_json::Value,
     },
     Nick {
         name: String,
+    },
+    /// Marks us away or present again.
+    Away {
+        away: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// The bridge treats an omitted field as `false`, so callers should send both.
     Mute {
@@ -302,6 +341,37 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_commands_and_results_match_the_bridge_wire() {
+        let command = serde_json::to_value(Command::Admin {
+            request_id: "adm0".into(),
+            action: "kick",
+            args: serde_json::json!({ "client": 3, "reason": "x", "from_server": true }),
+        })
+        .unwrap();
+        assert_eq!(
+            command,
+            serde_json::json!({
+                "op": "admin", "request_id": "adm0", "action": "kick",
+                "client": 3, "reason": "x", "from_server": true
+            })
+        );
+        let join = serde_json::to_value(Command::Join {
+            channel: "4".into(),
+            password: Some("p".into()),
+        })
+        .unwrap();
+        assert_eq!(join["password"], "p");
+        let result: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"admin_result","request_id":"adm1","ok":true,"error":null,"code":null,"rows":[{"sgid":"6","name":"Server Admin"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            BridgeEvent::AdminResult { rows, error: None, .. } if rows[0]["name"] == "Server Admin"
+        ));
+    }
 
     #[test]
     fn stream_state_events_parse() {
@@ -484,11 +554,26 @@ mod tests {
             channel: "3".into(),
             text: "oi".into(),
             request_id: "r1".into(),
+            scope: ChatScope::Channel,
+            client: None,
         })
         .unwrap();
         assert_eq!(
             json,
             r#"{"op":"chat","session_id":"s1","channel":"3","text":"oi","request_id":"r1"}"#
+        );
+        let private = serde_json::to_string(&Command::Chat {
+            session_id: "s1".into(),
+            channel: "3".into(),
+            text: "oi".into(),
+            request_id: "r2".into(),
+            scope: ChatScope::Private,
+            client: Some(9),
+        })
+        .unwrap();
+        assert!(
+            private.contains(r#""scope":"private","client":9"#),
+            "{private}"
         );
         let result: BridgeEvent = serde_json::from_str(
             r#"{"ev":"chat_result","request_id":"r1","error":null,"code":null}"#,
@@ -523,9 +608,34 @@ mod tests {
     }
 }
 
+/// Who a chat message is for (`scope` of the bridge's `chat` command).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatScope {
+    #[default]
+    Channel,
+    Server,
+    Private,
+}
+
+impl ChatScope {
+    fn is_channel(&self) -> bool {
+        *self == Self::Channel
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
+    /// Empty for server-wide and private messages.
     pub channel: String,
+    /// `channel`, `server` or `private`; absent on older bridges (channel).
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub from_id: Option<u16>,
+    /// For private messages, the other person.
+    #[serde(default)]
+    pub peer_id: Option<u16>,
     pub sender: String,
     pub text: String,
     pub from_self: bool,

@@ -13,23 +13,29 @@ use egui::{
 use crate::bridge::{Bridge, Incoming, SocketState};
 use crate::clock;
 use crate::protocol::{
-    AudioEvent, BridgeEvent, ChannelInfo, ClientInfo, Command, DeviceLists, LogLine, Snapshot,
-    StatusEvent,
+    AudioEvent, BridgeEvent, ChannelInfo, ChatScope, ClientInfo, Command, DeviceLists, LogLine,
+    Snapshot, StatusEvent,
 };
 use crate::store::{AddressProblem, Store, TransmitMode};
 use crate::strings::{Strings, PT};
 use crate::theme::{self, icon, Tone};
 
+mod admin;
 mod chat;
 #[cfg(debug_assertions)]
 mod dev;
 mod home;
+mod idle;
 mod peer;
+mod reconnect;
 mod settings;
 mod share;
 mod stream;
 mod updates;
-use chat::{ChatLog, Delivery, Entry, Failure, Incoming as ChatIncoming, Scope, MAX_MESSAGE_BYTES};
+use chat::{
+    ChatLog, Delivery, Destination, Entry, Failure, Incoming as ChatIncoming, Scope,
+    Target as ChatTo, MAX_MESSAGE_BYTES,
+};
 use home::{Dialog, PendingConnect, Section};
 
 const MAX_LOG_LINES: usize = 300;
@@ -81,6 +87,21 @@ struct ImageViewer {
     uri: String,
     zoom: f32,
     offset: egui::Vec2,
+}
+
+/// Longest away message, in bytes (the bridge refuses more than 80).
+const AWAY_MESSAGE_MAX: usize = 80;
+
+/// How long the "private message" toast stays.
+const DM_TOAST: Duration = Duration::from_secs(10);
+
+/// A private message that arrived and has not been dealt with.
+struct DmNotice {
+    peer: u16,
+    name: String,
+    at: Instant,
+    /// The taskbar has been asked for attention.
+    alerted: bool,
 }
 
 /// A chat attachment's local state.
@@ -155,6 +176,8 @@ pub struct App {
     volumes_dirty: bool,
     /// Open connection info window, if any.
     info_view: Option<peer::InfoView>,
+    /// Server administration: dialogs, groups window and answers.
+    admin: admin::Admin,
     /// Our own ping, one sample a second, for the status bar graph.
     ping_history: std::collections::VecDeque<f32>,
     ping_sampled: Option<std::time::Instant>,
@@ -213,6 +236,25 @@ pub struct App {
     logo: Option<LogoTexture>,
     /// Why the last attempt to send was refused before it left, if it was.
     chat_notice: Option<&'static str>,
+    /// Who the composer writes to.
+    chat_to: ChatTo,
+    /// A private message just arrived from this person (shown as a toast).
+    dm_notice: Option<DmNotice>,
+    /// Trying to get back to a server whose connection was lost.
+    reconnect: Option<reconnect::Reconnect>,
+    /// Set while the reconnection itself starts a connection.
+    auto_connecting: bool,
+    /// The channel we were in when the connection was lost, to go back to.
+    rejoin: Option<u64>,
+    /// The password the current server was joined with, kept in memory so a
+    /// reconnection can send it; never read from the form again.
+    session_password: Option<String>,
+    /// The away status was set by the idle timer, not chosen by the person.
+    auto_away: bool,
+    /// When the idle time was last read.
+    idle_checked: Instant,
+    /// The message being typed in the status menu.
+    away_draft: String,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
     /// Whether the window is currently fullscreen because of a stream.
@@ -281,6 +323,7 @@ impl App {
             volumes_sent: HashMap::new(),
             volumes_dirty: false,
             info_view: None,
+            admin: Default::default(),
             ping_history: Default::default(),
             ping_sampled: None,
             media_avatars: HashMap::new(),
@@ -324,6 +367,15 @@ impl App {
             upload_queue: Default::default(),
             logo: None,
             chat_notice: None,
+            chat_to: ChatTo::Channel,
+            dm_notice: None,
+            reconnect: None,
+            auto_connecting: false,
+            rejoin: None,
+            session_password: None,
+            auto_away: false,
+            idle_checked: Instant::now(),
+            away_draft: String::new(),
             watching: None,
             window_fullscreen: false,
             sharing: None,
@@ -390,9 +442,35 @@ impl App {
                     self.session_started = Some(Instant::now());
                 }
                 if !status.connected {
+                    let now = Instant::now();
                     if self.status.connected {
                         // The session ended: go back to the hub.
                         self.section = Section::Home;
+                        // Lost, not left or removed: try to get back.
+                        if let (Some(error), Some(address)) =
+                            (&status.error, self.session_address.clone())
+                        {
+                            if reconnect::is_recoverable(error) {
+                                self.reconnect = Some(reconnect::Reconnect::new(address, now));
+                                self.rejoin = self
+                                    .snapshot
+                                    .clone()
+                                    .and_then(|snapshot| self.own_channel(&snapshot));
+                            }
+                        }
+                    } else if self.reconnect.as_ref().is_some_and(|r| r.at.is_none()) {
+                        // An attempt of the reconnection failed: try again unless
+                        // the server refused us for good.
+                        if let Some(running) = self.reconnect.take() {
+                            let retry = status
+                                .error
+                                .as_deref()
+                                .is_none_or(reconnect::is_worth_retrying);
+                            self.reconnect = retry.then(|| running.failed(now)).flatten();
+                        }
+                    }
+                    if self.reconnect.is_none() {
+                        self.session_password = None;
                     }
                     self.snapshot = None;
                     self.audio = None;
@@ -404,18 +482,22 @@ impl App {
                     self.ping_sampled = None;
                     self.volumes_sent.clear();
                     self.info_view = None;
+                    self.admin_reset();
                     self.media_avatars.clear();
                     self.server_icon = None;
                     self.media_textures.clear();
                     self.chat.clear();
                     self.session_address = None;
                     self.chat_notice = None;
+                    self.chat_to = ChatTo::Channel;
+                    self.dm_notice = None;
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
                         self.pending = None;
                     }
                 }
                 if status.connected {
+                    self.reconnect = None;
                     if let Some(name) = &status.nickname {
                         self.nickname = name.clone();
                     }
@@ -446,6 +528,17 @@ impl App {
                     self.publish_avatar(profile.as_deref());
                     // Voice works as soon as the call starts, with the saved settings.
                     self.apply_audio();
+                }
+                // After a reconnection, go back to the channel we were in when
+                // the connection was lost, unless it needs a password or is gone.
+                if let Some(channel) = self.rejoin.take() {
+                    let here = self.own_channel(&snapshot);
+                    if let Some(id) = reconnect::rejoin_target(&snapshot.channels, channel, here) {
+                        self.send(Command::Join {
+                            channel: id.to_string(),
+                            password: None,
+                        });
+                    }
                 }
                 self.snapshot = Some(snapshot);
                 self.check_watched();
@@ -480,13 +573,34 @@ impl App {
                 }
             }
             BridgeEvent::Chat(message) => {
-                // The bridge forwards channel messages only, tagged with the
-                // channel they were received in.
-                if let Ok(channel) = message.channel.parse::<u64>() {
+                // Channel messages carry their channel; server-wide and
+                // private ones carry none. Bridges that predate `scope` only
+                // sent channel messages.
+                let (scope, channel) = match message.scope.as_deref() {
+                    Some("server") => (Scope::Server, None),
+                    Some("private") => (Scope::Private, None),
+                    _ => (Scope::Channel, message.channel.parse::<u64>().ok()),
+                };
+                if scope == Scope::Private && !message.from_self {
+                    // Say so when it is not the conversation already open.
+                    if let Some(peer) = message
+                        .peer_id
+                        .filter(|p| self.chat_to != ChatTo::Person(*p))
+                    {
+                        self.dm_notice = Some(DmNotice {
+                            peer,
+                            name: message.sender.clone(),
+                            at: Instant::now(),
+                            alerted: false,
+                        });
+                    }
+                }
+                if scope != Scope::Channel || channel.is_some() {
                     let incoming = ChatIncoming {
-                        scope: Scope::Channel,
-                        channel: Some(channel),
-                        from_id: None,
+                        scope,
+                        channel,
+                        from_id: message.from_id,
+                        peer: message.peer_id,
                         author: message.sender,
                         text: message.text,
                         mine: message.from_self,
@@ -496,6 +610,11 @@ impl App {
                     self.keep_chat();
                 }
             }
+            BridgeEvent::AdminResult {
+                request_id,
+                error,
+                rows,
+            } => self.on_admin_result(&request_id, error, rows),
             BridgeEvent::ChatResult {
                 request_id,
                 error,
@@ -822,6 +941,10 @@ impl eframe::App for App {
             }
         }
         self.connection_window(&ctx);
+        self.admin_ui(&ctx);
+        self.dm_toast(&ctx);
+        self.reconnect_tick(&ctx);
+        self.idle_tick(&ctx);
     }
 }
 
@@ -1101,6 +1224,17 @@ impl App {
             );
         }
 
+        if channel.has_password {
+            painter.text(
+                rect.right_center() - vec2(if members.is_empty() { 12.0 } else { 36.0 }, 0.0),
+                Align2::RIGHT_CENTER,
+                icon::LOCK_SIMPLE,
+                FontId::new(13.0, theme::icons()),
+                theme::TEXT_3,
+            );
+        }
+        self.channel_menu(&response, channel);
+
         if response.clicked() {
             let on_caret = response
                 .interact_pointer_pos()
@@ -1109,9 +1243,18 @@ impl App {
                 self.open_channels.insert(channel.id, !open);
             } else if !selected {
                 self.open_channels.insert(channel.id, true);
-                self.send(Command::Join {
-                    channel: channel.id.to_string(),
-                });
+                if channel.has_password {
+                    self.admin.dialog = Some(admin::AdminDialog::JoinPassword {
+                        channel: channel.id,
+                        name: channel.name.clone(),
+                        password: String::new(),
+                    });
+                } else {
+                    self.send(Command::Join {
+                        channel: channel.id.to_string(),
+                        password: None,
+                    });
+                }
             }
             if !(on_caret && expandable) {
                 self.section = Section::Voice;
@@ -1149,7 +1292,18 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
         let painter = ui.painter();
-        let name_color = if speaking { theme::TEXT } else { theme::TEXT_2 };
+        let name_color = if speaking {
+            theme::TEXT
+        } else if client.away {
+            theme::TEXT_3
+        } else {
+            theme::TEXT_2
+        };
+        let shown = if client.away {
+            format!("{} ({})", client.name, self.t.status_away.to_lowercase())
+        } else {
+            client.name.clone()
+        };
         draw_avatar(
             ui,
             rect.left_center() + vec2(30.0 + indent, 0.0),
@@ -1160,7 +1314,7 @@ impl App {
         );
         let name = theme::fit_text(
             painter,
-            &client.name,
+            &shown,
             FontId::new(13.0, theme::medium()),
             name_color,
             rect.width() - (50.0 + indent) - 32.0,
@@ -1183,6 +1337,143 @@ impl App {
         response
     }
 
+    /// Goes away after a while without input and comes back with the first
+    /// input, when the setting is on. Never undoes an away the person chose.
+    fn idle_tick(&mut self, ctx: &egui::Context) {
+        if !self.in_session() {
+            self.auto_away = false;
+            return;
+        }
+        let limit = self.store.data.idle_away_minutes;
+        if limit == 0 && !self.auto_away {
+            return;
+        }
+        let since = self.idle_checked.elapsed();
+        if since < idle::CHECK_EVERY {
+            ctx.request_repaint_after(idle::CHECK_EVERY - since);
+            return;
+        }
+        self.idle_checked = Instant::now();
+        ctx.request_repaint_after(idle::CHECK_EVERY);
+        let away = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.clients.iter().any(|c| c.is_self && c.away));
+        if !away {
+            self.auto_away = false;
+        }
+        // Talking counts as being there, whatever the keyboard says.
+        let transmitting = self.audio.as_ref().is_some_and(|a| a.transmitting);
+        let idle = if transmitting {
+            Some(Duration::ZERO)
+        } else {
+            idle::idle_time()
+        };
+        let Some(idle) = idle else {
+            return;
+        };
+        match idle::decide(idle, limit, away, self.auto_away) {
+            idle::Action::GoAway => {
+                self.auto_away = true;
+                self.send(Command::Away {
+                    away: true,
+                    message: None,
+                });
+            }
+            idle::Action::Return => {
+                self.auto_away = false;
+                self.send(Command::Away {
+                    away: false,
+                    message: None,
+                });
+            }
+            idle::Action::Nothing => {}
+        }
+    }
+
+    /// Starts the next reconnection attempt when it is due.
+    fn reconnect_tick(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let Some(state) = &self.reconnect else {
+            return;
+        };
+        if !state.due(now) {
+            // Not due yet, or an attempt is running and its answer wakes us.
+            if let Some(at) = state.at {
+                ctx.request_repaint_after(at - now);
+            }
+            return;
+        }
+        if !self.can_connect() {
+            // The bridge is busy or the profile is missing: ask again soon.
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return;
+        }
+        let address = state.address.clone();
+        if let Some(state) = self.reconnect.as_mut() {
+            state.started();
+        }
+        self.auto_connecting = true;
+        self.start_connect(&address);
+        self.auto_connecting = false;
+        // start_connect refused (for example an invalid saved address): stop.
+        if self.connect_started.is_none() {
+            self.reconnect = None;
+        }
+    }
+
+    /// "Mensagem privada de X" with a button to answer, for a few seconds. A
+    /// window that is not in front also asks for attention on the taskbar.
+    fn dm_toast(&mut self, ctx: &egui::Context) {
+        let t = self.t;
+        let Some(notice) = self.dm_notice.as_mut() else {
+            return;
+        };
+        if notice.at.elapsed() > DM_TOAST {
+            self.dm_notice = None;
+            return;
+        }
+        if !notice.alerted {
+            notice.alerted = true;
+            if !ctx.input(|i| i.focused) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+        let (peer, name) = (notice.peer, notice.name.clone());
+        let mut answer = false;
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::NULL.with("dm-toast"))
+            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -150.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(theme::SURFACE_RAISED)
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(16, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(t.dm_from(&name)).color(theme::TEXT));
+                            if ui.button(t.dm_answer).clicked() {
+                                answer = true;
+                            }
+                            if ui.button("✕").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            });
+        if answer {
+            self.chat_to = ChatTo::Person(peer);
+        }
+        if answer || dismiss {
+            self.dm_notice = None;
+        }
+    }
+
     fn user_card(&mut self, ui: &mut egui::Ui) {
         let t = self.t;
         // In a call the server's nickname; otherwise the active local profile.
@@ -1197,7 +1488,14 @@ impl App {
                 .clone()
                 .unwrap_or_else(|| t.no_profile.to_string())
         };
-        let (status, color) = if self.in_session() {
+        let away = self.in_session()
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.clients.iter().any(|c| c.is_self && c.away));
+        let (status, color) = if away {
+            (t.status_away, theme::WARNING)
+        } else if self.in_session() {
             (t.available, theme::SUCCESS)
         } else if profile_name.is_some() {
             (t.local_profile, theme::TEXT_3)
@@ -1210,9 +1508,10 @@ impl App {
             .store
             .active_profile_id()
             .and_then(|id| self.profile_photo(ui.ctx(), &id));
+        let mut set_away = None;
         ui.horizontal(|ui| {
             theme::avatar_or_photo(ui, &name, 36.0, photo.as_ref());
-            ui.vertical(|ui| {
+            let who = ui.vertical(|ui| {
                 // Leave room for the settings button on the right, so a long
                 // name is cut with an ellipsis instead of pushing it out.
                 ui.set_max_width((ui.available_width() - 32.0 - 12.0).max(40.0));
@@ -1230,6 +1529,42 @@ impl App {
                     });
                 });
             });
+            // In a call, clicking the name changes the status.
+            if self.in_session() {
+                let click = ui.interact(
+                    who.response.rect,
+                    ui.make_persistent_id("status-menu"),
+                    Sense::click(),
+                );
+                click.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, t.available)
+                });
+                let click = click.on_hover_cursor(egui::CursorIcon::PointingHand);
+                egui::Popup::menu(&click)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.set_width(220.0);
+                        if away {
+                            if ui.button(t.status_set_available).clicked() {
+                                set_away = Some((false, None));
+                                ui.close();
+                            }
+                        } else {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.away_draft)
+                                    .hint_text(t.away_message_hint)
+                                    .char_limit(AWAY_MESSAGE_MAX)
+                                    .desired_width(220.0),
+                            );
+                            if ui.button(t.status_set_away).clicked() {
+                                let text = self.away_draft.trim().to_string();
+                                set_away = Some((true, Some(text).filter(|m| !m.is_empty())));
+                                self.away_draft.clear();
+                                ui.close();
+                            }
+                        }
+                    });
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let gear = theme::glyph_button(ui, icon::GEAR, t.settings_title, 32.0, 45.0);
                 if self.update_waiting() {
@@ -1250,6 +1585,11 @@ impl App {
                 }
             });
         });
+        if let Some((away, message)) = set_away {
+            // The person chose this: the idle timer must not undo it.
+            self.auto_away = false;
+            self.send(Command::Away { away, message });
+        }
         ui.add_space(10.0);
         ui.separator();
     }
@@ -1776,12 +2116,72 @@ impl App {
         }
     }
 
+    /// "Para: Canal | Todo o servidor | <pessoa>": who the composer writes to.
+    /// A person is chosen from their menu, not from here.
+    fn chat_target_row(&mut self, ui: &mut egui::Ui, person: Option<&str>) {
+        let t = self.t;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(t.chat_to).small().color(theme::TEXT_3));
+            let mut to = self.chat_to;
+            if ui
+                .selectable_label(
+                    to == ChatTo::Channel,
+                    RichText::new(t.chat_to_channel).small(),
+                )
+                .clicked()
+            {
+                to = ChatTo::Channel;
+            }
+            if ui
+                .selectable_label(
+                    to == ChatTo::Server,
+                    RichText::new(t.chat_to_server).small(),
+                )
+                .clicked()
+            {
+                to = ChatTo::Server;
+            }
+            if let (ChatTo::Person(_), Some(name)) = (to, person) {
+                let label = format!("{name} ✕");
+                ui.selectable_label(true, RichText::new(label).small())
+                    .on_hover_text(t.chat_stop_private)
+                    .clicked()
+                    .then(|| to = ChatTo::Channel);
+            }
+            self.chat_to = to;
+        });
+    }
+
     fn chat_composer(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let t = self.t;
-        let placeholder = t.chat_placeholder_in(channel_name);
+        // A private recipient who has left is dropped.
+        if let ChatTo::Person(id) = self.chat_to {
+            let present = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.clients.iter().any(|c| c.id == id && !c.is_self));
+            if !present {
+                self.chat_to = ChatTo::Channel;
+            }
+        }
+        let person_name = match self.chat_to {
+            ChatTo::Person(id) => self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.clients.iter().find(|c| c.id == id))
+                .map(|c| c.name.clone()),
+            _ => None,
+        };
+        let placeholder = match (&self.chat_to, &person_name) {
+            (ChatTo::Server, _) => t.chat_placeholder_server.to_string(),
+            (ChatTo::Person(_), Some(name)) => t.chat_placeholder_to(name),
+            _ => t.chat_placeholder_in(channel_name),
+        };
         let mut submit = false;
         theme::input_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
+            self.chat_target_row(ui, person_name.as_deref());
             if let Some((author, _)) = self.chat_reply.clone() {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -1813,7 +2213,10 @@ impl App {
                 vec2(ui.available_width(), 32.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let can_attach = self.channel_chat && self.staged.len() < MAX_STAGED;
+                    // Files go to the channel only.
+                    let can_attach = self.channel_chat
+                        && self.chat_to == ChatTo::Channel
+                        && self.staged.len() < MAX_STAGED;
                     let attach = ui
                         .add_enabled_ui(can_attach, |ui| {
                             ui.add_sized(
@@ -2105,11 +2508,40 @@ impl App {
         let me = snapshot.clients.iter().find(|c| c.is_self);
         let author = me.map_or_else(|| self.nickname.clone(), |c| c.name.clone());
         let from_id = Some(snapshot.own_client_id);
+        let (scope, to) = match self.chat_to {
+            ChatTo::Channel => (ChatScope::Channel, None),
+            ChatTo::Server => (ChatScope::Server, None),
+            ChatTo::Person(id) if snapshot.clients.iter().any(|c| c.id == id && !c.is_self) => {
+                (ChatScope::Private, Some(id))
+            }
+            // The person left: keep the draft and go back to the channel.
+            ChatTo::Person(_) => {
+                self.chat_to = ChatTo::Channel;
+                return;
+            }
+        };
+        let destination = match scope {
+            ChatScope::Channel => Destination {
+                scope: Scope::Channel,
+                channel: Some(channel),
+                peer: None,
+            },
+            ChatScope::Server => Destination {
+                scope: Scope::Server,
+                channel: None,
+                peer: None,
+            },
+            ChatScope::Private => Destination {
+                scope: Scope::Private,
+                channel: None,
+                peer: to,
+            },
+        };
         self.next_chat_request += 1;
         let request_id = format!("native-{}", self.next_chat_request);
-        self.chat.sent(
+        self.chat.sent_to(
             request_id.clone(),
-            Some(channel),
+            destination,
             from_id,
             author,
             text.clone(),
@@ -2121,6 +2553,8 @@ impl App {
             channel: channel.to_string(),
             text,
             request_id,
+            scope,
+            client: to,
         });
         self.chat_draft.clear();
         self.chat_reply = None;
@@ -2365,8 +2799,19 @@ impl App {
                         );
                         let tag = match entry.scope {
                             Scope::Channel => None,
-                            Scope::Server => Some(t.chat_scope_server),
-                            Scope::Private => Some(t.chat_scope_private),
+                            Scope::Server => Some(t.chat_scope_server.to_string()),
+                            // What we wrote names the other person.
+                            Scope::Private if entry.mine => Some(
+                                snapshot
+                                    .and_then(|s| {
+                                        s.clients.iter().find(|c| Some(c.id) == entry.peer)
+                                    })
+                                    .map_or_else(
+                                        || t.chat_scope_private.to_string(),
+                                        |c| format!("{} {}", t.chat_scope_private_to, c.name),
+                                    ),
+                            ),
+                            Scope::Private => Some(t.chat_scope_private.to_string()),
                         };
                         if let Some(tag) = tag {
                             ui.label(RichText::new(tag).small().color(theme::TEXT_3));

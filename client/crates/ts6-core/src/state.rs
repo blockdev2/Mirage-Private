@@ -34,6 +34,8 @@ pub struct ChannelInfo {
     pub topic: Option<String>,
     pub codec: String,
     pub clients: usize,
+    /// Joining needs a password (`join_channel_with_password`).
+    pub has_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +54,11 @@ pub struct ClientInfo {
     pub myteamspeak_avatar: Option<String>,
     /// Whether the client is sharing a TS6 stream (screen) right now.
     pub is_streaming: bool,
+    /// Marked away (the status "ausente"/"away"), with or without a message.
+    pub away: bool,
+    /// The server's database id of this client (what group and permission
+    /// operations take); 0 when the server has not told us.
+    pub db_id: u64,
 }
 
 /// Connection statistics of one client, as the server reports them after a
@@ -122,6 +129,8 @@ impl Snapshot {
                     .as_deref()
                     .and_then(crate::media::myteamspeak_avatar_url),
                 is_streaming: c.is_streaming.unwrap_or(false),
+                away: c.away_message.is_some(),
+                db_id: c.database_id.0,
             })
             .collect();
 
@@ -135,6 +144,7 @@ impl Snapshot {
                 topic: ch.topic.clone(),
                 codec: format!("{:?}", ch.codec),
                 clients: clients.iter().filter(|c| c.channel_id == ch.id.0).count(),
+                has_password: ch.has_password.unwrap_or(false),
             })
             .collect();
         channels.sort_by_key(|c| c.id);
@@ -185,6 +195,7 @@ mod tests {
             topic: None,
             codec: "OpusVoice".to_string(),
             clients: 0,
+            has_password: false,
         }
     }
 
@@ -234,6 +245,8 @@ mod tests {
             avatar_hash: None,
             myteamspeak_avatar: None,
             is_streaming: true,
+            away: false,
+            db_id: 0,
         };
         let json = serde_json::to_value(&client).unwrap();
         assert_eq!(json["is_streaming"], serde_json::json!(true));

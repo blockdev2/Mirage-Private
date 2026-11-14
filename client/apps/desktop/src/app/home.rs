@@ -474,6 +474,9 @@ impl App {
         if self.nav_item(ui, icon::PLUS, t.add_server, false) {
             self.open_favorite_dialog(None);
         }
+        if self.in_session() && self.nav_item(ui, icon::GEAR, "Administração", false) {
+            self.open_admin_window();
+        }
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             self.user_card(ui);
@@ -1257,6 +1260,31 @@ impl App {
             });
             ui.add_space(14.0);
 
+            if let Some(state) = self.reconnect.clone() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(t.reconnecting(
+                            &state.address,
+                            state.attempt + 1,
+                            super::reconnect::MAX_ATTEMPTS,
+                        ))
+                        .small()
+                        .color(theme::WARNING),
+                    );
+                    if ui.small_button(t.reconnect_cancel).clicked() {
+                        // An attempt already handed to the bridge would still
+                        // finish: leave the server again if it does.
+                        if state.at.is_none() {
+                            self.send(Command::Disconnect);
+                        }
+                        self.reconnect = None;
+                        self.rejoin = None;
+                        self.session_password = None;
+                    }
+                });
+            }
+            ui.add_space(8.0);
             // Connect.
             let connecting = self.is_connecting();
             let blocked = self.connect_blocker();
@@ -1403,18 +1431,32 @@ impl App {
             return;
         };
         let address = address.trim().to_string();
+        if !self.auto_connecting {
+            // The user chose a server: stop trying to return to the old one.
+            self.reconnect = None;
+            self.rejoin = None;
+        }
         self.pending = Some(PendingConnect {
             address: address.clone(),
             profile_id: self.store.active_profile_id(),
             save_favorite: self.save_favorite,
         });
+        // A reconnection sends the password the session was joined with, never
+        // whatever the form holds by then.
+        let password = if self.auto_connecting {
+            self.session_password.clone()
+        } else {
+            let typed = non_empty(&self.password);
+            self.session_password = typed.clone();
+            typed
+        };
         self.connect_started = Some(Instant::now());
         // Hide the previous attempt's error while this one is running.
         self.status.error = None;
         self.send(Command::Connect {
             address,
             nickname: Some(nickname),
-            server_password: non_empty(&self.password),
+            server_password: password,
         });
     }
 
@@ -1905,7 +1947,11 @@ impl App {
 }
 
 /// A centered, fixed-width window used by every dialog.
-fn dialog_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn dialog_window(
+    ctx: &egui::Context,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     let frame = egui::Frame::NONE
         .fill(theme::SURFACE)
         .stroke(Stroke::new(1.0, theme::BORDER))

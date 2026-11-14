@@ -181,6 +181,26 @@ pub struct Strings {
     pub chat_too_long: &'static str,
     pub chat_scope_server: &'static str,
     pub chat_scope_private: &'static str,
+    pub chat_scope_private_to: &'static str,
+    pub chat_to: &'static str,
+    pub group_status: &'static str,
+    pub idle_away_title: &'static str,
+    pub idle_away_hint: &'static str,
+    pub idle_away_never: &'static str,
+    pub away_message_hint: &'static str,
+    pub reconnect_cancel: &'static str,
+    pub reconnect_text: &'static str,
+    pub dm_answer: &'static str,
+    pub dm_from_prefix: &'static str,
+    pub status_away: &'static str,
+    pub status_set_away: &'static str,
+    pub status_set_available: &'static str,
+    pub chat_to_channel: &'static str,
+    pub chat_to_server: &'static str,
+    pub chat_placeholder_server: &'static str,
+    pub chat_placeholder_person_prefix: &'static str,
+    pub user_message: &'static str,
+    pub chat_stop_private: &'static str,
     pub voice_connected: &'static str,
     pub push_to_talk: &'static str,
     pub mic_mute: &'static str,
@@ -324,6 +344,33 @@ impl Strings {
         }
     }
 
+    /// "N minutos", for the idle-away choices.
+    pub fn minutes(&self, n: u32) -> String {
+        if n == 1 {
+            "1 minuto".to_string()
+        } else {
+            format!("{n} minutos")
+        }
+    }
+
+    /// "Reconectando a <servidor> (tentativa N de M)".
+    pub fn reconnecting(&self, address: &str, attempt: u32, max: u32) -> String {
+        format!(
+            "{} {address} (tentativa {attempt} de {max})",
+            self.reconnect_text
+        )
+    }
+
+    /// The toast text for a private message from `name`.
+    pub fn dm_from(&self, name: &str) -> String {
+        format!("{} {name}", self.dm_from_prefix)
+    }
+
+    /// Placeholder of the composer when writing privately to `name`.
+    pub fn chat_placeholder_to(&self, name: &str) -> String {
+        format!("{} {name}", self.chat_placeholder_person_prefix)
+    }
+
     /// Placeholder of the chat composer, naming the channel.
     pub fn chat_placeholder_in(&self, channel: &str) -> String {
         format!("{} {channel}", self.chat_placeholder_prefix)
@@ -362,6 +409,8 @@ impl Strings {
             self.error_clone.to_string()
         } else if raw.to_lowercase().contains("password") {
             self.error_password.to_string()
+        } else if let Some(why) = raw.strip_prefix("connection closed: ") {
+            removal_text(why).unwrap_or_else(|| raw.to_string())
         } else {
             raw.to_string()
         }
@@ -569,6 +618,26 @@ pub const PT: Strings = Strings {
     chat_too_long: "Mensagem longa demais. O limite é de 1024 bytes.",
     chat_scope_server: "servidor",
     chat_scope_private: "privado",
+    chat_scope_private_to: "privado para",
+    chat_to: "Para",
+    group_status: "Status",
+    idle_away_title: "Ficar ausente sozinho",
+    idle_away_hint: "Depois de um tempo sem usar o teclado nem o mouse. Você volta ao mexer neles.",
+    idle_away_never: "Nunca",
+    away_message_hint: "Mensagem (opcional)",
+    reconnect_cancel: "Cancelar",
+    reconnect_text: "Reconectando a",
+    dm_answer: "Responder",
+    dm_from_prefix: "Mensagem privada de",
+    status_away: "Ausente",
+    status_set_away: "Ficar ausente",
+    status_set_available: "Ficar disponível",
+    chat_to_channel: "Canal",
+    chat_to_server: "Todo o servidor",
+    chat_placeholder_server: "Conversar com todo o servidor",
+    chat_placeholder_person_prefix: "Mensagem privada para",
+    user_message: "Mensagem privada",
+    chat_stop_private: "Voltar para o canal",
     voice_connected: "Voz conectada",
     push_to_talk: "Push-to-talk",
     mic_mute: "Silenciar microfone",
@@ -693,6 +762,26 @@ pub const PT: Strings = Strings {
     upd_restart_note: "O Mirage fecha e abre de novo sozinho. Se você estiver em uma chamada, ela será encerrada.",
 };
 
+/// Why the server ended our session (the bridge's English wording) in Portuguese.
+fn removal_text(why: &str) -> Option<String> {
+    let who = |prefix: &str| why.strip_prefix(prefix).map(|name| name.trim().to_string());
+    if let Some(name) = who("kicked from the server by ") {
+        Some(format!("Você foi expulso do servidor por {name}."))
+    } else if why == "kicked from the server" {
+        Some("Você foi expulso do servidor.".to_string())
+    } else if let Some(name) = who("banned from the server by ") {
+        Some(format!("Você foi banido do servidor por {name}."))
+    } else if why == "banned from the server" {
+        Some("Você foi banido do servidor.".to_string())
+    } else if why == "the server shut down" {
+        Some("O servidor foi encerrado.".to_string())
+    } else if why == "the connection timed out" {
+        Some("A conexão com o servidor caiu.".to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PT;
@@ -704,6 +793,24 @@ mod tests {
         assert_eq!(PT.last_access(3 * 3_600), "Último acesso: há 3 h");
         assert_eq!(PT.last_access(30 * 3_600), "Último acesso: ontem");
         assert_eq!(PT.last_access(4 * 86_400), "Último acesso: há 4 dias");
+    }
+
+    #[test]
+    fn a_removal_by_the_server_is_explained() {
+        assert_eq!(
+            PT.connect_error("connection closed: kicked from the server by Ana"),
+            "Você foi expulso do servidor por Ana."
+        );
+        assert_eq!(
+            PT.connect_error("connection closed: banned from the server"),
+            "Você foi banido do servidor."
+        );
+        assert_eq!(
+            PT.connect_error("connection closed: the server shut down"),
+            "O servidor foi encerrado."
+        );
+        // Anything else stays as reported.
+        assert_eq!(PT.connect_error("connection closed"), "connection closed");
     }
 
     #[test]

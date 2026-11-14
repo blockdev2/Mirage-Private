@@ -575,25 +575,26 @@ async fn session_task(
                             engine.on_audio(packet)
                         }
                         Item::TextMessage(message) => {
-                            if matches!(message.target, ts6_core::MessageTarget::Channel) {
-                                if let Some(channel) = message.channel_id.map(|id| id.to_string()) {
-                                    let attachments =
-                                        protocol::Attachment::from_text(&message.message);
-                                    protocol::publish(
-                                        &events,
-                                        &Event::Chat {
-                                            channel,
-                                            sender: message
-                                                .invoker_name
-                                                .unwrap_or_else(|| "Unknown sender".into()),
-                                            attachments,
-                                            text: message.message,
-                                            from_self: message.from_self,
-                                            ts: format!("{} UTC", protocol::timestamp()),
-                                        },
-                                    );
+                            // Channel messages need their channel; server-wide and
+                            // private ones are routed by `scope` and `peer_id`.
+                            let routed = match message.target {
+                                ts6_core::MessageTarget::Channel => message
+                                    .channel_id
+                                    .map(|id| ("channel", id.to_string(), None)),
+                                ts6_core::MessageTarget::Server => {
+                                    Some(("server", String::new(), None))
                                 }
-                            } else {
+                                ts6_core::MessageTarget::Client(target) => {
+                                    let peer = if message.from_self {
+                                        Some(target.0)
+                                    } else {
+                                        message.invoker_id
+                                    };
+                                    Some(("private", String::new(), peer))
+                                }
+                                ts6_core::MessageTarget::Poke(_) => None,
+                            };
+                            if routed.is_none() {
                                 log(
                                     &events,
                                     "text",
@@ -602,6 +603,25 @@ async fn session_task(
                                         message.invoker_name.as_deref().unwrap_or("?"),
                                         message.message
                                     ),
+                                );
+                            }
+                            if let Some((scope, channel, peer_id)) = routed {
+                                let attachments = protocol::Attachment::from_text(&message.message);
+                                protocol::publish(
+                                    &events,
+                                    &Event::Chat {
+                                        channel,
+                                        scope,
+                                        from_id: message.invoker_id,
+                                        peer_id,
+                                        sender: message
+                                            .invoker_name
+                                            .unwrap_or_else(|| "Unknown sender".into()),
+                                        attachments,
+                                        text: message.message,
+                                        from_self: message.from_self,
+                                        ts: format!("{} UTC", protocol::timestamp()),
+                                    },
                                 );
                             }
                         }
@@ -642,6 +662,12 @@ async fn session_task(
         }
 
         if lost {
+            // Say why when the library knows (kick, ban, timeout, shutdown).
+            let reason = session
+                .as_ref()
+                .and_then(|active| active.end_reason())
+                .map(|why| format!("connection closed: {why}"))
+                .unwrap_or_else(|| "connection closed".to_string());
             protocol::publish(
                 &events,
                 &Event::Status {
@@ -649,10 +675,10 @@ async fn session_task(
                     connected: false,
                     address: None,
                     nickname: None,
-                    error: Some("connection closed"),
+                    error: Some(&reason),
                 },
             );
-            log(&events, "warn", "connection closed");
+            log(&events, "warn", &reason);
             session = None;
             members = None;
             own_channel = None;
@@ -1079,8 +1105,50 @@ async fn apply_command(
             );
         }
 
-        Command::Join { channel } => match session.as_mut() {
-            Some(active) => match active.join_channel_by_name(&channel).await {
+        Command::Admin {
+            session_id,
+            request_id,
+            what,
+        } => {
+            let outcome: Result<Vec<ts6_core::admin::Row>, (&str, String)> = match session.as_mut()
+            {
+                None => Err(("not_connected", "Not connected.".into())),
+                Some(_) if request_id.is_empty() || request_id.len() > 64 => Err((
+                    "invalid",
+                    "A request id of 1 to 64 characters is needed.".into(),
+                )),
+                Some(active) if !session_id.is_empty() && session_id != active.session_id() => {
+                    Err(("stale_session", "The server session changed.".into()))
+                }
+                Some(active) => match what.request() {
+                    Err(reason) => Err(("invalid", reason)),
+                    Ok(_) => active
+                        .admin(&what)
+                        .await
+                        .map_err(|error| ("refused", format!("{error:#}"))),
+                },
+            };
+            let (ok, error, code, rows) = match outcome {
+                Ok(rows) => (true, None, None, rows),
+                Err((code, error)) => (false, Some(error), Some(code), Vec::new()),
+            };
+            protocol::publish(
+                events,
+                &Event::AdminResult {
+                    request_id,
+                    ok,
+                    error,
+                    code,
+                    rows,
+                },
+            );
+        }
+
+        Command::Join { channel, password } => match session.as_mut() {
+            Some(active) => match active
+                .join_channel_by_name_with_password(&channel, password.as_deref())
+                .await
+            {
                 Ok(id) => {
                     log(events, "ok", format!("joined channel {channel} (#{id})"));
                     publish_state(active, events);
@@ -1095,6 +1163,8 @@ async fn apply_command(
             channel,
             text,
             request_id,
+            scope,
+            client,
         } => {
             let text = ts6_core::attachments::expand_shortcodes(&text);
             let failure = match session.as_mut() {
@@ -1103,17 +1173,22 @@ async fn apply_command(
                     "Not connected. Your draft has been preserved.",
                 )),
                 Some(active) => {
+                    let destination = chat_destination(active, scope, client);
                     if session_id != active.session_id() {
                         Some((
                             "stale_session",
                             "The server session changed. Review your draft before sending again.",
                         ))
-                    } else if let Err(failure) =
-                        validate_channel_chat(&channel, &text, own_channel(active).as_deref())
-                    {
+                    } else if let Err(failure) = validate_chat(
+                        scope,
+                        &channel,
+                        &text,
+                        own_channel(active).as_deref(),
+                        destination.is_some(),
+                    ) {
                         Some(failure)
                     } else if active
-                        .send_chat(ts6_core::ChatTarget::Channel, &text)
+                        .send_chat(destination.unwrap_or(ts6_core::ChatTarget::Channel), &text)
                         .await
                         .is_err()
                     {
@@ -1264,6 +1339,23 @@ async fn apply_command(
                     "error",
                     format!("nickname change failed: {error:#}"),
                 ),
+            },
+            None => log(events, "warn", "not connected"),
+        },
+
+        Command::Away { away, message } => match session.as_mut() {
+            Some(_) if message.as_deref().is_some_and(|m| m.len() > 80) => {
+                log(events, "error", "the away message is limited to 80 bytes")
+            }
+            Some(active) => match active
+                .set_away(away.then(|| message.as_deref().unwrap_or("")))
+                .await
+            {
+                Ok(()) => {
+                    log(events, "info", format!("away: {away}"));
+                    publish_state(active, events);
+                }
+                Err(error) => log(events, "error", format!("away change failed: {error:#}")),
             },
             None => log(events, "warn", "not connected"),
         },
@@ -1502,6 +1594,45 @@ fn own_channel(session: &Session) -> Option<String> {
         .map(|client| client.channel_id.to_string())
 }
 
+/// Where a chat message goes, or `None` when its private recipient is not on
+/// the server (or is us).
+fn chat_destination(
+    session: &Session,
+    scope: protocol::ChatScope,
+    client: Option<u16>,
+) -> Option<ts6_core::ChatTarget> {
+    match scope {
+        protocol::ChatScope::Channel => Some(ts6_core::ChatTarget::Channel),
+        protocol::ChatScope::Server => Some(ts6_core::ChatTarget::Server),
+        protocol::ChatScope::Private => {
+            let snapshot = session.snapshot().ok()?;
+            let id = client?;
+            snapshot
+                .clients
+                .iter()
+                .any(|c| c.id == id && !c.is_self)
+                .then_some(ts6_core::ChatTarget::Client(id))
+        }
+    }
+}
+
+fn validate_chat(
+    scope: protocol::ChatScope,
+    channel: &str,
+    text: &str,
+    current: Option<&str>,
+    destination_present: bool,
+) -> Result<(), (&'static str, &'static str)> {
+    match scope {
+        protocol::ChatScope::Channel => validate_channel_chat(channel, text, current),
+        protocol::ChatScope::Server => validate_chat_text(text),
+        protocol::ChatScope::Private if !destination_present => {
+            Err(("stale_client", "That person is no longer on the server."))
+        }
+        protocol::ChatScope::Private => validate_chat_text(text),
+    }
+}
+
 fn validate_channel_chat(
     channel: &str,
     text: &str,
@@ -1513,6 +1644,10 @@ fn validate_channel_chat(
             "The channel changed. Review your draft before sending again.",
         ));
     }
+    validate_chat_text(text)
+}
+
+fn validate_chat_text(text: &str) -> Result<(), (&'static str, &'static str)> {
     if text.trim().is_empty() || text.len() > 1024 || text.contains('\0') {
         return Err((
             "invalid",
@@ -1538,6 +1673,21 @@ mod access_tests {
         assert!(validate_channel_chat("1", &"a".repeat(1025), Some("1")).is_err());
         assert!(validate_channel_chat("1", &"\u{1f600}".repeat(257), Some("1")).is_err());
         assert!(validate_channel_chat("1", &"a".repeat(1024), Some("1")).is_ok());
+    }
+
+    #[test]
+    fn server_and_private_chat_skip_the_channel_check_but_not_the_text_rules() {
+        use protocol::ChatScope::{Private, Server};
+        // The channel field is irrelevant outside the channel scope.
+        assert!(validate_chat(Server, "", "hi", None, false).is_ok());
+        assert!(validate_chat(Server, "", "  ", None, false).is_err());
+        assert!(validate_chat(Private, "", "hi", None, true).is_ok());
+        assert!(validate_chat(Private, "", "bad\0", None, true).is_err());
+        // A recipient who left is a distinct, retry-safe refusal.
+        assert_eq!(
+            validate_chat(Private, "", "hi", None, false).unwrap_err().0,
+            "stale_client"
+        );
     }
 
     #[tokio::test]
@@ -1657,6 +1807,8 @@ mod cue_tests {
                     avatar_hash: None,
                     myteamspeak_avatar: None,
                     is_streaming: false,
+                    away: false,
+                    db_id: 0,
                 })
                 .collect(),
         }

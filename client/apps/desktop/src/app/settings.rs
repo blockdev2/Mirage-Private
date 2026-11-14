@@ -254,11 +254,43 @@ impl App {
         ui.add_space(14.0);
         self.profile_block(ui);
         ui.add_space(18.0);
+        self.status_group(ui);
+        ui.add_space(18.0);
         ui.label(
             RichText::new(self.t.profile_note)
                 .size(13.0)
                 .color(theme::TEXT_3),
         );
+    }
+
+    /// "Ficar ausente sozinho": how long without input before going away.
+    fn status_group(&mut self, ui: &mut Ui) {
+        let t = self.t;
+        let minutes = &mut self.store.data.idle_away_minutes;
+        let before = *minutes;
+        group(ui, t.group_status, |ui| {
+            setting_row(ui, t.idle_away_title, Some(t.idle_away_hint), |ui| {
+                let shown = match *minutes {
+                    0 => t.idle_away_never.to_string(),
+                    n => t.minutes(n),
+                };
+                egui::ComboBox::from_id_salt("idle-away")
+                    .selected_text(shown)
+                    .width(CONTROL_WIDTH - 24.0)
+                    .show_ui(ui, |ui| {
+                        for choice in super::idle::CHOICES {
+                            let label = match choice {
+                                0 => t.idle_away_never.to_string(),
+                                n => t.minutes(n),
+                            };
+                            ui.selectable_value(minutes, choice, label);
+                        }
+                    });
+            });
+        });
+        if *minutes != before {
+            self.store.save();
+        }
     }
 
     // Profile ---------------------------------------------------------------

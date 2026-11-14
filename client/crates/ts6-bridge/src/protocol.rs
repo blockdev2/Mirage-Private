@@ -57,6 +57,16 @@ impl Attachment {
     }
 }
 
+/// Who a chat message is for.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatScope {
+    #[default]
+    Channel,
+    Server,
+    Private,
+}
+
 /// Commands from the UI.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -73,9 +83,17 @@ pub enum Command {
     Chat {
         #[serde(default)]
         session_id: String,
+        /// The current channel's id; only checked for the `channel` scope.
+        #[serde(default)]
         channel: String,
         text: String,
         request_id: String,
+        /// Who hears it: the channel (default), everyone on the server, or
+        /// the one client in `client`.
+        #[serde(default)]
+        scope: ChatScope,
+        #[serde(default)]
+        client: Option<u16>,
     },
     /// Send a local file (photo, GIF or any file) to the current channel.
     /// The native frontend picks the file; the bridge reads it, uploads it to
@@ -94,12 +112,31 @@ pub enum Command {
         channel: String,
         path: String,
     },
+    /// A server administration operation (channels, moderation, groups,
+    /// permissions); see `ts6_core::admin::AdminOp`. Answered with
+    /// `admin_result` for the same `request_id`.
+    Admin {
+        #[serde(default)]
+        session_id: String,
+        request_id: String,
+        #[serde(flatten)]
+        what: ts6_core::admin::AdminOp,
+    },
     Disconnect,
     Join {
         channel: String,
+        /// The channel's password, when it has one.
+        #[serde(default)]
+        password: Option<String>,
     },
     Nick {
         name: String,
+    },
+    /// Marks us away (with an optional short message) or present again.
+    Away {
+        away: bool,
+        #[serde(default)]
+        message: Option<String>,
     },
     Mute {
         #[serde(default)]
@@ -220,9 +257,11 @@ impl std::fmt::Debug for Command {
         f.write_str(match self {
             Self::Connect { .. } => "Connect",
             Self::Chat { .. } => "Chat",
+            Self::Admin { .. } => "Admin",
             Self::Disconnect => "Disconnect",
             Self::Join { .. } => "Join",
             Self::Nick { .. } => "Nick",
+            Self::Away { .. } => "Away",
             Self::Mute { .. } => "Mute",
             Self::Audio { .. } => "Audio",
             Self::Devices => "Devices",
@@ -280,7 +319,14 @@ pub struct DeviceLists {
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event<'a> {
     Chat {
+        /// The channel for `scope` `channel`; empty for the other scopes.
         channel: String,
+        /// `channel`, `server` or `private`.
+        scope: &'static str,
+        /// The sender's client id, when known.
+        from_id: Option<u16>,
+        /// For `private`, the other person (the sender, or who we wrote to).
+        peer_id: Option<u16>,
         sender: String,
         text: String,
         from_self: bool,
@@ -305,6 +351,16 @@ pub enum Event<'a> {
         request_id: String,
         error: Option<&'a str>,
         code: Option<&'a str>,
+    },
+    /// Answer to one `admin` command. `rows` holds the reply of list
+    /// operations; `error` is the server's refusal or a local rejection and
+    /// `code` is `not_connected`, `stale_session`, `invalid` or `refused`.
+    AdminResult {
+        request_id: String,
+        ok: bool,
+        error: Option<String>,
+        code: Option<&'a str>,
+        rows: Vec<ts6_core::admin::Row>,
     },
     Hello {
         version: &'a str,
@@ -432,6 +488,43 @@ mod tests {
     }
 
     #[test]
+    fn chat_scope_defaults_to_the_channel_and_accepts_a_private_recipient() {
+        let plain: Command =
+            serde_json::from_str(r#"{"op":"chat","channel":"1","text":"a","request_id":"r"}"#)
+                .unwrap();
+        assert!(matches!(
+            plain,
+            Command::Chat {
+                scope: ChatScope::Channel,
+                client: None,
+                ..
+            }
+        ));
+        let private: Command = serde_json::from_str(
+            r#"{"op":"chat","scope":"private","client":7,"text":"a","request_id":"r"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            private,
+            Command::Chat {
+                scope: ChatScope::Private,
+                client: Some(7),
+                ..
+            }
+        ));
+        let server: Command =
+            serde_json::from_str(r#"{"op":"chat","scope":"server","text":"a","request_id":"r"}"#)
+                .unwrap();
+        assert!(matches!(
+            server,
+            Command::Chat {
+                scope: ChatScope::Server,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn stream_watch_commands_and_state_events_round_trip() {
         let watch: Command = serde_json::from_str(r#"{"op":"watch_stream","client":302}"#).unwrap();
         assert!(matches!(watch, Command::WatchStream { client: 302 }));
@@ -507,13 +600,38 @@ mod tests {
     }
 
     #[test]
+    fn admin_commands_carry_their_action_next_to_the_op() {
+        let command: Command = serde_json::from_str(
+            r#"{"op":"admin","request_id":"r1","action":"channel_delete","id":7,"force":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &command,
+            Command::Admin { request_id, what: ts6_core::admin::AdminOp::ChannelDelete { id: 7, force: true }, .. }
+                if request_id == "r1"
+        ));
+        assert_eq!(format!("{command:?}"), "Admin");
+        // No request id, or an action the backend does not have: refused at parse time.
+        assert!(
+            serde_json::from_str::<Command>(r#"{"op":"admin","action":"server_groups"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Command>(
+            r#"{"op":"admin","request_id":"r","action":"nope"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn commands_parse_from_ui_json() {
         let connect: Command =
             serde_json::from_str(r#"{"op":"connect","address":"127.0.0.1:9987"}"#).unwrap();
         assert!(matches!(connect, Command::Connect { .. }));
 
         let join: Command = serde_json::from_str(r#"{"op":"join","channel":"3"}"#).unwrap();
-        assert!(matches!(join, Command::Join { channel } if channel == "3"));
+        assert!(matches!(join, Command::Join { channel, password: None } if channel == "3"));
+        let locked: Command =
+            serde_json::from_str(r#"{"op":"join","channel":"Cofre","password":"abc"}"#).unwrap();
+        assert!(matches!(locked, Command::Join { password: Some(p), .. } if p == "abc"));
 
         let audio: Command =
             serde_json::from_str(r#"{"op":"audio","tone":true,"ptt":"F13"}"#).unwrap();

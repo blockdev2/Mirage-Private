@@ -75,6 +75,8 @@ capability in `hello`. It validates the expected session and current channel,
 rejects blank/NUL/oversized content, and reports command acceptance separately
 from received messages. The browser renders received server events; the native
 frontend also tracks pending local sends and deduplicates matching echoes.
-Both bound their in-memory history to 200 messages. No chat history is persisted. Private,
-server, and poke messages retain their scope in the core and are not rendered
-as channel messages. See [channel chat](channel-chat.md) for verification limits.
+Both bound their in-memory history to 200 messages. Channel history is kept per
+server by the native client; private and server-wide messages are not saved. `chat`
+takes a `scope` (channel, server, private) and the events carry `scope` and `peer_id`;
+the browser frontend renders channel messages only and ignores the others. Poke
+messages are only logged. See [channel chat](channel-chat.md) for verification limits.
