@@ -290,6 +290,9 @@ pub struct Data {
     pub transcripts: std::collections::HashMap<String, Vec<SavedMessage>>,
     /// Do not look for an update when the app opens (the Updates page still can).
     pub skip_update_check: bool,
+    /// Go away by itself after this many minutes without using the computer;
+    /// 0 turns it off.
+    pub idle_away_minutes: u32,
 }
 
 /// One chat message as kept on disk.

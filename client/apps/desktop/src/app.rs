@@ -25,6 +25,7 @@ mod chat;
 #[cfg(debug_assertions)]
 mod dev;
 mod home;
+mod idle;
 mod peer;
 mod reconnect;
 mod settings;
@@ -87,6 +88,9 @@ struct ImageViewer {
     zoom: f32,
     offset: egui::Vec2,
 }
+
+/// Longest away message, in bytes (the bridge refuses more than 80).
+const AWAY_MESSAGE_MAX: usize = 80;
 
 /// How long the "private message" toast stays.
 const DM_TOAST: Duration = Duration::from_secs(10);
@@ -245,6 +249,12 @@ pub struct App {
     /// The password the current server was joined with, kept in memory so a
     /// reconnection can send it; never read from the form again.
     session_password: Option<String>,
+    /// The away status was set by the idle timer, not chosen by the person.
+    auto_away: bool,
+    /// When the idle time was last read.
+    idle_checked: Instant,
+    /// The message being typed in the status menu.
+    away_draft: String,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
     /// Whether the window is currently fullscreen because of a stream.
@@ -363,6 +373,9 @@ impl App {
             auto_connecting: false,
             rejoin: None,
             session_password: None,
+            auto_away: false,
+            idle_checked: Instant::now(),
+            away_draft: String::new(),
             watching: None,
             window_fullscreen: false,
             sharing: None,
@@ -931,6 +944,7 @@ impl eframe::App for App {
         self.admin_ui(&ctx);
         self.dm_toast(&ctx);
         self.reconnect_tick(&ctx);
+        self.idle_tick(&ctx);
     }
 }
 
@@ -1323,6 +1337,60 @@ impl App {
         response
     }
 
+    /// Goes away after a while without input and comes back with the first
+    /// input, when the setting is on. Never undoes an away the person chose.
+    fn idle_tick(&mut self, ctx: &egui::Context) {
+        if !self.in_session() {
+            self.auto_away = false;
+            return;
+        }
+        let limit = self.store.data.idle_away_minutes;
+        if limit == 0 && !self.auto_away {
+            return;
+        }
+        let since = self.idle_checked.elapsed();
+        if since < idle::CHECK_EVERY {
+            ctx.request_repaint_after(idle::CHECK_EVERY - since);
+            return;
+        }
+        self.idle_checked = Instant::now();
+        ctx.request_repaint_after(idle::CHECK_EVERY);
+        let away = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.clients.iter().any(|c| c.is_self && c.away));
+        if !away {
+            self.auto_away = false;
+        }
+        // Talking counts as being there, whatever the keyboard says.
+        let transmitting = self.audio.as_ref().is_some_and(|a| a.transmitting);
+        let idle = if transmitting {
+            Some(Duration::ZERO)
+        } else {
+            idle::idle_time()
+        };
+        let Some(idle) = idle else {
+            return;
+        };
+        match idle::decide(idle, limit, away, self.auto_away) {
+            idle::Action::GoAway => {
+                self.auto_away = true;
+                self.send(Command::Away {
+                    away: true,
+                    message: None,
+                });
+            }
+            idle::Action::Return => {
+                self.auto_away = false;
+                self.send(Command::Away {
+                    away: false,
+                    message: None,
+                });
+            }
+            idle::Action::Nothing => {}
+        }
+    }
+
     /// Starts the next reconnection attempt when it is due.
     fn reconnect_tick(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
@@ -1472,17 +1540,30 @@ impl App {
                     egui::WidgetInfo::labeled(egui::Role::Button, true, t.available)
                 });
                 let click = click.on_hover_cursor(egui::CursorIcon::PointingHand);
-                egui::Popup::menu(&click).show(|ui| {
-                    ui.set_min_width(180.0);
-                    let (label, next) = if away {
-                        (t.status_set_available, false)
-                    } else {
-                        (t.status_set_away, true)
-                    };
-                    if ui.button(label).clicked() {
-                        set_away = Some(next);
-                    }
-                });
+                egui::Popup::menu(&click)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.set_width(220.0);
+                        if away {
+                            if ui.button(t.status_set_available).clicked() {
+                                set_away = Some((false, None));
+                                ui.close();
+                            }
+                        } else {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.away_draft)
+                                    .hint_text(t.away_message_hint)
+                                    .char_limit(AWAY_MESSAGE_MAX)
+                                    .desired_width(220.0),
+                            );
+                            if ui.button(t.status_set_away).clicked() {
+                                let text = self.away_draft.trim().to_string();
+                                set_away = Some((true, Some(text).filter(|m| !m.is_empty())));
+                                self.away_draft.clear();
+                                ui.close();
+                            }
+                        }
+                    });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let gear = theme::glyph_button(ui, icon::GEAR, t.settings_title, 32.0, 45.0);
@@ -1504,8 +1585,10 @@ impl App {
                 }
             });
         });
-        if let Some(away) = set_away {
-            self.send(Command::Away { away });
+        if let Some((away, message)) = set_away {
+            // The person chose this: the idle timer must not undo it.
+            self.auto_away = false;
+            self.send(Command::Away { away, message });
         }
         ui.add_space(10.0);
         ui.separator();

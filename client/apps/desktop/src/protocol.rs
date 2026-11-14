@@ -283,6 +283,8 @@ pub enum Command {
     /// Marks us away or present again.
     Away {
         away: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// The bridge treats an omitted field as `false`, so callers should send both.
     Mute {

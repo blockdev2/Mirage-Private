@@ -183,6 +183,11 @@ pub struct Strings {
     pub chat_scope_private: &'static str,
     pub chat_scope_private_to: &'static str,
     pub chat_to: &'static str,
+    pub group_status: &'static str,
+    pub idle_away_title: &'static str,
+    pub idle_away_hint: &'static str,
+    pub idle_away_never: &'static str,
+    pub away_message_hint: &'static str,
     pub reconnect_cancel: &'static str,
     pub reconnect_text: &'static str,
     pub dm_answer: &'static str,
@@ -336,6 +341,15 @@ impl Strings {
         match topic {
             Some(topic) => format!("{} • {topic}", self.channel_kind),
             None => self.channel_kind.to_string(),
+        }
+    }
+
+    /// "N minutos", for the idle-away choices.
+    pub fn minutes(&self, n: u32) -> String {
+        if n == 1 {
+            "1 minuto".to_string()
+        } else {
+            format!("{n} minutos")
         }
     }
 
@@ -606,6 +620,11 @@ pub const PT: Strings = Strings {
     chat_scope_private: "privado",
     chat_scope_private_to: "privado para",
     chat_to: "Para",
+    group_status: "Status",
+    idle_away_title: "Ficar ausente sozinho",
+    idle_away_hint: "Depois de um tempo sem usar o teclado nem o mouse. Você volta ao mexer neles.",
+    idle_away_never: "Nunca",
+    away_message_hint: "Mensagem (opcional)",
     reconnect_cancel: "Cancelar",
     reconnect_text: "Reconectando a",
     dm_answer: "Responder",
