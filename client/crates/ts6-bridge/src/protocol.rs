@@ -97,6 +97,9 @@ pub enum Command {
     Disconnect,
     Join {
         channel: String,
+        /// The channel's password, when it has one.
+        #[serde(default)]
+        password: Option<String>,
     },
     Nick {
         name: String,
@@ -513,7 +516,10 @@ mod tests {
         assert!(matches!(connect, Command::Connect { .. }));
 
         let join: Command = serde_json::from_str(r#"{"op":"join","channel":"3"}"#).unwrap();
-        assert!(matches!(join, Command::Join { channel } if channel == "3"));
+        assert!(matches!(join, Command::Join { channel, password: None } if channel == "3"));
+        let locked: Command =
+            serde_json::from_str(r#"{"op":"join","channel":"Cofre","password":"abc"}"#).unwrap();
+        assert!(matches!(locked, Command::Join { password: Some(p), .. } if p == "abc"));
 
         let audio: Command =
             serde_json::from_str(r#"{"op":"audio","tone":true,"ptt":"F13"}"#).unwrap();

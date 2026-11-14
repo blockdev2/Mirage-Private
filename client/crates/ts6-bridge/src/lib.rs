@@ -642,6 +642,12 @@ async fn session_task(
         }
 
         if lost {
+            // Say why when the library knows (kick, ban, timeout, shutdown).
+            let reason = session
+                .as_ref()
+                .and_then(|active| active.end_reason())
+                .map(|why| format!("connection closed: {why}"))
+                .unwrap_or_else(|| "connection closed".to_string());
             protocol::publish(
                 &events,
                 &Event::Status {
@@ -649,10 +655,10 @@ async fn session_task(
                     connected: false,
                     address: None,
                     nickname: None,
-                    error: Some("connection closed"),
+                    error: Some(&reason),
                 },
             );
-            log(&events, "warn", "connection closed");
+            log(&events, "warn", &reason);
             session = None;
             members = None;
             own_channel = None;
@@ -1079,8 +1085,11 @@ async fn apply_command(
             );
         }
 
-        Command::Join { channel } => match session.as_mut() {
-            Some(active) => match active.join_channel_by_name(&channel).await {
+        Command::Join { channel, password } => match session.as_mut() {
+            Some(active) => match active
+                .join_channel_by_name_with_password(&channel, password.as_deref())
+                .await
+            {
                 Ok(id) => {
                     log(events, "ok", format!("joined channel {channel} (#{id})"));
                     publish_state(active, events);

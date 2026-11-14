@@ -37,7 +37,17 @@ UI TypeScript/production build and npm audit passed (zero reported UI vulnerabil
 | Screen sharing | Share and watch with the official client in both directions, with stream sound, volume, mute and fullscreen (manual run on one machine, see the README for limits); a monitor or one window can be shared (window capture was encoded on one machine, not yet watched from the official client); four quality presets up to 1080p60 (the 1080p ones were encoded locally, not watched from the official client); sharing the computer's sound (all but Mirage) through the voice channel, verified through the local audio path only |
 | Files | Channel attachments up to 5 MB through classic file transfer (see channel chat); S3 file integration not implemented |
 | Installer/release packaging | Velopack installer and in-app updates (releases up to 0.0.4); screen sharing is not in a release yet; hosted CI has not run (billing) |
+| Disconnect reason | The status after a lost session carries the library's error text when there is one. Unit-level only; what a kick or ban produces on a real server was not observed |
+| Channel passwords | `join` accepts `password` (`cpw`) and snapshots flag `has_password`; no frontend prompts for it yet; not run against a password-protected channel |
 | Production security readiness | Experimental; current dependency/history remediation and remaining reporting/maintenance work are documented in PUBLICATION.md |
+
+## Backend completeness against the goal (2026-11-14)
+
+The goal is a client that talks to official TS6 servers for everyday use, not a full replacement for the official client. Measured on this revision: 246 workspace tests pass (0 failed), clippy with `-D warnings` and `cargo fmt --check` are clean.
+
+Present and exercised at least once: login and identity, channel/client snapshot, join, nickname, mutes, per-client volume, connection info, Opus voice with capture/playback, push-to-talk and voice activation, noise suppression, channel chat with attachments and emoji, avatars, screen sharing and watching with stream sound.
+
+Not in the backend (each is a gap, not a bug): direct and server-wide messages (the core can send them, the bridge command is channel-only); kick, ban, move others, poke; channel create, edit and delete; away status, client descriptions, server groups and permissions; whisper and priority speaker; file browser and uploads beyond chat; offline messages; Matrix group chat and S3 files; acoustic echo cancellation; automatic reconnect UI beyond the library's own (the state is only logged); non-Windows platforms. Hosted CI has never run, and a 10-minute call or watch has not been done.
 
 ## Research and chat uncertainty
 

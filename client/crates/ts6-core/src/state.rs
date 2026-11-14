@@ -34,6 +34,8 @@ pub struct ChannelInfo {
     pub topic: Option<String>,
     pub codec: String,
     pub clients: usize,
+    /// Joining needs a password (`join_channel_with_password`).
+    pub has_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +137,7 @@ impl Snapshot {
                 topic: ch.topic.clone(),
                 codec: format!("{:?}", ch.codec),
                 clients: clients.iter().filter(|c| c.channel_id == ch.id.0).count(),
+                has_password: ch.has_password.unwrap_or(false),
             })
             .collect();
         channels.sort_by_key(|c| c.id);
@@ -185,6 +188,7 @@ mod tests {
             topic: None,
             codec: "OpusVoice".to_string(),
             clients: 0,
+            has_password: false,
         }
     }
 

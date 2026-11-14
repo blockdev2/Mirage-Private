@@ -107,6 +107,8 @@ pub struct Session {
     pending: VecDeque<Item>,
     /// Voice frames handed to the transport so far (surfaced to the UI).
     audio_frames_sent: u64,
+    /// Why the connection ended, once it has (kick, ban, timeout, shutdown).
+    end_reason: Option<String>,
 }
 
 impl Session {
@@ -148,6 +150,7 @@ impl Session {
             config,
             pending: VecDeque::new(),
             audio_frames_sent: 0,
+            end_reason: None,
         };
         session.wait_synced().await?;
         tracing::info!(addr = %session.config.address, "connected and synced");
@@ -319,6 +322,7 @@ impl Session {
                 },
                 Err(err) => {
                     tracing::error!(%err, "connection error");
+                    self.end_reason = Some(err.to_string());
                     return None;
                 }
             }
@@ -408,6 +412,7 @@ impl Session {
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(Err(err))) => {
                     tracing::error!(%err, "connection error");
+                    self.end_reason = Some(err.to_string());
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some(Ok(raw))) => {
@@ -445,6 +450,7 @@ impl Session {
                                 }
                                 Err(err) => {
                                     tracing::error!(%err, "failed to send captured audio");
+                                    self.end_reason = Some(err.to_string());
                                     return Poll::Ready(None);
                                 }
                             }
@@ -666,26 +672,48 @@ impl Session {
         .await
     }
 
+    /// Why the connection ended, when the library reported an error (a kick, a
+    /// ban, a timeout or a server shutdown). `None` while it is still open.
+    pub fn end_reason(&self) -> Option<&str> {
+        self.end_reason.as_deref()
+    }
+
     /// Move ourselves to another channel.
     pub async fn join_channel(&mut self, channel_id: u64) -> Result<()> {
+        self.join_channel_with_password(channel_id, None).await
+    }
+
+    /// Move ourselves to a channel, sending its password when it has one.
+    pub async fn join_channel_with_password(
+        &mut self,
+        channel_id: u64,
+        password: Option<&str>,
+    ) -> Result<()> {
         let own = self.own_id().ok_or_else(|| anyhow!("not connected"))?;
-        self.send_command(
-            "clientmove",
-            &[("clid", own.to_string()), ("cid", channel_id.to_string())],
-        )
-        .await
+        self.send_command("clientmove", &clientmove_args(own, channel_id, password))
+            .await
     }
 
     /// Join a channel by numeric id or by (case-insensitive) name.
     ///
     /// Returns the id that was actually joined, so callers can confirm it.
     pub async fn join_channel_by_name(&mut self, needle: &str) -> Result<u64> {
+        self.join_channel_by_name_with_password(needle, None).await
+    }
+
+    /// Like [`Self::join_channel_by_name`], with the channel's password.
+    pub async fn join_channel_by_name_with_password(
+        &mut self,
+        needle: &str,
+        password: Option<&str>,
+    ) -> Result<u64> {
         let snapshot = self.snapshot()?;
         let channel_id = snapshot
             .find_channel(needle)
             .ok_or_else(|| anyhow!("channel `{needle}` not found"))?
             .id;
-        self.join_channel(channel_id).await?;
+        self.join_channel_with_password(channel_id, password)
+            .await?;
         Ok(channel_id)
     }
 
@@ -770,6 +798,19 @@ fn file_item(item: StreamItem) -> Option<Item> {
             None
         }
     }
+}
+
+/// Arguments of `clientmove`; `cpw` is sent only for a non-empty password.
+fn clientmove_args(
+    own: u16,
+    channel_id: u64,
+    password: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut args = vec![("clid", own.to_string()), ("cid", channel_id.to_string())];
+    if let Some(password) = password.filter(|p| !p.is_empty()) {
+        args.push(("cpw", password.to_string()));
+    }
+    args
 }
 
 fn bool_flag(value: bool) -> String {
@@ -875,6 +916,15 @@ fn raw_text_items(message: &InMessage, own_id: Option<u16>, channel_id: Option<u
 #[cfg(test)]
 mod chat_tests {
     use super::*;
+
+    #[test]
+    fn clientmove_sends_the_channel_password_only_when_given() {
+        let plain = clientmove_args(4, 9, None);
+        assert_eq!(plain.len(), 2);
+        assert_eq!(clientmove_args(4, 9, Some("")), plain);
+        let locked = clientmove_args(4, 9, Some("s3cret"));
+        assert_eq!(locked[2], ("cpw", "s3cret".to_string()));
+    }
 
     #[test]
     fn message_batches_keep_the_replay_queue_bounded() {
