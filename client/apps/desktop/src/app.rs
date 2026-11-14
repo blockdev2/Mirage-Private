@@ -26,6 +26,7 @@ mod chat;
 mod dev;
 mod home;
 mod peer;
+mod reconnect;
 mod settings;
 mod share;
 mod stream;
@@ -235,6 +236,10 @@ pub struct App {
     chat_to: ChatTo,
     /// A private message just arrived from this person (shown as a toast).
     dm_notice: Option<DmNotice>,
+    /// Trying to get back to a server whose connection was lost.
+    reconnect: Option<reconnect::Reconnect>,
+    /// Set while the reconnection itself starts a connection.
+    auto_connecting: bool,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
     /// Whether the window is currently fullscreen because of a stream.
@@ -349,6 +354,8 @@ impl App {
             chat_notice: None,
             chat_to: ChatTo::Channel,
             dm_notice: None,
+            reconnect: None,
+            auto_connecting: false,
             watching: None,
             window_fullscreen: false,
             sharing: None,
@@ -415,9 +422,23 @@ impl App {
                     self.session_started = Some(Instant::now());
                 }
                 if !status.connected {
+                    let now = Instant::now();
                     if self.status.connected {
                         // The session ended: go back to the hub.
                         self.section = Section::Home;
+                        // Lost, not left or removed: try to get back.
+                        if let (Some(error), Some(address)) =
+                            (&status.error, self.session_address.clone())
+                        {
+                            if reconnect::is_recoverable(error) {
+                                self.reconnect = Some(reconnect::Reconnect::new(address, now));
+                            }
+                        }
+                    } else if self.reconnect.as_ref().is_some_and(|r| r.at.is_none()) {
+                        // An attempt of the reconnection failed.
+                        if let Some(running) = self.reconnect.take() {
+                            self.reconnect = running.failed(now);
+                        }
                     }
                     self.snapshot = None;
                     self.audio = None;
@@ -444,6 +465,7 @@ impl App {
                     }
                 }
                 if status.connected {
+                    self.reconnect = None;
                     if let Some(name) = &status.nickname {
                         self.nickname = name.clone();
                     }
@@ -878,6 +900,7 @@ impl eframe::App for App {
         self.connection_window(&ctx);
         self.admin_ui(&ctx);
         self.dm_toast(&ctx);
+        self.reconnect_tick(&ctx);
     }
 }
 
@@ -1268,6 +1291,37 @@ impl App {
             speaking,
         );
         response
+    }
+
+    /// Starts the next reconnection attempt when it is due.
+    fn reconnect_tick(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        let Some(state) = &self.reconnect else {
+            return;
+        };
+        if !state.due(now) {
+            // Not due yet, or an attempt is running and its answer wakes us.
+            if let Some(at) = state.at {
+                ctx.request_repaint_after(at - now);
+            }
+            return;
+        }
+        if !self.can_connect() {
+            // The bridge is busy or the profile is missing: ask again soon.
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return;
+        }
+        let address = state.address.clone();
+        if let Some(state) = self.reconnect.as_mut() {
+            state.started();
+        }
+        self.auto_connecting = true;
+        self.start_connect(&address);
+        self.auto_connecting = false;
+        // start_connect refused (for example an invalid saved address): stop.
+        if self.connect_started.is_none() {
+            self.reconnect = None;
+        }
     }
 
     /// "Mensagem privada de X" with a button to answer, for a few seconds. A

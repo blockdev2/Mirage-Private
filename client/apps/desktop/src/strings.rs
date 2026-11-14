@@ -183,6 +183,8 @@ pub struct Strings {
     pub chat_scope_private: &'static str,
     pub chat_scope_private_to: &'static str,
     pub chat_to: &'static str,
+    pub reconnect_cancel: &'static str,
+    pub reconnect_text: &'static str,
     pub dm_answer: &'static str,
     pub dm_from_prefix: &'static str,
     pub status_away: &'static str,
@@ -335,6 +337,14 @@ impl Strings {
             Some(topic) => format!("{} • {topic}", self.channel_kind),
             None => self.channel_kind.to_string(),
         }
+    }
+
+    /// "Reconectando a <servidor> (tentativa N de M)".
+    pub fn reconnecting(&self, address: &str, attempt: u32, max: u32) -> String {
+        format!(
+            "{} {address} (tentativa {attempt} de {max})",
+            self.reconnect_text
+        )
     }
 
     /// The toast text for a private message from `name`.
@@ -596,6 +606,8 @@ pub const PT: Strings = Strings {
     chat_scope_private: "privado",
     chat_scope_private_to: "privado para",
     chat_to: "Para",
+    reconnect_cancel: "Cancelar",
+    reconnect_text: "Reconectando a",
     dm_answer: "Responder",
     dm_from_prefix: "Mensagem privada de",
     status_away: "Ausente",

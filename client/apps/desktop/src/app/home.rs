@@ -1260,6 +1260,24 @@ impl App {
             });
             ui.add_space(14.0);
 
+            if let Some(state) = self.reconnect.clone() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(t.reconnecting(
+                            &state.address,
+                            state.attempt + 1,
+                            super::reconnect::MAX_ATTEMPTS,
+                        ))
+                        .small()
+                        .color(theme::WARNING),
+                    );
+                    if ui.small_button(t.reconnect_cancel).clicked() {
+                        self.reconnect = None;
+                    }
+                });
+            }
+            ui.add_space(8.0);
             // Connect.
             let connecting = self.is_connecting();
             let blocked = self.connect_blocker();
@@ -1406,6 +1424,10 @@ impl App {
             return;
         };
         let address = address.trim().to_string();
+        if !self.auto_connecting {
+            // The user chose a server: stop trying to return to the old one.
+            self.reconnect = None;
+        }
         self.pending = Some(PendingConnect {
             address: address.clone(),
             profile_id: self.store.active_profile_id(),
