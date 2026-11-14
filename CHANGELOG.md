@@ -1,8 +1,17 @@
 # Changelog
 
-No tagged releases have been established in this checkout. Entries describe repository changes, not a release announcement.
+Entries describe repository changes. Tagged releases are published as GitHub releases and the app's update page shows the top of the Unreleased section of the tagged commit.
 
 ## Unreleased
+
+**Screen sharing now works with the official TeamSpeak client, both ways.**
+
+- Watch the official client's share inside Mirage, with its sound, volume, mute and fullscreen.
+- Share a whole screen or a single window, in four quality levels up to 1080p60, and optionally send the computer's sound (everything except Mirage).
+- Fixed: freezes of about 20 s while watching, a crash when a share was started again, and nicknames must have 3 to 30 characters.
+- Known limits: a very slow connection to the server (for example some VPNs) makes the official client ignore your share; the sound goes to everyone through your voice, so a server-muted microphone silences it.
+
+### Details
 
 - **Share the computer's sound.** The share picker has "Enviar o som do computador". Like the official client, the sound travels inside the Opus voice channel (the WebRTC audio section stays inactive; `setupstream` announces `audio=1`). `ts6_audio::loopback` captures WASAPI process loopback excluding Mirage's own process tree (so the call's voices are never sent back), `ts6_audio::system_audio` queues it, and the microphone pipeline mixes it into every frame in a new stream mode: the microphone is heard only while push-to-talk is held (or always without a key), the stream sound passes either way, a voice gate at -55 dBFS replaces the downstream push-to-talk gate, and a computer without a microphone sends the sound over silence. Verified on this Windows 10 (build 19045): sound from an unrelated process is captured while the excluded process is not, and a real end-to-end test turned a tone into 187 Opus voice packets with a key bound and not pressed and no microphone. Not verified: that the official client plays it as the sharer's voice. Limits: with the microphone muted on the server the voice is dropped and so is the sound; the whole computer's sound is sent, not one application; it stops when the share stops.
 - **Quality choice for sharing, and a crash fix.** The share picker has four presets: Leve (720p30, 1.5 Mbit/s), Padrão (720p30, 3 Mbit/s, what shares used before), Alta (1080p30, 6 Mbit/s) and Máxima (1080p60, 9 Mbit/s); `share_start` takes `quality`. Every preset was encoded on this machine's hardware encoder (ignored test `quality_presets`); the 1080p levels declare H.264 level 3.1 in the SDP and were not watched from the official client. While measuring, starting a capture for the second to fourth time in one process crashed with an access violation inside `windows-capture` (a cached WinRT factory outliving its COM multithreaded apartment); `ScreenCapture::start` now keeps the apartment alive with `CoIncrementMTAUsage`, and the test starts and stops captures repeatedly (10 in a row passed). This affected stopping and restarting a share in the app.
