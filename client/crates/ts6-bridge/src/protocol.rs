@@ -132,6 +132,12 @@ pub enum Command {
     Nick {
         name: String,
     },
+    /// Marks us away (with an optional short message) or present again.
+    Away {
+        away: bool,
+        #[serde(default)]
+        message: Option<String>,
+    },
     Mute {
         #[serde(default)]
         input: Option<bool>,
@@ -255,6 +261,7 @@ impl std::fmt::Debug for Command {
             Self::Disconnect => "Disconnect",
             Self::Join { .. } => "Join",
             Self::Nick { .. } => "Nick",
+            Self::Away { .. } => "Away",
             Self::Mute { .. } => "Mute",
             Self::Audio { .. } => "Audio",
             Self::Devices => "Devices",

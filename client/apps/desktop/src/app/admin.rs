@@ -6,7 +6,7 @@
 //! do it, and its refusal is shown in plain Portuguese. This text lives here,
 //! beside the screens it belongs to.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, CornerRadius, FontId, Margin, RichText, Stroke};
@@ -43,9 +43,23 @@ pub(super) enum Purpose {
     Catalog,
     GroupPermissions(u64),
     Bans,
+    /// The server's regular groups, for a person's group dialog.
+    DialogGroups,
+    /// The groups this person (by database id) belongs to.
+    PersonGroups(u64),
+    /// Say this, then read the person's groups again.
+    MemberChanged(u64, &'static str),
 }
 
 pub(super) enum AdminDialog {
+    /// The server groups one person belongs to, each with a check box.
+    Memberships {
+        db_id: u64,
+        name: String,
+        groups: Vec<Row>,
+        /// `None` until the server has answered.
+        member: Option<HashSet<u64>>,
+    },
     Poke {
         client: u16,
         name: String,
@@ -215,6 +229,8 @@ impl App {
                 | Purpose::Catalog
                 | Purpose::GroupPermissions(_)
                 | Purpose::Bans
+                | Purpose::DialogGroups
+                | Purpose::PersonGroups(_)
                     if empty_list =>
                 {
                     self.fill(purpose, Vec::new());
@@ -233,8 +249,32 @@ impl App {
                     json!({ "group": group }),
                 );
             }
+            Purpose::MemberChanged(db_id, text) => {
+                self.toast(text, false);
+                self.admin_send(
+                    Purpose::PersonGroups(db_id),
+                    "client_server_groups",
+                    json!({ "db_id": db_id }),
+                );
+            }
             other => self.fill(other, rows),
         }
+    }
+
+    /// Opens the group dialog of one person and asks for what it shows.
+    pub(super) fn open_memberships(&mut self, db_id: u64, name: String) {
+        self.admin.dialog = Some(AdminDialog::Memberships {
+            db_id,
+            name,
+            groups: Vec::new(),
+            member: None,
+        });
+        self.admin_send(Purpose::DialogGroups, "server_groups", json!({}));
+        self.admin_send(
+            Purpose::PersonGroups(db_id),
+            "client_server_groups",
+            json!({ "db_id": db_id }),
+        );
     }
 
     fn fill(&mut self, purpose: Purpose, rows: Vec<Row>) {
@@ -270,7 +310,30 @@ impl App {
                     panel.bans = rows;
                 }
             }
-            Purpose::Done(_) | Purpose::Edited(..) => {}
+            Purpose::DialogGroups => {
+                if let Some(AdminDialog::Memberships { groups, .. }) = self.admin.dialog.as_mut() {
+                    // Type 1 is a regular group; templates and query groups
+                    // are not assigned by hand.
+                    *groups = rows
+                        .into_iter()
+                        .filter(|g| g.get("type").is_none_or(|t| t == "1"))
+                        .collect();
+                    groups.sort_by_key(|g| number(g, "sortid").unwrap_or(0));
+                }
+            }
+            Purpose::PersonGroups(db_id) => {
+                if let Some(AdminDialog::Memberships {
+                    db_id: open,
+                    member,
+                    ..
+                }) = self.admin.dialog.as_mut()
+                {
+                    if *open == db_id {
+                        *member = Some(rows.iter().filter_map(|g| number(g, "sgid")).collect());
+                    }
+                }
+            }
+            Purpose::Done(_) | Purpose::Edited(..) | Purpose::MemberChanged(..) => {}
         }
     }
 
@@ -388,6 +451,57 @@ impl App {
         let mut send: Option<(Purpose, &'static str, Value)> = None;
         let mut join: Option<(u64, String)> = None;
         match &mut dialog {
+            AdminDialog::Memberships {
+                db_id,
+                name,
+                groups,
+                member,
+            } => {
+                dialog_window(ctx, &format!("Grupos de {name}"), |ui| {
+                    ui.set_min_width(300.0);
+                    match member {
+                        None => {
+                            ui.label(RichText::new("Carregando…").color(theme::TEXT_3));
+                        }
+                        Some(member) => {
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for group in groups.iter() {
+                                        let (Some(id), label) =
+                                            (number(group, "sgid"), field(group, "name"))
+                                        else {
+                                            continue;
+                                        };
+                                        let mut on = member.contains(&id);
+                                        if ui.checkbox(&mut on, label).changed() {
+                                            let (action, text) = if on {
+                                                (
+                                                    "server_group_add_client",
+                                                    "Pessoa adicionada ao grupo.",
+                                                )
+                                            } else {
+                                                (
+                                                    "server_group_remove_client",
+                                                    "Pessoa removida do grupo.",
+                                                )
+                                            };
+                                            send = Some((
+                                                Purpose::MemberChanged(*db_id, text),
+                                                action,
+                                                json!({ "group": id, "db_id": *db_id }),
+                                            ));
+                                        }
+                                    }
+                                });
+                        }
+                    }
+                    ui.add_space(12.0);
+                    if theme::button(ui, "Fechar", None, Tone::Secondary, 110.0).clicked() {
+                        keep = false;
+                    }
+                });
+            }
             AdminDialog::Poke { client, name, text } => {
                 dialog_window(ctx, &format!("Cutucar {name}"), |ui| {
                     ui.label("Mensagem");

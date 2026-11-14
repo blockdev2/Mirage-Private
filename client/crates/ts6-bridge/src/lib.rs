@@ -1343,6 +1343,23 @@ async fn apply_command(
             None => log(events, "warn", "not connected"),
         },
 
+        Command::Away { away, message } => match session.as_mut() {
+            Some(_) if message.as_deref().is_some_and(|m| m.len() > 80) => {
+                log(events, "error", "the away message is limited to 80 bytes")
+            }
+            Some(active) => match active
+                .set_away(away.then(|| message.as_deref().unwrap_or("")))
+                .await
+            {
+                Ok(()) => {
+                    log(events, "info", format!("away: {away}"));
+                    publish_state(active, events);
+                }
+                Err(error) => log(events, "error", format!("away change failed: {error:#}")),
+            },
+            None => log(events, "warn", "not connected"),
+        },
+
         Command::Mute { input, output } => match session.as_mut() {
             Some(active) => {
                 let muted_input = input.unwrap_or(false);
@@ -1790,6 +1807,7 @@ mod cue_tests {
                     avatar_hash: None,
                     myteamspeak_avatar: None,
                     is_streaming: false,
+                    away: false,
                     db_id: 0,
                 })
                 .collect(),

@@ -113,6 +113,7 @@ impl App {
         let mut open_info = false;
         let mut moderation: Option<super::admin::AdminDialog> = None;
         let mut write_to: Option<u16> = None;
+        let mut groups_of: Option<(u64, String)> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -213,6 +214,12 @@ impl App {
                         write_to = Some(client.id);
                         ui.close();
                     }
+                    if client.db_id != 0
+                        && menu_item(ui, icon::USER_PLUS, "Grupos do servidor").clicked()
+                    {
+                        groups_of = Some((client.db_id, client.name.clone()));
+                        ui.close();
+                    }
                     ui.add_space(2.0);
                     ui.separator();
                     moderation = moderation_items(ui, client);
@@ -220,6 +227,9 @@ impl App {
             });
         if moderation.is_some() {
             self.admin.dialog = moderation;
+        }
+        if let Some((db_id, name)) = groups_of {
+            self.open_memberships(db_id, name);
         }
         if let Some(id) = write_to {
             self.chat_to = super::chat::Target::Person(id);

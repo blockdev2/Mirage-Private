@@ -1194,7 +1194,18 @@ impl App {
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
         let painter = ui.painter();
-        let name_color = if speaking { theme::TEXT } else { theme::TEXT_2 };
+        let name_color = if speaking {
+            theme::TEXT
+        } else if client.away {
+            theme::TEXT_3
+        } else {
+            theme::TEXT_2
+        };
+        let shown = if client.away {
+            format!("{} ({})", client.name, self.t.status_away.to_lowercase())
+        } else {
+            client.name.clone()
+        };
         draw_avatar(
             ui,
             rect.left_center() + vec2(30.0 + indent, 0.0),
@@ -1205,7 +1216,7 @@ impl App {
         );
         let name = theme::fit_text(
             painter,
-            &client.name,
+            &shown,
             FontId::new(13.0, theme::medium()),
             name_color,
             rect.width() - (50.0 + indent) - 32.0,
@@ -1242,7 +1253,14 @@ impl App {
                 .clone()
                 .unwrap_or_else(|| t.no_profile.to_string())
         };
-        let (status, color) = if self.in_session() {
+        let away = self.in_session()
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.clients.iter().any(|c| c.is_self && c.away));
+        let (status, color) = if away {
+            (t.status_away, theme::WARNING)
+        } else if self.in_session() {
             (t.available, theme::SUCCESS)
         } else if profile_name.is_some() {
             (t.local_profile, theme::TEXT_3)
@@ -1255,9 +1273,10 @@ impl App {
             .store
             .active_profile_id()
             .and_then(|id| self.profile_photo(ui.ctx(), &id));
+        let mut set_away = None;
         ui.horizontal(|ui| {
             theme::avatar_or_photo(ui, &name, 36.0, photo.as_ref());
-            ui.vertical(|ui| {
+            let who = ui.vertical(|ui| {
                 // Leave room for the settings button on the right, so a long
                 // name is cut with an ellipsis instead of pushing it out.
                 ui.set_max_width((ui.available_width() - 32.0 - 12.0).max(40.0));
@@ -1275,6 +1294,29 @@ impl App {
                     });
                 });
             });
+            // In a call, clicking the name changes the status.
+            if self.in_session() {
+                let click = ui.interact(
+                    who.response.rect,
+                    ui.make_persistent_id("status-menu"),
+                    Sense::click(),
+                );
+                click.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, t.available)
+                });
+                let click = click.on_hover_cursor(egui::CursorIcon::PointingHand);
+                egui::Popup::menu(&click).show(|ui| {
+                    ui.set_min_width(180.0);
+                    let (label, next) = if away {
+                        (t.status_set_available, false)
+                    } else {
+                        (t.status_set_away, true)
+                    };
+                    if ui.button(label).clicked() {
+                        set_away = Some(next);
+                    }
+                });
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let gear = theme::glyph_button(ui, icon::GEAR, t.settings_title, 32.0, 45.0);
                 if self.update_waiting() {
@@ -1295,6 +1337,9 @@ impl App {
                 }
             });
         });
+        if let Some(away) = set_away {
+            self.send(Command::Away { away });
+        }
         ui.add_space(10.0);
         ui.separator();
     }

@@ -736,6 +736,11 @@ impl Session {
             .await
     }
 
+    /// Marks us away, with `message` (possibly empty), or present again.
+    pub async fn set_away(&mut self, message: Option<&str>) -> Result<()> {
+        self.send_command("clientupdate", &away_args(message)).await
+    }
+
     pub async fn set_muted(&mut self, input: bool, output: bool) -> Result<()> {
         self.send_command(
             "clientupdate",
@@ -825,6 +830,17 @@ fn clientmove_args(
         args.push(("cpw", password.to_string()));
     }
     args
+}
+
+/// Arguments of the `clientupdate` that changes the away status.
+fn away_args(message: Option<&str>) -> Vec<(&'static str, String)> {
+    match message {
+        Some(text) => vec![
+            ("client_away", "1".to_string()),
+            ("client_away_message", text.to_string()),
+        ],
+        None => vec![("client_away", "0".to_string())],
+    }
 }
 
 fn bool_flag(value: bool) -> String {
@@ -984,6 +1000,14 @@ mod chat_tests {
         );
         assert_eq!(describe_removal(Some(Reason::Moved), Some("Ana")), None);
         assert_eq!(describe_removal(None, None), None);
+    }
+
+    #[test]
+    fn the_away_status_sends_its_message_only_when_going_away() {
+        assert_eq!(away_args(None), vec![("client_away", "0".to_string())]);
+        let away = away_args(Some("volto logo"));
+        assert_eq!(away[0], ("client_away", "1".to_string()));
+        assert_eq!(away[1], ("client_away_message", "volto logo".to_string()));
     }
 
     #[test]

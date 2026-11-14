@@ -54,6 +54,8 @@ pub struct ClientInfo {
     pub myteamspeak_avatar: Option<String>,
     /// Whether the client is sharing a TS6 stream (screen) right now.
     pub is_streaming: bool,
+    /// Marked away (the status "ausente"/"away"), with or without a message.
+    pub away: bool,
     /// The server's database id of this client (what group and permission
     /// operations take); 0 when the server has not told us.
     pub db_id: u64,
@@ -127,6 +129,7 @@ impl Snapshot {
                     .as_deref()
                     .and_then(crate::media::myteamspeak_avatar_url),
                 is_streaming: c.is_streaming.unwrap_or(false),
+                away: c.away_message.is_some(),
                 db_id: c.database_id.0,
             })
             .collect();
@@ -242,6 +245,7 @@ mod tests {
             avatar_hash: None,
             myteamspeak_avatar: None,
             is_streaming: true,
+            away: false,
             db_id: 0,
         };
         let json = serde_json::to_value(&client).unwrap();

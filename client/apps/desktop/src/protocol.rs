@@ -50,6 +50,12 @@ pub struct ClientInfo {
     /// Sharing a TS6 stream; older bridges do not send it.
     #[serde(default)]
     pub is_streaming: bool,
+    /// Marked away; older bridges do not send it.
+    #[serde(default)]
+    pub away: bool,
+    /// The server's database id (group operations); 0 when unknown.
+    #[serde(default)]
+    pub db_id: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -273,6 +279,10 @@ pub enum Command {
     },
     Nick {
         name: String,
+    },
+    /// Marks us away or present again.
+    Away {
+        away: bool,
     },
     /// The bridge treats an omitted field as `false`, so callers should send both.
     Mute {
