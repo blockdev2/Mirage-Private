@@ -1085,6 +1085,45 @@ async fn apply_command(
             );
         }
 
+        Command::Admin {
+            session_id,
+            request_id,
+            what,
+        } => {
+            let outcome: Result<Vec<ts6_core::admin::Row>, (&str, String)> = match session.as_mut()
+            {
+                None => Err(("not_connected", "Not connected.".into())),
+                Some(_) if request_id.is_empty() || request_id.len() > 64 => Err((
+                    "invalid",
+                    "A request id of 1 to 64 characters is needed.".into(),
+                )),
+                Some(active) if !session_id.is_empty() && session_id != active.session_id() => {
+                    Err(("stale_session", "The server session changed.".into()))
+                }
+                Some(active) => match what.request() {
+                    Err(reason) => Err(("invalid", reason)),
+                    Ok(_) => active
+                        .admin(&what)
+                        .await
+                        .map_err(|error| ("refused", format!("{error:#}"))),
+                },
+            };
+            let (ok, error, code, rows) = match outcome {
+                Ok(rows) => (true, None, None, rows),
+                Err((code, error)) => (false, Some(error), Some(code), Vec::new()),
+            };
+            protocol::publish(
+                events,
+                &Event::AdminResult {
+                    request_id,
+                    ok,
+                    error,
+                    code,
+                    rows,
+                },
+            );
+        }
+
         Command::Join { channel, password } => match session.as_mut() {
             Some(active) => match active
                 .join_channel_by_name_with_password(&channel, password.as_deref())
@@ -1666,6 +1705,7 @@ mod cue_tests {
                     avatar_hash: None,
                     myteamspeak_avatar: None,
                     is_streaming: false,
+                    db_id: 0,
                 })
                 .collect(),
         }

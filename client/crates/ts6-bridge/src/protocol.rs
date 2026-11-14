@@ -94,6 +94,16 @@ pub enum Command {
         channel: String,
         path: String,
     },
+    /// A server administration operation (channels, moderation, groups,
+    /// permissions); see `ts6_core::admin::AdminOp`. Answered with
+    /// `admin_result` for the same `request_id`.
+    Admin {
+        #[serde(default)]
+        session_id: String,
+        request_id: String,
+        #[serde(flatten)]
+        what: ts6_core::admin::AdminOp,
+    },
     Disconnect,
     Join {
         channel: String,
@@ -223,6 +233,7 @@ impl std::fmt::Debug for Command {
         f.write_str(match self {
             Self::Connect { .. } => "Connect",
             Self::Chat { .. } => "Chat",
+            Self::Admin { .. } => "Admin",
             Self::Disconnect => "Disconnect",
             Self::Join { .. } => "Join",
             Self::Nick { .. } => "Nick",
@@ -308,6 +319,16 @@ pub enum Event<'a> {
         request_id: String,
         error: Option<&'a str>,
         code: Option<&'a str>,
+    },
+    /// Answer to one `admin` command. `rows` holds the reply of list
+    /// operations; `error` is the server's refusal or a local rejection and
+    /// `code` is `not_connected`, `stale_session`, `invalid` or `refused`.
+    AdminResult {
+        request_id: String,
+        ok: bool,
+        error: Option<String>,
+        code: Option<&'a str>,
+        rows: Vec<ts6_core::admin::Row>,
     },
     Hello {
         version: &'a str,
@@ -507,6 +528,28 @@ mod tests {
             r#"{"op":"connect","address":"example.org","server_password":"fixture-sensitive-value"}"#,
         ).unwrap();
         assert!(!format!("{command:?}").contains("fixture-sensitive-value"));
+    }
+
+    #[test]
+    fn admin_commands_carry_their_action_next_to_the_op() {
+        let command: Command = serde_json::from_str(
+            r#"{"op":"admin","request_id":"r1","action":"channel_delete","id":7,"force":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &command,
+            Command::Admin { request_id, what: ts6_core::admin::AdminOp::ChannelDelete { id: 7, force: true }, .. }
+                if request_id == "r1"
+        ));
+        assert_eq!(format!("{command:?}"), "Admin");
+        // No request id, or an action the backend does not have: refused at parse time.
+        assert!(
+            serde_json::from_str::<Command>(r#"{"op":"admin","action":"server_groups"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Command>(
+            r#"{"op":"admin","request_id":"r","action":"nope"}"#
+        )
+        .is_err());
     }
 
     #[test]

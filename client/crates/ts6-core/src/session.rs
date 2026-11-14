@@ -505,6 +505,30 @@ impl Session {
         self.wait_result(name, handle).await
     }
 
+    /// Sends an administration operation and returns the rows its reply carried
+    /// (empty for operations that only answer with a result).
+    pub async fn admin(&mut self, op: &crate::admin::AdminOp) -> Result<Vec<crate::admin::Row>> {
+        let request = op.request().map_err(|reason| anyhow!(reason))?;
+        let handle = self.send_command_no_wait(request.name, &request.args)?;
+        self.wait_result(request.name, handle).await?;
+        // The reply rows arrive before the result and were queued by
+        // `wait_result`; take them out and leave everything else in order.
+        let mut rows = Vec::new();
+        let mut kept = VecDeque::with_capacity(self.pending.len());
+        for item in self.pending.drain(..) {
+            match item {
+                Item::UnknownCommand { name, content }
+                    if request.replies.contains(&name.as_str()) =>
+                {
+                    rows.extend(crate::admin::parse_rows(&content));
+                }
+                other => kept.push_back(other),
+            }
+        }
+        self.pending = kept;
+        Ok(rows)
+    }
+
     /// Fire-and-forget variant: returns the handle so the caller can await it later.
     pub fn send_command_no_wait(
         &mut self,
@@ -533,7 +557,12 @@ impl Session {
 
             match stream_item {
                 StreamItem::MessageResult(got, result) if got == handle => {
-                    return result.map_err(|err| anyhow!("server rejected `{name}`: {err}"));
+                    return result.map_err(|err| match &err.missing_permission {
+                        Some(permission) => anyhow!(
+                            "server rejected `{name}`: {err} (missing permission {permission:?})"
+                        ),
+                        None => anyhow!("server rejected `{name}`: {err}"),
+                    });
                 }
                 StreamItem::BookEvents(events) => enqueue_book_items(
                     &mut self.pending,
