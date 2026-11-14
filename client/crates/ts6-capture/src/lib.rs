@@ -19,10 +19,14 @@ mod convert;
 mod encoder;
 #[cfg(windows)]
 mod monitors;
+#[cfg(windows)]
+mod windows_list;
 
-pub use config::{fit_size, CaptureConfig, EncodedUnit};
+pub use config::{fit_size, CaptureConfig, CaptureSource, EncodedUnit};
 
 #[cfg(windows)]
 pub use capture::ScreenCapture;
 #[cfg(windows)]
 pub use monitors::{list_monitors, MonitorInfo};
+#[cfg(windows)]
+pub use windows_list::{list_windows, WindowInfo};

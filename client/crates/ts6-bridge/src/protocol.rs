@@ -193,10 +193,13 @@ pub enum Command {
     /// Internal: a report from the stream viewer worker.
     #[serde(skip)]
     StreamWorker(crate::stream_media::WorkerEvent),
-    /// Share a monitor (`None`: the primary one) as a TS6 screen stream.
+    /// Share a window (`window` is its handle) or a monitor (`None`: the
+    /// primary one) as a TS6 screen stream.
     ShareStart {
         #[serde(default)]
         monitor: Option<usize>,
+        #[serde(default)]
+        window: Option<i64>,
     },
     /// Stop sharing.
     ShareStop,
@@ -443,9 +446,30 @@ mod tests {
     #[test]
     fn share_commands_and_state_events_round_trip() {
         let start: Command = serde_json::from_str(r#"{"op":"share_start","monitor":1}"#).unwrap();
-        assert!(matches!(start, Command::ShareStart { monitor: Some(1) }));
+        assert!(matches!(
+            start,
+            Command::ShareStart {
+                monitor: Some(1),
+                window: None
+            }
+        ));
         let primary: Command = serde_json::from_str(r#"{"op":"share_start"}"#).unwrap();
-        assert!(matches!(primary, Command::ShareStart { monitor: None }));
+        assert!(matches!(
+            primary,
+            Command::ShareStart {
+                monitor: None,
+                window: None
+            }
+        ));
+        let window: Command =
+            serde_json::from_str(r#"{"op":"share_start","window":65678}"#).unwrap();
+        assert!(matches!(
+            window,
+            Command::ShareStart {
+                window: Some(65678),
+                ..
+            }
+        ));
         let stop: Command = serde_json::from_str(r#"{"op":"share_stop"}"#).unwrap();
         assert!(matches!(stop, Command::ShareStop));
         let event = serde_json::to_value(Event::ShareState {

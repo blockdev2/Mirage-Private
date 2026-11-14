@@ -701,10 +701,17 @@ async fn session_task(
                 stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
                 None
             }
-            Some(Command::ShareStart { monitor }) => {
+            Some(Command::ShareStart { monitor, window }) => {
                 let own = session.as_ref().and_then(own_client_id);
                 let actions = match own {
-                    Some(own) => share.start(own, monitor, std::time::Instant::now()),
+                    Some(own) => {
+                        // A window wins over a monitor when both are named.
+                        let source = match window {
+                            Some(handle) => share_media::CaptureSource::Window(handle),
+                            None => share_media::CaptureSource::Monitor(monitor),
+                        };
+                        share.start(own, source, std::time::Instant::now())
+                    }
                     None => vec![share::Action::Publish {
                         state: "failed",
                         reason: Some("offline"),

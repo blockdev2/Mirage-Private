@@ -1,5 +1,5 @@
-//! Sharing our own screen: the button under the participants, the monitor
-//! picker it opens, and the state the bridge reports back.
+//! Sharing our own screen: the button under the participants, the picker of
+//! monitors and windows it opens, and the state the bridge reports back.
 
 use super::App;
 use crate::protocol::{Command, ShareState};
@@ -17,6 +17,29 @@ pub(super) enum Sharing {
 pub(super) struct MonitorChoice {
     pub index: usize,
     pub label: String,
+}
+
+/// One window in the picker.
+pub(super) struct WindowChoice {
+    pub id: i64,
+    pub label: String,
+}
+
+/// Longest window title shown, in characters; the rest is cut with an ellipsis.
+const WINDOW_TITLE_MAX: usize = 44;
+
+/// "Title · app.exe · 1280×720", with a long title shortened.
+pub(super) fn window_label(title: &str, process: &str, width: u32, height: u32) -> String {
+    let title = title.trim();
+    let mut shown: String = title.chars().take(WINDOW_TITLE_MAX).collect();
+    if title.chars().count() > WINDOW_TITLE_MAX {
+        shown.push('…');
+    }
+    if process.is_empty() {
+        format!("{shown} · {width}×{height}")
+    } else {
+        format!("{shown} · {process} · {width}×{height}")
+    }
 }
 
 /// The user-facing text for a failure code from the bridge.
@@ -59,6 +82,22 @@ fn list_monitors(t: &Strings) -> Vec<MonitorChoice> {
 
 #[cfg(not(windows))]
 fn list_monitors(_t: &Strings) -> Vec<MonitorChoice> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn list_windows() -> Vec<WindowChoice> {
+    ts6_bridge::share_media::windows()
+        .into_iter()
+        .map(|w| WindowChoice {
+            id: w.id,
+            label: window_label(&w.title, &w.process, w.width, w.height),
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn list_windows() -> Vec<WindowChoice> {
     Vec::new()
 }
 
@@ -116,25 +155,40 @@ impl App {
                 if response.clicked() {
                     // Monitors change (docks, cables): look again each time.
                     self.share_monitors = list_monitors(t);
+                    self.share_windows = list_windows();
                 }
-                let mut chosen = None;
+                // (monitor index, window handle): exactly one is set.
+                let mut chosen: Option<(Option<usize>, Option<i64>)> = None;
                 egui::Popup::from_toggle_button_response(&response).show(|ui| {
-                    ui.set_min_width(240.0);
+                    ui.set_min_width(260.0);
                     ui.label(egui::RichText::new(t.share_pick).color(theme::TEXT_2));
-                    if self.share_monitors.is_empty() {
-                        ui.label(t.share_no_monitor);
-                    }
-                    for monitor in &self.share_monitors {
-                        if ui.button(&monitor.label).clicked() {
-                            chosen = Some(monitor.index);
-                        }
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(t.share_screens).color(theme::TEXT_3));
+                            if self.share_monitors.is_empty() {
+                                ui.label(t.share_no_monitor);
+                            }
+                            for monitor in &self.share_monitors {
+                                if ui.button(&monitor.label).clicked() {
+                                    chosen = Some((Some(monitor.index), None));
+                                }
+                            }
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(t.share_windows).color(theme::TEXT_3));
+                            if self.share_windows.is_empty() {
+                                ui.label(t.share_no_window);
+                            }
+                            for window in &self.share_windows {
+                                if ui.button(&window.label).clicked() {
+                                    chosen = Some((None, Some(window.id)));
+                                }
+                            }
+                        });
                 });
-                if let Some(monitor) = chosen {
+                if let Some((monitor, window)) = chosen {
                     self.sharing = Some(Sharing::Starting);
-                    self.send(Command::ShareStart {
-                        monitor: Some(monitor),
-                    });
+                    self.send(Command::ShareStart { monitor, window });
                 }
             }
         }
@@ -145,6 +199,20 @@ impl App {
 mod tests {
     use super::*;
     use crate::strings::PT;
+
+    #[test]
+    fn window_labels_cut_long_titles_and_keep_the_app_and_size() {
+        assert_eq!(
+            window_label("Notas", "notepad.exe", 800, 600),
+            "Notas · notepad.exe · 800×600"
+        );
+        assert_eq!(window_label(" Sem app ", "", 640, 480), "Sem app · 640×480");
+        let long = "á".repeat(60);
+        let label = window_label(&long, "app.exe", 1, 1);
+        assert!(label.starts_with(&"á".repeat(44)));
+        assert!(label.contains('…'));
+        assert!(!label.contains(&"á".repeat(45)));
+    }
 
     #[test]
     fn every_failure_code_has_its_own_text() {

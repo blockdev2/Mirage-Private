@@ -1,11 +1,19 @@
 //! What to capture and how to encode it, plus the pure size arithmetic.
 
+/// What to capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSource {
+    /// A whole monitor: zero-based index, `None` is the primary one.
+    Monitor(Option<usize>),
+    /// One window, by its `HWND` value (see `list_windows`).
+    Window(i64),
+}
+
 /// Capture and encoding settings. `Default` is a 720p, 30 FPS, 3 Mbit/s
 /// stream, a sensible ceiling for several peer-to-peer viewers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureConfig {
-    /// Zero-based monitor index; `None` is the primary monitor.
-    pub monitor: Option<usize>,
+    pub source: CaptureSource,
     pub max_width: u32,
     pub max_height: u32,
     pub fps: u32,
@@ -15,7 +23,7 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            monitor: None,
+            source: CaptureSource::Monitor(None),
             max_width: 1280,
             max_height: 720,
             fps: 30,

@@ -9,7 +9,7 @@
 //! Windows Graphics Capture delivers a frame only when the screen changes, so
 //! a perfectly still screen produces no new units until something moves.
 
-use crate::config::{fit_size, CaptureConfig, EncodedUnit};
+use crate::config::{fit_size, CaptureConfig, CaptureSource, EncodedUnit};
 use crate::convert::Converter;
 use crate::encoder::{ContextProtection, H264Encoder, MfRuntime};
 use anyhow::{anyhow, Context as _, Result};
@@ -26,6 +26,7 @@ use windows_capture::{
         ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
         MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
     },
+    window::Window,
 };
 
 /// Encoded units waiting for the consumer.
@@ -152,6 +153,24 @@ impl GraphicsCaptureApiHandler for Handler {
     }
 }
 
+fn launch<T>(item: T, flags: Flags) -> Result<CaptureControl<Handler, anyhow::Error>>
+where
+    T: TryInto<windows_capture::settings::GraphicsCaptureItemType> + Send + 'static,
+{
+    let settings = Settings::new(
+        item,
+        CursorCaptureSettings::WithCursor,
+        DrawBorderSettings::Default,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        flags,
+    );
+    Handler::start_free_threaded(settings)
+        .map_err(|error| anyhow!("cannot start the capture: {error}"))
+}
+
 /// A running capture. Dropping it stops the capture.
 pub struct ScreenCapture {
     control: Option<CaptureControl<Handler, anyhow::Error>>,
@@ -166,33 +185,34 @@ impl ScreenCapture {
     /// screen stays in this process: it is encoded and handed to `units`.
     pub fn start(config: CaptureConfig) -> Result<Self> {
         config.validate().map_err(|reason| anyhow!(reason))?;
-        let monitor = match config.monitor {
-            Some(index) => Monitor::from_index(index + 1),
-            None => Monitor::primary(),
-        }
-        .map_err(|error| anyhow!("cannot open the monitor: {error}"))?;
         let (sender, units) = sync_channel(QUEUE);
         let keyframe = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
-        let settings = Settings::new(
-            monitor,
-            CursorCaptureSettings::WithCursor,
-            DrawBorderSettings::Default,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            Flags {
-                config,
-                units: sender,
-                keyframe: Arc::clone(&keyframe),
-                stop: Arc::clone(&stop),
-                failure: Arc::clone(&failure),
-            },
-        );
-        let control = Handler::start_free_threaded(settings)
-            .map_err(|error| anyhow!("cannot start the capture: {error}"))?;
+        let flags = Flags {
+            config,
+            units: sender,
+            keyframe: Arc::clone(&keyframe),
+            stop: Arc::clone(&stop),
+            failure: Arc::clone(&failure),
+        };
+        let control = match config.source {
+            CaptureSource::Monitor(index) => {
+                let monitor = match index {
+                    Some(index) => Monitor::from_index(index + 1),
+                    None => Monitor::primary(),
+                }
+                .map_err(|error| anyhow!("cannot open the monitor: {error}"))?;
+                launch(monitor, flags)?
+            }
+            CaptureSource::Window(handle) => {
+                let window = Window::from_raw_hwnd(handle as isize as *mut std::ffi::c_void);
+                if !window.is_valid() {
+                    return Err(anyhow!("that window cannot be captured (closed or hidden)"));
+                }
+                launch(window, flags)?
+            }
+        };
         Ok(Self {
             control: Some(control),
             units,
