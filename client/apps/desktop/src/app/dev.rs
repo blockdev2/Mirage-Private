@@ -3,7 +3,7 @@
 //! exercised and photographed without a person. Compiled out of release
 //! builds.
 //!
-//! Steps: `wait:SECS`, `connect:HOST:PORT`, `chat:TEXT`, `attach:PATH`,
+//! Steps: `wait:SECS`, `connect:HOST:PORT`, `chat:TEXT`, `attach:PATH`, `watch` (first other client),
 //! `hover:X,Y`, `click:X,Y`, `key:Escape`, `shot:NAME`, `quit`.
 //! `MIRAGE_DEV_OUT` is the folder the screenshots go to. Run it with an
 //! isolated `APPDATA` so the real profile is untouched.
@@ -86,6 +86,17 @@ impl App {
                 self.submit_chat();
             }
             "attach" => self.attach_file(PathBuf::from(arg)),
+            "watch" => {
+                let other = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.clients.iter().find(|c| !c.is_self).map(|c| c.id));
+                match other {
+                    Some(id) => self.watch_stream(id),
+                    // Nobody else is here yet: try again.
+                    None => plan.steps.push_front(step),
+                }
+            }
             "hover" => {
                 if let Some(pos) = point(&arg) {
                     self.dev_events.push(egui::Event::PointerMoved(pos));
