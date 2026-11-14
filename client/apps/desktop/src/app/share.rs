@@ -174,6 +174,9 @@ impl App {
                         for (index, label) in t.share_quality_levels.iter().enumerate() {
                             ui.selectable_value(&mut self.share_quality, index, *label);
                         }
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut self.share_audio, t.share_audio)
+                            .on_hover_text(t.share_audio_hint);
                         ui.add_space(6.0);
                         ui.separator();
                         ui.label(egui::RichText::new(t.share_pick).color(theme::TEXT_2));
@@ -207,6 +210,7 @@ impl App {
                         monitor,
                         window,
                         quality: QUALITIES.get(self.share_quality).copied(),
+                        audio: self.share_audio,
                     });
                 }
             }

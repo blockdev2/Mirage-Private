@@ -225,6 +225,8 @@ pub struct App {
     share_windows: Vec<share::WindowChoice>,
     /// Index into `share::QUALITIES` for the next share (not saved).
     share_quality: usize,
+    /// Send the computer's sound with the next share (not saved).
+    share_audio: bool,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
     connect_started: Option<Instant>,
@@ -328,6 +330,7 @@ impl App {
             share_monitors: Vec::new(),
             share_windows: Vec::new(),
             share_quality: share::DEFAULT_QUALITY,
+            share_audio: false,
             connect_started: None,
             open_channels: HashMap::new(),
             server_open: true,

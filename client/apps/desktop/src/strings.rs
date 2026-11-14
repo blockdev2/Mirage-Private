@@ -192,6 +192,8 @@ pub struct Strings {
     pub share_starting: &'static str,
     pub share_watching: &'static str,
     pub share_pick: &'static str,
+    pub share_audio: &'static str,
+    pub share_audio_hint: &'static str,
     pub share_quality: &'static str,
     /// Light, standard, high, max: name, size and bitrate.
     pub share_quality_levels: [&'static str; 4],
@@ -578,6 +580,8 @@ pub const PT: Strings = Strings {
     share_starting: "Iniciando compartilhamento…",
     share_watching: "assistindo",
     share_pick: "Compartilhar o quê?",
+    share_audio: "Enviar o som do computador",
+    share_audio_hint: "Tudo que toca no computador, menos o próprio Mirage, vai junto com a sua voz. Com o microfone silenciado no servidor, o som não chega.",
     share_quality: "Qualidade",
     share_quality_levels: [
         "Leve · 720p 30 fps · 1,5 Mbps",

@@ -203,6 +203,9 @@ pub enum Command {
         /// `light`, `standard` (the default), `high` or `max`.
         #[serde(default)]
         quality: Option<String>,
+        /// Send the computer's sound (all but Mirage) in our voice.
+        #[serde(default)]
+        audio: bool,
     },
     /// Stop sharing.
     ShareStop,

@@ -705,6 +705,7 @@ async fn session_task(
                 monitor,
                 window,
                 quality,
+                audio,
             }) => {
                 let own = session.as_ref().and_then(own_client_id);
                 let actions = match own {
@@ -719,7 +720,21 @@ async fn session_task(
                             .as_deref()
                             .and_then(share_media::Quality::from_name)
                             .unwrap_or_default();
-                        share.start(own, source, quality, std::time::Instant::now())
+                        // Stream sound is best effort: where the system cannot
+                        // capture it the share goes ahead without sound.
+                        let audio = audio
+                            && match engine.set_stream_audio(true) {
+                                Ok(()) => true,
+                                Err(reason) => {
+                                    log(
+                                        &events,
+                                        "warn",
+                                        format!("stream sound unavailable: {reason}"),
+                                    );
+                                    false
+                                }
+                            };
+                        share.start(own, source, quality, audio, std::time::Instant::now())
                     }
                     None => vec![share::Action::Publish {
                         state: "failed",
@@ -742,6 +757,10 @@ async fn session_task(
             }
             other => other,
         };
+        // The computer's sound follows the share: off as soon as none is running.
+        if share.is_idle() && engine.stream_audio_on() {
+            let _ = engine.set_stream_audio(false);
+        }
         if let Some(command) = pending {
             // A new or ended session: the next snapshot is our own join.
             if matches!(command, Command::Connect { .. } | Command::Disconnect) {

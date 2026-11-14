@@ -713,6 +713,7 @@ async fn audio_call(session: &mut Session, opts: &Opts, seconds: u64) -> Result<
                 threshold_db: ts6_audio::vad::DEFAULT_THRESHOLD_DB,
                 noise_suppression: ts6_audio::denoise::NoiseSuppression::Off,
                 monitor: Default::default(),
+                mic_open: None,
             },
             feed_tx,
         ) {

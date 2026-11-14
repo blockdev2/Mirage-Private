@@ -37,6 +37,12 @@ pub struct CaptureConfig {
     pub noise_suppression: NoiseSuppression,
     /// Receives the processed audio for local "hear yourself" playback.
     pub monitor: Monitor,
+    /// Stream mode, for a share that sends the computer's sound: the system
+    /// audio queue is mixed into every frame and this flag says whether the
+    /// microphone itself may be heard (push-to-talk held, or always). When it
+    /// is set the capture also runs without a microphone, as silence. Without
+    /// it nothing changes: push-to-talk gates downstream.
+    pub mic_open: Option<Arc<AtomicBool>>,
 }
 
 impl Default for CaptureConfig {
@@ -48,6 +54,7 @@ impl Default for CaptureConfig {
             threshold_db: DEFAULT_THRESHOLD_DB,
             noise_suppression: NoiseSuppression::Standard,
             monitor: Monitor::default(),
+            mic_open: None,
         }
     }
 }
@@ -134,6 +141,9 @@ struct Processor {
     /// The last encoded frame, sent first when the gate opens (pre-roll).
     previous: Option<Vec<u8>>,
     monitor: Monitor,
+    mic_open: Option<Arc<AtomicBool>>,
+    /// Scratch for the system audio of one frame.
+    system: Vec<f32>,
 }
 
 impl Processor {
@@ -162,6 +172,8 @@ impl Processor {
             denoiser: Denoiser::new(),
             previous: None,
             monitor: Monitor::default(),
+            mic_open: None,
+            system: vec![0.0; FRAME_SAMPLES],
         })
     }
 
@@ -214,6 +226,17 @@ impl Processor {
             let noise = NoiseSuppression::from_level(self.live.noise.load(Ordering::Relaxed));
             self.denoiser.process(&mut frame, noise);
             self.monitor.push(&frame);
+            if let Some(open) = &self.mic_open {
+                // Stream mode: the microphone only when allowed, plus the
+                // computer's sound, so stream sound passes without the key.
+                if !open.load(Ordering::Relaxed) {
+                    frame.fill(0.0);
+                }
+                crate::system_audio::system_audio().take(&mut self.system);
+                for (mixed, system) in frame.iter_mut().zip(&self.system) {
+                    *mixed = (*mixed + *system).clamp(-1.0, 1.0);
+                }
+            }
             let level = level_db(&frame);
             self.live.level_db.store(level.to_bits(), Ordering::Relaxed);
             // Every frame is encoded, sent or not, so the encoder state stays
@@ -385,16 +408,39 @@ fn supervise(
     }
 }
 
+/// Feeds 20 ms of silence at a steady pace, for a stream-mode capture on a
+/// computer without a microphone: the system audio still needs frames to ride on.
+fn silent_source(processor: &Arc<Mutex<Processor>>, stop: &AtomicBool) {
+    let frame = [0.0f32; FRAME_SAMPLES];
+    let mut next = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(mut processor) = processor.lock() {
+            processor.feed(&frame, 1);
+        }
+        next += Duration::from_millis(20);
+        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+    }
+}
+
 /// Open the microphone and start feeding encoded frames into `sink`.
 pub fn start_capture(
     config: CaptureConfig,
     sink: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> Result<Capture> {
-    let device = pick_input(config.device.clone()).ok_or_else(|| anyhow!("no input device"))?;
-    let device_name = crate::devices::device_name(&device);
-    let supported = device.default_input_config()?;
-    let channels = supported.channels() as usize;
-    let sample_rate = supported.sample_rate();
+    let device = pick_input(config.device.clone());
+    let (device_name, channels, sample_rate) = match (&device, &config.mic_open) {
+        (Some(device), _) => {
+            let supported = device.default_input_config()?;
+            (
+                crate::devices::device_name(device),
+                supported.channels() as usize,
+                supported.sample_rate(),
+            )
+        }
+        // Stream mode without a microphone: silence carries the system audio.
+        (None, Some(_)) => ("(sem microfone)".to_owned(), 1, SAMPLE_RATE),
+        (None, None) => return Err(anyhow!("no input device")),
+    };
 
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(AtomicU64::new(0));
@@ -414,6 +460,7 @@ pub fn start_capture(
 
     let wanted = config.device.clone();
     let monitor = config.monitor.clone();
+    let mic_open = config.mic_open.clone();
     let thread = std::thread::Builder::new()
         .name("ts6-capture".into())
         .spawn(move || {
@@ -426,13 +473,20 @@ pub fn start_capture(
                 live_thread.clone(),
                 voice_activation,
             ) {
-                Ok(processor) => Arc::new(Mutex::new(Processor { monitor, ..processor })),
+                Ok(processor) => Arc::new(Mutex::new(Processor {
+                    monitor,
+                    mic_open,
+                    ..processor
+                })),
                 Err(error) => {
                     tracing::error!(%error, device = %device_for_thread, "cannot create the Opus encoder");
                     return;
                 }
             };
-            supervise(device, &wanted, &processor, &stop_thread);
+            match device {
+                Some(device) => supervise(device, &wanted, &processor, &stop_thread),
+                None => silent_source(&processor, &stop_thread),
+            }
             live_thread.transmitting.store(false, Ordering::Relaxed);
             tracing::info!(device = %device_for_thread, "capture stopped");
         })?;
@@ -447,4 +501,89 @@ pub fn start_capture(
         live,
         thread: Some(thread),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::VoiceDecoder;
+    use crate::system_audio::system_audio;
+
+    fn processor(
+        mic_open: Option<Arc<AtomicBool>>,
+    ) -> (Processor, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let (sink, packets) = tokio::sync::mpsc::channel(64);
+        let live = Arc::new(Live {
+            level_db: AtomicU32::new(SILENCE_DB.to_bits()),
+            threshold_db: AtomicU32::new(DEFAULT_THRESHOLD_DB.to_bits()),
+            transmitting: AtomicBool::new(false),
+            noise: AtomicU8::new(NoiseSuppression::Off.level()),
+        });
+        let mut processor = Processor::new(
+            SAMPLE_RATE,
+            64_000,
+            sink,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            live,
+            false,
+        )
+        .unwrap();
+        processor.mic_open = mic_open;
+        (processor, packets)
+    }
+
+    fn peak_of(packets: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> f32 {
+        let mut decoder = VoiceDecoder::new().unwrap();
+        let mut peak = 0.0f32;
+        while let Ok(packet) = packets.try_recv() {
+            if packet.is_empty() {
+                continue;
+            }
+            peak = decoder
+                .decode(Some(&packet))
+                .unwrap()
+                .iter()
+                .fold(peak, |m, s| m.max(s.abs()));
+        }
+        peak
+    }
+
+    #[test]
+    fn stream_mode_carries_system_audio_while_the_microphone_stays_closed() {
+        let queue = system_audio();
+        queue.set_on(true);
+        let tone: Vec<f32> = (0..FRAME_SAMPLES * 10)
+            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.4)
+            .collect();
+        queue.push(&tone);
+
+        // Microphone "heard" at full scale, but not allowed: only the tone goes out.
+        let loud_mic = vec![0.9f32; FRAME_SAMPLES * 10];
+        let (mut closed, mut packets) = processor(Some(Arc::new(AtomicBool::new(false))));
+        closed.feed(&loud_mic, 1);
+        let peak = peak_of(&mut packets);
+        assert!(
+            (0.25..0.6).contains(&peak),
+            "system tone only, peak {peak} (a 0.9 microphone would exceed 0.6)"
+        );
+
+        // Nothing queued and the microphone closed: silence, not the microphone.
+        queue.clear();
+        let (mut closed, mut packets) = processor(Some(Arc::new(AtomicBool::new(false))));
+        closed.feed(&loud_mic, 1);
+        assert!(peak_of(&mut packets) < 0.02);
+
+        // Open microphone passes through.
+        let (mut open, mut packets) = processor(Some(Arc::new(AtomicBool::new(true))));
+        open.feed(&loud_mic, 1);
+        assert!(peak_of(&mut packets) > 0.6);
+
+        // Without stream mode the microphone is untouched, queue or not.
+        queue.push(&tone);
+        let (mut plain, mut packets) = processor(None);
+        plain.feed(&loud_mic, 1);
+        assert!(peak_of(&mut packets) > 0.6);
+        queue.set_on(false);
+    }
 }

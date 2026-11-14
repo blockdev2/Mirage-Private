@@ -6845,6 +6845,8 @@ dependencies = [
  "ts6-core",
  "tsclientlib",
  "tsproto-packets",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]
