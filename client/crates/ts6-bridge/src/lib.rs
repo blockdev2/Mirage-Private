@@ -701,10 +701,41 @@ async fn session_task(
                 stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
                 None
             }
-            Some(Command::ShareStart { monitor }) => {
+            Some(Command::ShareStart {
+                monitor,
+                window,
+                quality,
+                audio,
+            }) => {
                 let own = session.as_ref().and_then(own_client_id);
                 let actions = match own {
-                    Some(own) => share.start(own, monitor, std::time::Instant::now()),
+                    Some(own) => {
+                        // A window wins over a monitor when both are named.
+                        let source = match window {
+                            Some(handle) => share_media::CaptureSource::Window(handle),
+                            None => share_media::CaptureSource::Monitor(monitor),
+                        };
+                        // Unknown names fall back to the default preset.
+                        let quality = quality
+                            .as_deref()
+                            .and_then(share_media::Quality::from_name)
+                            .unwrap_or_default();
+                        // Stream sound is best effort: where the system cannot
+                        // capture it the share goes ahead without sound.
+                        let audio = audio
+                            && match engine.set_stream_audio(true) {
+                                Ok(()) => true,
+                                Err(reason) => {
+                                    log(
+                                        &events,
+                                        "warn",
+                                        format!("stream sound unavailable: {reason}"),
+                                    );
+                                    false
+                                }
+                            };
+                        share.start(own, source, quality, audio, std::time::Instant::now())
+                    }
                     None => vec![share::Action::Publish {
                         state: "failed",
                         reason: Some("offline"),
@@ -726,6 +757,10 @@ async fn session_task(
             }
             other => other,
         };
+        // The computer's sound follows the share: off as soon as none is running.
+        if share.is_idle() && engine.stream_audio_on() {
+            let _ = engine.set_stream_audio(false);
+        }
         if let Some(command) = pending {
             // A new or ended session: the next snapshot is our own join.
             if matches!(command, Command::Connect { .. } | Command::Disconnect) {

@@ -283,9 +283,18 @@ pub enum Command {
         client: u16,
     },
     StopWatching,
-    /// Share a monitor (zero-based index) as our own screen stream.
+    /// Share a monitor (zero-based index) or one window (its handle) as our
+    /// own screen stream.
     ShareStart {
         monitor: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window: Option<i64>,
+        /// `light`, `standard`, `high` or `max`; absent is the bridge default.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quality: Option<&'static str>,
+        /// Send the computer's sound in our voice.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        audio: bool,
     },
     ShareStop,
 }
@@ -341,8 +350,24 @@ mod tests {
     #[test]
     fn share_commands_serialize_like_the_bridge_expects() {
         assert_eq!(
-            serde_json::to_value(Command::ShareStart { monitor: Some(1) }).unwrap(),
+            serde_json::to_value(Command::ShareStart {
+                monitor: Some(1),
+                window: None,
+                quality: None,
+                audio: false
+            })
+            .unwrap(),
             serde_json::json!({"op": "share_start", "monitor": 1})
+        );
+        assert_eq!(
+            serde_json::to_value(Command::ShareStart {
+                monitor: None,
+                window: Some(65678),
+                quality: Some("high"),
+                audio: true
+            })
+            .unwrap(),
+            serde_json::json!({"op": "share_start", "monitor": null, "window": 65678, "quality": "high", "audio": true})
         );
         assert_eq!(
             serde_json::to_value(Command::ShareStop).unwrap(),

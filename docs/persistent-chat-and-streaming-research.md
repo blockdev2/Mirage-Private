@@ -550,3 +550,27 @@ sink. Verified on loopback only (a 440 Hz tone from a webrtc-rs publisher
 reaches the mix); not yet heard from a real official share. Known gaps: no
 separate volume or mute, and the playback chain is mono.
 
+### Sharing the computer's sound (2026-11-13, night)
+
+The reference client does not put stream audio in the WebRTC audio section
+(it stays inactive); it mixes the system audio into the Opus voice channel
+before denoising and announces `audio=1` in `setupstream`. Mirage does the
+same. WASAPI process loopback (`ActivateAudioInterfaceAsync` with
+`VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`, 48 kHz stereo float) excludes
+Mirage's own process tree, because the call's voices are played by Mirage and
+would otherwise be sent back into the channel. It activates on Windows 10 build
+19045 here, despite the documented minimum of build 20348: including a
+player's tree captured a 0.37 tone, excluding it captured silence, and
+excluding an unrelated process captured the player. The exclusion covers the
+whole tree, so a player started by the excluded process is silent too (found
+when the first test spawned its player as a child).
+
+The voice path needed a stream mode: with a push-to-talk key the gate used to
+sit downstream and would drop the stream sound whenever the key was up, so in
+stream mode the capture itself zeroes the microphone unless the key is held,
+mixes the system audio, and runs its own voice gate at -55 dBFS so that silence
+ends the voice session. Without a microphone (this machine has none) silence
+carries the sound. Open: that the official client plays the voice as the
+sharer's stream sound; no per-application capture; mute on the server also
+silences the stream sound.
+

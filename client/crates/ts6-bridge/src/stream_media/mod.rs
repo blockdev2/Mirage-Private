@@ -4,6 +4,8 @@
 pub mod decode;
 pub mod frame;
 pub mod offer;
+/// Volume and mute of the watched stream's sound, for the window.
+pub use ts6_audio::stream_audio::{stream_audio, MAX_STREAM_VOLUME};
 mod peer;
 
 #[cfg(all(test, windows))]

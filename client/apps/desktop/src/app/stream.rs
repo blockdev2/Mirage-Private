@@ -2,9 +2,14 @@
 //! card, the stream view that takes the participants' area, and its states.
 //! Frames come from the embedded bridge's in-process slot, never the socket.
 
-use egui::{pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, UiBuilder};
+use egui::{
+    pos2, vec2, Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, Sense, Stroke,
+    UiBuilder,
+};
 use ts6_bridge::stream_media::frame::frames;
+use ts6_bridge::stream_media::{stream_audio, MAX_STREAM_VOLUME};
 
+use super::peer::volume_slider;
 use super::App;
 use crate::protocol::{ClientInfo, Command, StreamState};
 use crate::strings::Strings;
@@ -20,6 +25,8 @@ pub(super) enum WatchState {
 pub(super) struct Watching {
     pub client: u16,
     pub state: WatchState,
+    /// The stream fills the whole window.
+    pub fullscreen: bool,
     texture: Option<egui::TextureHandle>,
     /// Sequence of the last frame shown.
     seen: u64,
@@ -54,6 +61,7 @@ impl App {
         self.watching = Some(Watching {
             client,
             state: WatchState::Connecting,
+            fullscreen: false,
             texture: None,
             seen: 0,
         });
@@ -117,13 +125,31 @@ impl App {
         let width = ui.available_width();
         let stage_height = (room - STRIP_HEIGHT - STRIP_GAP).max(STRIP_HEIGHT);
         let (stage, _) = ui.allocate_exact_size(vec2(width, stage_height), Sense::hover());
-        self.stream_stage(ui, stage, participants);
+        self.stream_stage(ui, stage);
         ui.add_space(STRIP_GAP);
         self.participants_content(ui, participants, STRIP_HEIGHT, None);
     }
 
-    fn stream_stage(&mut self, ui: &mut egui::Ui, stage: Rect, participants: &[&ClientInfo]) {
+    /// Puts the window in or out of fullscreen to match the stream view.
+    pub(super) fn sync_stream_fullscreen(&mut self, ctx: &egui::Context) {
+        let wanted = self.watching.as_ref().is_some_and(|w| w.fullscreen);
+        if wanted != self.window_fullscreen {
+            self.window_fullscreen = wanted;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(wanted));
+        }
+    }
+
+    pub(super) fn stream_stage(&mut self, ui: &mut egui::Ui, stage: Rect) {
         let t = self.t;
+        let name = self
+            .watching
+            .as_ref()
+            .and_then(|w| {
+                let snapshot = self.snapshot.as_ref()?;
+                snapshot.clients.iter().find(|c| c.id == w.client)
+            })
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
         let Some(watching) = self.watching.as_mut() else {
             return;
         };
@@ -199,16 +225,21 @@ impl App {
             }
         }
 
+        // Double click toggles fullscreen; Esc leaves it. Registered before the
+        // buttons so they win where they overlap.
+        let stage_response = ui.interact(stage, ui.scope_id().with("stream-stage"), Sense::click());
+        let mut toggle_fullscreen = stage_response.double_clicked();
+        if watching.fullscreen && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            toggle_fullscreen = true;
+        }
+        let fullscreen = watching.fullscreen;
+
         // Who is live, top-left.
-        let name = participants
-            .iter()
-            .find(|c| c.id == watching.client)
-            .map_or("", |c| c.name.as_str());
         let badge = live_badge(&painter, stage.left_top() + vec2(12.0, 12.0), t.live_badge);
         painter.text(
             pos2(badge.right() + 8.0, badge.center().y),
             Align2::LEFT_CENTER,
-            name,
+            &name,
             FontId::new(13.0, theme::semibold()),
             Color32::WHITE,
         );
@@ -228,8 +259,97 @@ impl App {
             .clicked()
         {
             self.stop_watching();
+            return;
+        }
+
+        // Volume, mute and fullscreen, bottom-right.
+        let sink = stream_audio();
+        let bar = Rect::from_min_size(
+            stage.right_bottom() - vec2(8.0 + 216.0, 8.0 + 40.0),
+            vec2(216.0, 40.0),
+        );
+        painter.rect(
+            bar,
+            CornerRadius::same(8),
+            Color32::from_black_alpha(140),
+            Stroke::NONE,
+            egui::StrokeKind::Inside,
+        );
+        let mut controls = ui.new_child(
+            UiBuilder::new()
+                .max_rect(bar.shrink2(vec2(4.0, 2.0)))
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        let (muted, mut volume) = (sink.muted(), sink.volume());
+        let glyph = if muted || volume <= 0.0 {
+            icon::SPEAKER_SLASH
+        } else if volume < 0.5 {
+            icon::SPEAKER_LOW
+        } else {
+            icon::SPEAKER
+        };
+        let label = if muted {
+            t.stream_unmute
+        } else {
+            t.stream_mute
+        };
+        if theme::glyph_button(&mut controls, glyph, label, 36.0, 0.0)
+            .on_hover_text(label)
+            .clicked()
+        {
+            sink.set_muted(!muted);
+        }
+        controls.allocate_ui(vec2(104.0, 36.0), |ui| {
+            ui.centered_and_justified(|ui| {
+                if volume_slider(ui, &mut volume, MAX_STREAM_VOLUME) {
+                    sink.set_volume(volume);
+                    sink.set_muted(false);
+                }
+            })
+            .response
+            .on_hover_text(t.stream_volume);
+        });
+        let label = if fullscreen {
+            t.fullscreen_exit
+        } else {
+            t.fullscreen_enter
+        };
+        if fullscreen_button(&mut controls, fullscreen, label)
+            .on_hover_text(label)
+            .clicked()
+        {
+            toggle_fullscreen = true;
+        }
+        if toggle_fullscreen {
+            if let Some(watching) = self.watching.as_mut() {
+                watching.fullscreen = !watching.fullscreen;
+            }
         }
     }
+}
+
+/// Four corner brackets: pointing outward to enter fullscreen, inward to leave.
+fn fullscreen_button(ui: &mut egui::Ui, leave: bool, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let ink = if response.hovered() || response.has_focus() {
+        Color32::WHITE
+    } else {
+        theme::TEXT_3
+    };
+    let stroke = Stroke::new(1.6, ink);
+    let (edge, arm) = if leave { (3.0, 5.0) } else { (8.0, 5.0) };
+    // Entering: brackets sit at the outer corners with arms toward the center.
+    // Leaving: brackets sit near the center with arms pointing out.
+    let direction = if leave { 1.0 } else { -1.0 };
+    for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let corner = rect.center() + vec2(sx * edge, sy * edge);
+        let horizontal = corner + vec2(sx * arm * direction, 0.0);
+        let vertical = corner + vec2(0.0, sy * arm * direction);
+        ui.painter().line_segment([corner, horizontal], stroke);
+        ui.painter().line_segment([corner, vertical], stroke);
+    }
+    response
 }
 
 /// The red "AO VIVO" pill; returns its rect.

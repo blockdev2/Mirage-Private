@@ -18,6 +18,9 @@ const SPEAKING_HOLD: Duration = Duration::from_millis(300);
 const STATS_INTERVAL: Duration = Duration::from_millis(80);
 /// Captured frames allowed to wait for the network loop (20 ms each).
 const MIC_QUEUE_FRAMES: usize = 4;
+/// Voice gate while sharing sound with push-to-talk: below ordinary speech and
+/// quiet game audio, above digital silence.
+const STREAM_KEY_THRESHOLD_DB: f32 = -55.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioConfig {
@@ -70,6 +73,9 @@ pub struct AudioEngine {
     /// Per-client playback volume, reapplied when playback restarts.
     volumes: std::collections::HashMap<u16, f32>,
     monitor: ts6_audio::Monitor,
+    /// The computer's sound, captured while a share sends it (Windows only).
+    #[cfg(windows)]
+    system_audio: Option<ts6_audio::loopback::Loopback>,
     /// A cue asked for before playback started (our own join: the UI turns
     /// audio on a moment after the session connects).
     pending_cue: Option<ts6_audio::cues::Cue>,
@@ -98,6 +104,8 @@ impl AudioEngine {
             applied: None,
             volumes: Default::default(),
             monitor: Default::default(),
+            #[cfg(windows)]
+            system_audio: None,
             pending_cue: None,
         }
     }
@@ -162,11 +170,21 @@ impl AudioEngine {
             return;
         }
 
+        // While a share sends the computer's sound the microphone path runs in
+        // stream mode: the capture itself holds the microphone closed unless
+        // the key is down, so the sound is not gated by push-to-talk.
+        let stream_mode = self.stream_audio_on();
+        let mut mic_open: Option<Arc<AtomicBool>> = None;
         // Push-to-talk, when bound: the gate sits between the source and the session.
         let binding = config.ptt.clone().filter(|key| !key.trim().is_empty());
         let mut monitor = None;
         let target = match &binding {
             Some(key) => match ts6_input::bind_ptt(key) {
+                Ok(started) if stream_mode => {
+                    mic_open = Some(started.pressed());
+                    monitor = Some(started);
+                    self.mic_tx.clone()
+                }
                 Ok(started) => {
                     let (source_tx, source_rx) =
                         tokio::sync::mpsc::channel::<Vec<u8>>(MIC_QUEUE_FRAMES);
@@ -184,6 +202,9 @@ impl AudioEngine {
             None => self.mic_tx.clone(),
         };
         self.ptt = monitor;
+        if stream_mode && mic_open.is_none() {
+            mic_open = Some(Arc::new(AtomicBool::new(true)));
+        }
         self.ptt_binding = self.ptt.as_ref().and_then(|_| binding.clone());
 
         // Playback (receiving voice).
@@ -217,10 +238,21 @@ impl AudioEngine {
                     bitrate: 64_000,
                     // Push-to-talk gates downstream; otherwise voice activation
                     // decides, unless continuous transmission was chosen.
-                    voice_activation: self.ptt.is_none() && config.voice_activation,
-                    threshold_db: config.threshold_db,
+                    // In stream mode with a key there is no gate downstream, so the
+                    // capture's own gate closes the voice when nothing is heard.
+                    voice_activation: if stream_mode && self.ptt.is_some() {
+                        true
+                    } else {
+                        self.ptt.is_none() && config.voice_activation
+                    },
+                    threshold_db: if stream_mode && self.ptt.is_some() {
+                        STREAM_KEY_THRESHOLD_DB
+                    } else {
+                        config.threshold_db
+                    },
                     noise_suppression: config.noise_suppression,
                     monitor: self.monitor.clone(),
+                    mic_open,
                 },
                 target,
             ) {
@@ -271,6 +303,50 @@ impl AudioEngine {
         self.volumes.insert(client, volume);
         if let Some(playback) = &self.playback {
             playback.set_volume(client, volume);
+        }
+    }
+
+    /// Whether a share is currently sending the computer's sound.
+    pub fn stream_audio_on(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.system_audio.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    /// Starts or stops sending the computer's sound (everything except Mirage)
+    /// in our voice. Fails, with the reason, where the system cannot capture it.
+    pub fn set_stream_audio(&mut self, on: bool) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            if on == self.system_audio.is_some() {
+                return Ok(());
+            }
+            self.system_audio = if on {
+                Some(
+                    ts6_audio::loopback::Loopback::start(std::process::id())
+                        .map_err(|error| format!("{error:#}"))?,
+                )
+            } else {
+                None
+            };
+            // The microphone path is gated differently in stream mode: rebuild it.
+            if let Some(applied) = self.applied.take() {
+                self.configure(&applied);
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            if on {
+                Err("stream sound needs Windows".to_owned())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -451,5 +527,106 @@ mod safety_tests {
         engine.stop();
         assert!(!transmitting, "invalid PTT must fail closed");
         assert!(!queued, "queued audio leaked after disabling PTT");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod stream_sound_tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::Duration;
+
+    /// A 4 s, 440 Hz, 16-bit mono WAV.
+    fn tone_wav() -> Vec<u8> {
+        let rate = 44_100u32;
+        let samples: Vec<i16> = (0..rate * 4)
+            .map(|i| {
+                ((i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 12_000.0) as i16
+            })
+            .collect();
+        let data_len = (samples.len() * 2) as u32;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend((36 + data_len).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(rate.to_le_bytes());
+        wav.extend((rate * 2).to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend(data_len.to_le_bytes());
+        for sample in samples {
+            wav.extend(sample.to_le_bytes());
+        }
+        wav
+    }
+
+    /// The whole path on a real machine: sound from another process ->
+    /// process loopback -> stream mode -> Opus voice packets, with no key held
+    /// and no microphone needed. Needs an output device and Windows process
+    /// loopback: `cargo test -p ts6-bridge stream_sound -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs an output device and Windows process loopback"]
+    fn the_computers_sound_leaves_as_voice_without_a_key() {
+        let path = std::env::temp_dir().join("mirage-stream-sound.wav");
+        std::fs::write(&path, tone_wav()).unwrap();
+        let mut engine = AudioEngine::new();
+        engine.configure(&AudioConfig {
+            enabled: true,
+            // A key is bound: stream sound must pass although it is never pressed.
+            ptt: Some("F9".into()),
+            ..AudioConfig::default()
+        });
+        engine.set_stream_audio(true).expect("system audio starts");
+        assert!(engine.stream_audio_on());
+
+        // Started through WMI, so the player is not a child of this process
+        // (a child would be inside the excluded process tree, like Mirage's own
+        // call audio; an application being shared never is).
+        let command = format!(
+            "powershell -NoProfile -STA -Command \"(New-Object Media.SoundPlayer '{}').PlaySync()\"",
+            path.display()
+        );
+        let mut starter = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='{}'}} | Out-Null",
+                    command.replace('\'', "''")
+                ),
+            ])
+            .spawn()
+            .unwrap();
+        let mut decoder = ts6_audio::VoiceDecoder::new().unwrap();
+        let (mut packets, mut peak) = (0u32, 0.0f32);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(4) {
+            while let Ok(packet) = engine.mic_rx_mut().try_recv() {
+                if packet.is_empty() {
+                    continue;
+                }
+                packets += 1;
+                peak = decoder
+                    .decode(Some(&packet))
+                    .unwrap()
+                    .iter()
+                    .fold(peak, |m, s| m.max(s.abs()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = starter.wait();
+        let _ = std::fs::remove_file(&path);
+        println!("{packets} voice packets, peak {peak:.3}");
+        engine.set_stream_audio(false).unwrap();
+        assert!(!engine.stream_audio_on());
+        engine.stop();
+        assert!(packets > 20, "only {packets} voice packets");
+        assert!(
+            peak > 0.05,
+            "the tone did not arrive as voice (peak {peak})"
+        );
     }
 }

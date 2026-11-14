@@ -18,11 +18,14 @@ pub mod cues;
 pub mod denoise;
 pub mod devices;
 pub mod dpdfnet;
+#[cfg(windows)]
+pub mod loopback;
 pub mod meter;
 pub mod mixer;
 pub mod playback;
 pub mod resample;
 pub mod stream_audio;
+pub mod system_audio;
 pub mod tone;
 pub mod vad;
 
