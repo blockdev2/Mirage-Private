@@ -95,6 +95,17 @@ const AWAY_MESSAGE_MAX: usize = 80;
 /// How long the "private message" toast stays.
 const DM_TOAST: Duration = Duration::from_secs(10);
 
+/// The system's own notification sound; other systems stay silent.
+fn beep() {
+    #[cfg(windows)]
+    // SAFETY: MessageBeep takes a sound id and has no other preconditions.
+    unsafe {
+        use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONASTERISK;
+        MessageBeep(MB_ICONASTERISK);
+    }
+}
+
 /// A private message that arrived and has not been dealt with.
 struct DmNotice {
     peer: u16,
@@ -240,6 +251,8 @@ pub struct App {
     chat_to: ChatTo,
     /// A private message just arrived from this person (shown as a toast).
     dm_notice: Option<DmNotice>,
+    /// Private messages not read yet: who (client id), their name, how many.
+    dm_unread: Vec<(u16, String, u32)>,
     /// Trying to get back to a server whose connection was lost.
     reconnect: Option<reconnect::Reconnect>,
     /// Set while the reconnection itself starts a connection.
@@ -369,6 +382,7 @@ impl App {
             chat_notice: None,
             chat_to: ChatTo::Channel,
             dm_notice: None,
+            dm_unread: Vec::new(),
             reconnect: None,
             auto_connecting: false,
             rejoin: None,
@@ -491,6 +505,7 @@ impl App {
                     self.chat_notice = None;
                     self.chat_to = ChatTo::Channel;
                     self.dm_notice = None;
+                    self.dm_unread.clear();
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
                         self.pending = None;
@@ -593,6 +608,10 @@ impl App {
                             at: Instant::now(),
                             alerted: false,
                         });
+                        match self.dm_unread.iter_mut().find(|u| u.0 == peer) {
+                            Some(unread) => unread.2 += 1,
+                            None => self.dm_unread.push((peer, message.sender.clone(), 1)),
+                        }
                     }
                 }
                 if scope != Scope::Channel || channel.is_some() {
@@ -1435,6 +1454,7 @@ impl App {
         }
         if !notice.alerted {
             notice.alerted = true;
+            beep();
             if !ctx.input(|i| i.focused) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                     egui::UserAttentionType::Informational,
@@ -2149,7 +2169,23 @@ impl App {
                     .clicked()
                     .then(|| to = ChatTo::Channel);
             }
+            // Conversations with something new, one click to open.
+            for (peer, name, count) in &self.dm_unread {
+                if ui
+                    .button(RichText::new(format!("{name} ({count})")).small())
+                    .on_hover_text(t.dm_unread_hint)
+                    .clicked()
+                {
+                    to = ChatTo::Person(*peer);
+                }
+            }
             self.chat_to = to;
+            // Reading a conversation clears it; so does the person leaving.
+            let (chat_to, snapshot) = (self.chat_to, self.snapshot.as_ref());
+            self.dm_unread.retain(|(peer, ..)| {
+                chat_to != ChatTo::Person(*peer)
+                    && snapshot.is_none_or(|s| s.clients.iter().any(|c| c.id == *peer))
+            });
         });
     }
 
