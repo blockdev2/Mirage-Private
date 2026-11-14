@@ -1273,7 +1273,14 @@ impl App {
                         .color(theme::WARNING),
                     );
                     if ui.small_button(t.reconnect_cancel).clicked() {
+                        // An attempt already handed to the bridge would still
+                        // finish: leave the server again if it does.
+                        if state.at.is_none() {
+                            self.send(Command::Disconnect);
+                        }
                         self.reconnect = None;
+                        self.rejoin = None;
+                        self.session_password = None;
                     }
                 });
             }
@@ -1427,19 +1434,29 @@ impl App {
         if !self.auto_connecting {
             // The user chose a server: stop trying to return to the old one.
             self.reconnect = None;
+            self.rejoin = None;
         }
         self.pending = Some(PendingConnect {
             address: address.clone(),
             profile_id: self.store.active_profile_id(),
             save_favorite: self.save_favorite,
         });
+        // A reconnection sends the password the session was joined with, never
+        // whatever the form holds by then.
+        let password = if self.auto_connecting {
+            self.session_password.clone()
+        } else {
+            let typed = non_empty(&self.password);
+            self.session_password = typed.clone();
+            typed
+        };
         self.connect_started = Some(Instant::now());
         // Hide the previous attempt's error while this one is running.
         self.status.error = None;
         self.send(Command::Connect {
             address,
             nickname: Some(nickname),
-            server_password: non_empty(&self.password),
+            server_password: password,
         });
     }
 

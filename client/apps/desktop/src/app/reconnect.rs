@@ -6,6 +6,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::protocol::ChannelInfo;
+
 /// Attempts before giving up (about three minutes in all).
 pub const MAX_ATTEMPTS: u32 = 8;
 
@@ -20,6 +22,23 @@ pub fn delay(attempt: u32) -> Duration {
 /// removed on purpose. A server shutdown counts (it may come back).
 pub fn is_recoverable(error: &str) -> bool {
     error.starts_with("connection closed") && !error.contains("kicked") && !error.contains("banned")
+}
+
+/// The channel to rejoin after a reconnection: the one we were in, when it
+/// still exists, needs no password and is not where we already are.
+pub fn rejoin_target(channels: &[ChannelInfo], wanted: u64, current: Option<u64>) -> Option<u64> {
+    let channel = channels.iter().find(|c| c.id == wanted)?;
+    (!channel.has_password && current != Some(wanted)).then_some(wanted)
+}
+
+/// Whether a failed attempt is worth repeating. A ban, a wrong password or a
+/// too-low identity level will not pass by waiting, and trying again only
+/// teaches the server to ban the address.
+pub fn is_worth_retrying(error: &str) -> bool {
+    let error = error.to_lowercase();
+    !["banned", "password", "securitylevel", "security level"]
+        .iter()
+        .any(|word| error.contains(word))
 }
 
 /// A reconnection in progress.
@@ -84,6 +103,39 @@ mod tests {
         assert!(!is_recoverable("connection closed: banned from the server"));
         // A failed first connection is not a lost one.
         assert!(!is_recoverable("handshake failed"));
+    }
+
+    fn channel(id: u64, has_password: bool) -> ChannelInfo {
+        ChannelInfo {
+            id,
+            parent: 0,
+            name: format!("c{id}"),
+            topic: None,
+            codec: String::new(),
+            clients: 0,
+            has_password,
+        }
+    }
+
+    #[test]
+    fn the_old_channel_is_rejoined_only_when_it_is_open_and_elsewhere() {
+        let channels = [channel(1, false), channel(2, false), channel(3, true)];
+        assert_eq!(rejoin_target(&channels, 2, Some(1)), Some(2));
+        // Already there, locked, or gone: stay put.
+        assert_eq!(rejoin_target(&channels, 1, Some(1)), None);
+        assert_eq!(rejoin_target(&channels, 3, Some(1)), None);
+        assert_eq!(rejoin_target(&channels, 9, Some(1)), None);
+    }
+
+    #[test]
+    fn permanent_refusals_are_not_retried() {
+        assert!(is_worth_retrying(
+            "handshake failed: Os { kind: ConnectionReset }"
+        ));
+        assert!(is_worth_retrying("handshake failed: timed out"));
+        assert!(!is_worth_retrying("handshake failed: ConnectFailedBanned"));
+        assert!(!is_worth_retrying("server rejected: ServerPasswordWrong"));
+        assert!(!is_worth_retrying("identity security level too low"));
     }
 
     #[test]

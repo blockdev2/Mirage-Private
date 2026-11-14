@@ -240,6 +240,11 @@ pub struct App {
     reconnect: Option<reconnect::Reconnect>,
     /// Set while the reconnection itself starts a connection.
     auto_connecting: bool,
+    /// The channel we were in when the connection was lost, to go back to.
+    rejoin: Option<u64>,
+    /// The password the current server was joined with, kept in memory so a
+    /// reconnection can send it; never read from the form again.
+    session_password: Option<String>,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
     /// Whether the window is currently fullscreen because of a stream.
@@ -356,6 +361,8 @@ impl App {
             dm_notice: None,
             reconnect: None,
             auto_connecting: false,
+            rejoin: None,
+            session_password: None,
             watching: None,
             window_fullscreen: false,
             sharing: None,
@@ -432,13 +439,25 @@ impl App {
                         {
                             if reconnect::is_recoverable(error) {
                                 self.reconnect = Some(reconnect::Reconnect::new(address, now));
+                                self.rejoin = self
+                                    .snapshot
+                                    .clone()
+                                    .and_then(|snapshot| self.own_channel(&snapshot));
                             }
                         }
                     } else if self.reconnect.as_ref().is_some_and(|r| r.at.is_none()) {
-                        // An attempt of the reconnection failed.
+                        // An attempt of the reconnection failed: try again unless
+                        // the server refused us for good.
                         if let Some(running) = self.reconnect.take() {
-                            self.reconnect = running.failed(now);
+                            let retry = status
+                                .error
+                                .as_deref()
+                                .is_none_or(reconnect::is_worth_retrying);
+                            self.reconnect = retry.then(|| running.failed(now)).flatten();
                         }
+                    }
+                    if self.reconnect.is_none() {
+                        self.session_password = None;
                     }
                     self.snapshot = None;
                     self.audio = None;
@@ -496,6 +515,17 @@ impl App {
                     self.publish_avatar(profile.as_deref());
                     // Voice works as soon as the call starts, with the saved settings.
                     self.apply_audio();
+                }
+                // After a reconnection, go back to the channel we were in when
+                // the connection was lost, unless it needs a password or is gone.
+                if let Some(channel) = self.rejoin.take() {
+                    let here = self.own_channel(&snapshot);
+                    if let Some(id) = reconnect::rejoin_target(&snapshot.channels, channel, here) {
+                        self.send(Command::Join {
+                            channel: id.to_string(),
+                            password: None,
+                        });
+                    }
                 }
                 self.snapshot = Some(snapshot);
                 self.check_watched();

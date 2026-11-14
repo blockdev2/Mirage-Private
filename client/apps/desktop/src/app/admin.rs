@@ -88,6 +88,9 @@ pub(super) enum AdminDialog {
         name: String,
         topic: String,
         password: String,
+        /// What the channel had when the dialog opened.
+        original_name: String,
+        original_topic: String,
     },
     ChannelDelete {
         id: u64,
@@ -366,6 +369,8 @@ impl App {
                     name: channel.name.clone(),
                     topic: channel.topic.clone().unwrap_or_default(),
                     password: String::new(),
+                    original_name: channel.name.clone(),
+                    original_topic: channel.topic.clone().unwrap_or_default(),
                 });
                 ui.close();
             }
@@ -617,6 +622,8 @@ impl App {
                 name,
                 topic,
                 password,
+                original_name,
+                original_topic,
             } => {
                 dialog_window(ctx, "Editar canal", |ui| {
                     ui.label("Nome");
@@ -636,12 +643,15 @@ impl App {
                     if go && name.trim().is_empty() {
                         keep = true; // a channel needs a name
                     } else if go {
-                        let mut args =
-                            json!({ "id": *id, "name": name.trim(), "topic": topic.trim() });
-                        if !password.is_empty() {
-                            args["password"] = json!(password);
+                        // Nothing changed: there is nothing to ask the server.
+                        if let Some(args) = channel_edit_args(
+                            *id,
+                            (original_name, name),
+                            (original_topic, topic),
+                            password,
+                        ) {
+                            send = Some((Purpose::Done("Canal atualizado."), "channel_edit", args));
                         }
-                        send = Some((Purpose::Done("Canal atualizado."), "channel_edit", args));
                     }
                 });
             }
@@ -909,6 +919,32 @@ fn bans_tab(ui: &mut egui::Ui, panel: &Panel, requests: &mut Vec<(Purpose, &'sta
 
 /// A full-width text field that takes the keyboard when nothing else has it,
 /// so a dialog can be typed into the moment it opens.
+/// The `channel_edit` arguments for what the dialog changed; `None` when
+/// nothing did. Unchanged fields are left out: a server may refuse an edit that
+/// repeats the channel's own name.
+fn channel_edit_args(
+    id: u64,
+    name: (&str, &str),
+    topic: (&str, &str),
+    password: &str,
+) -> Option<Value> {
+    let mut args = json!({ "id": id });
+    let mut changed = false;
+    if name.0.trim() != name.1.trim() {
+        args["name"] = json!(name.1.trim());
+        changed = true;
+    }
+    if topic.0.trim() != topic.1.trim() {
+        args["topic"] = json!(topic.1.trim());
+        changed = true;
+    }
+    if !password.is_empty() {
+        args["password"] = json!(password);
+        changed = true;
+    }
+    changed.then_some(args)
+}
+
 fn first_field(ui: &mut egui::Ui, field: egui::TextEdit<'_>) {
     let response = ui.add(field.desired_width(f32::INFINITY));
     if ui.memory(|m| m.focused().is_none()) {
@@ -954,6 +990,17 @@ mod tests {
             .explain(raw)
             .contains("b_virtualserver_servergroup_permission_list"));
         assert!(admin.explain("other").starts_with("O servidor recusou"));
+    }
+
+    #[test]
+    fn a_channel_edit_sends_only_what_changed() {
+        let only_topic = channel_edit_args(4, ("Sala", "Sala"), ("", " novo "), "").unwrap();
+        assert_eq!(only_topic, json!({ "id": 4, "topic": "novo" }));
+        let renamed = channel_edit_args(4, ("Sala", "Outra"), ("a", "a"), "").unwrap();
+        assert_eq!(renamed, json!({ "id": 4, "name": "Outra" }));
+        let locked = channel_edit_args(4, ("Sala", "Sala"), ("", ""), "s3nha").unwrap();
+        assert_eq!(locked, json!({ "id": 4, "password": "s3nha" }));
+        assert_eq!(channel_edit_args(4, ("Sala", "Sala "), ("", ""), ""), None);
     }
 
     #[test]
