@@ -30,6 +30,9 @@ pub struct ChannelInfo {
     pub topic: Option<String>,
     pub codec: String,
     pub clients: usize,
+    /// Joining needs a password. Older bridges do not send it.
+    #[serde(default)]
+    pub has_password: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,6 +178,15 @@ pub enum BridgeEvent {
         #[serde(default)]
         kind: Option<String>,
     },
+    /// Answer to one `admin` command: `error` is set when it failed, `rows`
+    /// holds what a list operation returned.
+    AdminResult {
+        request_id: String,
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        rows: Vec<std::collections::BTreeMap<String, String>>,
+    },
     /// Local paths of cached avatars (by client uid) and of the server icon.
     Media {
         #[serde(default)]
@@ -243,6 +255,15 @@ pub enum Command {
     Disconnect,
     Join {
         channel: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+    },
+    /// A server administration operation; `args` is a JSON object.
+    Admin {
+        request_id: String,
+        action: &'static str,
+        #[serde(flatten)]
+        args: serde_json::Value,
     },
     Nick {
         name: String,
@@ -302,6 +323,37 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_commands_and_results_match_the_bridge_wire() {
+        let command = serde_json::to_value(Command::Admin {
+            request_id: "adm0".into(),
+            action: "kick",
+            args: serde_json::json!({ "client": 3, "reason": "x", "from_server": true }),
+        })
+        .unwrap();
+        assert_eq!(
+            command,
+            serde_json::json!({
+                "op": "admin", "request_id": "adm0", "action": "kick",
+                "client": 3, "reason": "x", "from_server": true
+            })
+        );
+        let join = serde_json::to_value(Command::Join {
+            channel: "4".into(),
+            password: Some("p".into()),
+        })
+        .unwrap();
+        assert_eq!(join["password"], "p");
+        let result: BridgeEvent = serde_json::from_str(
+            r#"{"ev":"admin_result","request_id":"adm1","ok":true,"error":null,"code":null,"rows":[{"sgid":"6","name":"Server Admin"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            BridgeEvent::AdminResult { rows, error: None, .. } if rows[0]["name"] == "Server Admin"
+        ));
+    }
 
     #[test]
     fn stream_state_events_parse() {

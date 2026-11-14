@@ -111,6 +111,7 @@ impl App {
         let mut volume = self.saved_volume(client);
         let mut changed = false;
         let mut open_info = false;
+        let mut moderation: Option<super::admin::AdminDialog> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -206,7 +207,15 @@ impl App {
                     open_info = true;
                     ui.close();
                 }
+                if !client.is_self {
+                    ui.add_space(2.0);
+                    ui.separator();
+                    moderation = moderation_items(ui, client);
+                }
             });
+        if moderation.is_some() {
+            self.admin.dialog = moderation;
+        }
         if changed {
             self.set_saved_volume(client, volume);
         }
@@ -730,6 +739,50 @@ fn bytes(value: u64) -> String {
     } else {
         format!("{value} B")
     }
+}
+
+/// Poke, kick and ban entries of a participant's menu; the chosen one opens its dialog.
+fn moderation_items(ui: &mut egui::Ui, client: &ClientInfo) -> Option<super::admin::AdminDialog> {
+    use super::admin::AdminDialog;
+    let name = client.name.clone();
+    let id = client.id;
+    let mut chosen = None;
+    if menu_item(ui, icon::ARROW_RIGHT, "Cutucar").clicked() {
+        chosen = Some(AdminDialog::Poke {
+            client: id,
+            name: name.clone(),
+            text: String::new(),
+        });
+        ui.close();
+    }
+    if menu_item(ui, icon::X, "Expulsar do canal").clicked() {
+        chosen = Some(AdminDialog::Kick {
+            client: id,
+            name: name.clone(),
+            from_server: false,
+            reason: String::new(),
+        });
+        ui.close();
+    }
+    if menu_item(ui, icon::X, "Expulsar do servidor").clicked() {
+        chosen = Some(AdminDialog::Kick {
+            client: id,
+            name: name.clone(),
+            from_server: true,
+            reason: String::new(),
+        });
+        ui.close();
+    }
+    if menu_item(ui, icon::TRASH, "Banir").clicked() {
+        chosen = Some(AdminDialog::Ban {
+            client: id,
+            name,
+            choice: 1,
+            reason: String::new(),
+        });
+        ui.close();
+    }
+    chosen
 }
 
 #[cfg(test)]

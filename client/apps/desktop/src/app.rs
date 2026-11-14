@@ -20,6 +20,7 @@ use crate::store::{AddressProblem, Store, TransmitMode};
 use crate::strings::{Strings, PT};
 use crate::theme::{self, icon, Tone};
 
+mod admin;
 mod chat;
 #[cfg(debug_assertions)]
 mod dev;
@@ -155,6 +156,8 @@ pub struct App {
     volumes_dirty: bool,
     /// Open connection info window, if any.
     info_view: Option<peer::InfoView>,
+    /// Server administration: dialogs, groups window and answers.
+    admin: admin::Admin,
     /// Our own ping, one sample a second, for the status bar graph.
     ping_history: std::collections::VecDeque<f32>,
     ping_sampled: Option<std::time::Instant>,
@@ -281,6 +284,7 @@ impl App {
             volumes_sent: HashMap::new(),
             volumes_dirty: false,
             info_view: None,
+            admin: Default::default(),
             ping_history: Default::default(),
             ping_sampled: None,
             media_avatars: HashMap::new(),
@@ -404,6 +408,7 @@ impl App {
                     self.ping_sampled = None;
                     self.volumes_sent.clear();
                     self.info_view = None;
+                    self.admin_reset();
                     self.media_avatars.clear();
                     self.server_icon = None;
                     self.media_textures.clear();
@@ -496,6 +501,11 @@ impl App {
                     self.keep_chat();
                 }
             }
+            BridgeEvent::AdminResult {
+                request_id,
+                error,
+                rows,
+            } => self.on_admin_result(&request_id, error, rows),
             BridgeEvent::ChatResult {
                 request_id,
                 error,
@@ -822,6 +832,7 @@ impl eframe::App for App {
             }
         }
         self.connection_window(&ctx);
+        self.admin_ui(&ctx);
     }
 }
 
@@ -1101,6 +1112,17 @@ impl App {
             );
         }
 
+        if channel.has_password {
+            painter.text(
+                rect.right_center() - vec2(if members.is_empty() { 12.0 } else { 36.0 }, 0.0),
+                Align2::RIGHT_CENTER,
+                icon::LOCK_SIMPLE,
+                FontId::new(13.0, theme::icons()),
+                theme::TEXT_3,
+            );
+        }
+        self.channel_menu(&response, channel);
+
         if response.clicked() {
             let on_caret = response
                 .interact_pointer_pos()
@@ -1109,9 +1131,18 @@ impl App {
                 self.open_channels.insert(channel.id, !open);
             } else if !selected {
                 self.open_channels.insert(channel.id, true);
-                self.send(Command::Join {
-                    channel: channel.id.to_string(),
-                });
+                if channel.has_password {
+                    self.admin.dialog = Some(admin::AdminDialog::JoinPassword {
+                        channel: channel.id,
+                        name: channel.name.clone(),
+                        password: String::new(),
+                    });
+                } else {
+                    self.send(Command::Join {
+                        channel: channel.id.to_string(),
+                        password: None,
+                    });
+                }
             }
             if !(on_caret && expandable) {
                 self.section = Section::Voice;

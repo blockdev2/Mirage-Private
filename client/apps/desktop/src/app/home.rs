@@ -474,6 +474,9 @@ impl App {
         if self.nav_item(ui, icon::PLUS, t.add_server, false) {
             self.open_favorite_dialog(None);
         }
+        if self.in_session() && self.nav_item(ui, icon::GEAR, "Administração", false) {
+            self.open_admin_window();
+        }
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             self.user_card(ui);
@@ -1905,7 +1908,11 @@ impl App {
 }
 
 /// A centered, fixed-width window used by every dialog.
-fn dialog_window(ctx: &egui::Context, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn dialog_window(
+    ctx: &egui::Context,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     let frame = egui::Frame::NONE
         .fill(theme::SURFACE)
         .stroke(Stroke::new(1.0, theme::BORDER))

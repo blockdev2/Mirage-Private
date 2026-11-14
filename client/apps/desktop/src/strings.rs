@@ -362,6 +362,8 @@ impl Strings {
             self.error_clone.to_string()
         } else if raw.to_lowercase().contains("password") {
             self.error_password.to_string()
+        } else if let Some(why) = raw.strip_prefix("connection closed: ") {
+            removal_text(why).unwrap_or_else(|| raw.to_string())
         } else {
             raw.to_string()
         }
@@ -693,6 +695,26 @@ pub const PT: Strings = Strings {
     upd_restart_note: "O Mirage fecha e abre de novo sozinho. Se você estiver em uma chamada, ela será encerrada.",
 };
 
+/// Why the server ended our session (the bridge's English wording) in Portuguese.
+fn removal_text(why: &str) -> Option<String> {
+    let who = |prefix: &str| why.strip_prefix(prefix).map(|name| name.trim().to_string());
+    if let Some(name) = who("kicked from the server by ") {
+        Some(format!("Você foi expulso do servidor por {name}."))
+    } else if why == "kicked from the server" {
+        Some("Você foi expulso do servidor.".to_string())
+    } else if let Some(name) = who("banned from the server by ") {
+        Some(format!("Você foi banido do servidor por {name}."))
+    } else if why == "banned from the server" {
+        Some("Você foi banido do servidor.".to_string())
+    } else if why == "the server shut down" {
+        Some("O servidor foi encerrado.".to_string())
+    } else if why == "the connection timed out" {
+        Some("A conexão com o servidor caiu.".to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PT;
@@ -704,6 +726,24 @@ mod tests {
         assert_eq!(PT.last_access(3 * 3_600), "Último acesso: há 3 h");
         assert_eq!(PT.last_access(30 * 3_600), "Último acesso: ontem");
         assert_eq!(PT.last_access(4 * 86_400), "Último acesso: há 4 dias");
+    }
+
+    #[test]
+    fn a_removal_by_the_server_is_explained() {
+        assert_eq!(
+            PT.connect_error("connection closed: kicked from the server by Ana"),
+            "Você foi expulso do servidor por Ana."
+        );
+        assert_eq!(
+            PT.connect_error("connection closed: banned from the server"),
+            "Você foi banido do servidor."
+        );
+        assert_eq!(
+            PT.connect_error("connection closed: the server shut down"),
+            "O servidor foi encerrado."
+        );
+        // Anything else stays as reported.
+        assert_eq!(PT.connect_error("connection closed"), "connection closed");
     }
 
     #[test]

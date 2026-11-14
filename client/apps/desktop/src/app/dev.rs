@@ -4,7 +4,7 @@
 //! builds.
 //!
 //! Steps: `wait:SECS`, `connect:HOST:PORT`, `chat:TEXT`, `attach:PATH`, `watch` (first other client),
-//! `hover:X,Y`, `click:X,Y`, `key:Escape`, `shot:NAME`, `quit`.
+//! `hover:X,Y`, `click:X,Y`, `rclick:X,Y`, `type:TEXT`, `key:Escape`, `shot:NAME`, `quit`.
 //! `MIRAGE_DEV_OUT` is the folder the screenshots go to. Run it with an
 //! isolated `APPDATA` so the real profile is untouched.
 
@@ -86,6 +86,12 @@ impl App {
                 self.submit_chat();
             }
             "attach" => self.attach_file(PathBuf::from(arg)),
+            "token" => self.admin_send(
+                super::admin::Purpose::Done("Chave usada."),
+                "use_token",
+                serde_json::json!({ "token": arg }),
+            ),
+            "admin" => self.open_admin_window(),
             "watch" => {
                 let other = self
                     .snapshot
@@ -109,6 +115,20 @@ impl App {
                         self.dev_events.push(egui::Event::PointerButton {
                             pos,
                             button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        });
+                    }
+                }
+            }
+            "type" => self.dev_events.push(egui::Event::Text(arg)),
+            "rclick" => {
+                if let Some(pos) = point(&arg) {
+                    self.dev_events.push(egui::Event::PointerMoved(pos));
+                    for pressed in [true, false] {
+                        self.dev_events.push(egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Secondary,
                             pressed,
                             modifiers: egui::Modifiers::NONE,
                         });

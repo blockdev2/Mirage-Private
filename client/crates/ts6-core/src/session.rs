@@ -211,14 +211,7 @@ impl Session {
             self.pending.pop_front();
         }
         match item {
-            StreamItem::BookEvents(events) => enqueue_book_items(
-                &mut self.pending,
-                book_items(
-                    events,
-                    self.con.get_state().ok().map(|state| state.own_client.0),
-                    current_channel(&self.con),
-                ),
-            ),
+            StreamItem::BookEvents(events) => self.book(events),
             StreamItem::UnknownCommand { name, content } => self
                 .pending
                 .push_back(Item::UnknownCommand { name, content }),
@@ -273,14 +266,7 @@ impl Session {
             let raw = self.con.events().next().await?;
             match raw {
                 Ok(StreamItem::BookEvents(events)) => {
-                    enqueue_book_items(
-                        &mut self.pending,
-                        book_items(
-                            events,
-                            self.con.get_state().ok().map(|state| state.own_client.0),
-                            current_channel(&self.con),
-                        ),
-                    );
+                    self.book(events);
                     return self.pending.pop_front();
                 }
                 Ok(StreamItem::UnknownCommand { name, content }) => {
@@ -329,6 +315,19 @@ impl Session {
         }
     }
 
+    /// Queues what the book events mean for the caller, and remembers why we
+    /// were removed when one of them says so.
+    fn book(&mut self, events: Vec<tsclientlib::events::Event>) {
+        let own = self.con.get_state().ok().map(|state| state.own_client.0);
+        if let Some(reason) = removal_reason(&events, own) {
+            self.end_reason = Some(reason);
+        }
+        enqueue_book_items(
+            &mut self.pending,
+            book_items(events, own, current_channel(&self.con)),
+        );
+    }
+
     fn own_id(&self) -> Option<u16> {
         self.con.get_state().ok().map(|s| s.own_client.0)
     }
@@ -340,14 +339,7 @@ impl Session {
     fn map_raw(&mut self, raw: StreamItem) -> Option<Item> {
         match raw {
             StreamItem::BookEvents(events) => {
-                enqueue_book_items(
-                    &mut self.pending,
-                    book_items(
-                        events,
-                        self.con.get_state().ok().map(|state| state.own_client.0),
-                        current_channel(&self.con),
-                    ),
-                );
+                self.book(events);
                 self.pending.pop_front()
             }
             StreamItem::UnknownCommand { name, content } => {
@@ -564,14 +556,7 @@ impl Session {
                         None => anyhow!("server rejected `{name}`: {err}"),
                     });
                 }
-                StreamItem::BookEvents(events) => enqueue_book_items(
-                    &mut self.pending,
-                    book_items(
-                        events,
-                        self.con.get_state().ok().map(|state| state.own_client.0),
-                        current_channel(&self.con),
-                    ),
-                ),
+                StreamItem::BookEvents(events) => self.book(events),
                 StreamItem::UnknownCommand { name, content } => self
                     .pending
                     .push_back(Item::UnknownCommand { name, content }),
@@ -851,6 +836,46 @@ fn bool_flag(value: bool) -> String {
 }
 
 /// Keep replay bounded even when one library event contains a batch of messages.
+/// The plain-English reason for a removal of our own client.
+fn describe_removal(reason: Option<tsclientlib::Reason>, by: Option<&str>) -> Option<String> {
+    use tsclientlib::Reason;
+    let by = by.map(|name| format!(" by {name}")).unwrap_or_default();
+    match reason? {
+        Reason::KickChannel => Some(format!("kicked from the channel{by}")),
+        Reason::KickServer => Some(format!("kicked from the server{by}")),
+        Reason::KickServerBan => Some(format!("banned from the server{by}")),
+        Reason::Serverstop | Reason::ClientdisconnectServerShutdown => {
+            Some("the server shut down".to_string())
+        }
+        Reason::LostConnection => Some("the connection timed out".to_string()),
+        _ => None,
+    }
+}
+
+/// Why we were taken off the server, when a book event says so (kick, ban or
+/// shutdown); `None` for ordinary changes.
+fn removal_reason(events: &[tsclientlib::events::Event], own_id: Option<u16>) -> Option<String> {
+    use tsclientlib::events::{Event, PropertyId};
+    events.iter().find_map(|event| {
+        let Event::PropertyRemoved {
+            id: PropertyId::Client(client),
+            invoker,
+            extra,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if Some(client.0) != own_id {
+            return None;
+        }
+        describe_removal(
+            extra.reason,
+            invoker.as_ref().map(|invoker| invoker.name.as_str()),
+        )
+    })
+}
+
 fn enqueue_book_items(pending: &mut VecDeque<Item>, items: Vec<Item>) {
     for item in items {
         enqueue_pending(pending, item);
@@ -945,6 +970,21 @@ fn raw_text_items(message: &InMessage, own_id: Option<u16>, channel_id: Option<u
 #[cfg(test)]
 mod chat_tests {
     use super::*;
+
+    #[test]
+    fn a_removal_is_described_with_who_did_it() {
+        use tsclientlib::Reason;
+        assert_eq!(
+            describe_removal(Some(Reason::KickServerBan), Some("Ana")).as_deref(),
+            Some("banned from the server by Ana")
+        );
+        assert_eq!(
+            describe_removal(Some(Reason::KickChannel), None).as_deref(),
+            Some("kicked from the channel")
+        );
+        assert_eq!(describe_removal(Some(Reason::Moved), Some("Ana")), None);
+        assert_eq!(describe_removal(None, None), None);
+    }
 
     #[test]
     fn clientmove_sends_the_channel_password_only_when_given() {

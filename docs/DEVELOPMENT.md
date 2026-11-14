@@ -212,13 +212,25 @@ monitor, and does not involve the official client.
 
 Debug builds of `ts6-desktop` run a scripted plan from `MIRAGE_DEV_PLAN` (steps
 separated by `;`): `wait:SECS`, `connect:HOST:PORT`, `chat:TEXT`,
-`attach:PATH`, `watch` (first other client in the room), `hover:X,Y`, `click:X,Y`, `key:Escape`, `shot:NAME`, `quit`.
+`attach:PATH`, `watch` (first other client in the room), `token:KEY` (redeem a privilege key), `admin` (open the administration window), `rclick:X,Y`, `type:TEXT`, `hover:X,Y`, `click:X,Y`, `key:Escape`, `shot:NAME`, `quit`.
 Coordinates are egui points (screenshot pixels divided by the display scale,
 e.g. 1.25 at 125%). To see a share, run a second bridge that shares (a small
 script on `check_channel_chat.Peer` with `share_start`) and use `watch`.
 `MIRAGE_DEV_OUT` is the folder for the screenshots. Use an isolated `APPDATA`
 so the real profile is untouched, and only a loopback test server.
 The code is compiled out of release builds.
+
+## Server administration check
+
+`python scripts/check_admin.py --binary <ts6-bridge.exe> --server-port PORT --token-file key.txt`
+needs a throwaway TS6 server with a fresh database (start it from a copy of
+the server archive in an ignored folder; its first `ServerAdmin` privilege key
+is in its log) and drives two bridges: a plain client is refused, the key is
+redeemed, groups and permissions are listed, a channel is created, edited and
+deleted, a client is moved, poked and banned, and the ban is removed. Run it
+once per fresh server: connecting the same identities again within about 30
+seconds fails the handshake, and many quick attempts get the address banned
+(`ConnectFailedBanned`).
 
 ## Installer and updates while developing
 
