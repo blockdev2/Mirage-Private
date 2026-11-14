@@ -232,6 +232,15 @@ once per fresh server: connecting the same identities again within about 30
 seconds fails the handshake, and many quick attempts get the address banned
 (`ConnectFailedBanned`).
 
+## Private chat check
+
+`python scripts/check_direct_chat.py --binary <ts6-bridge.exe> --server-port PORT [--token-file key.txt]`
+drives two bridges against a throwaway server: a private message each way, a
+server-wide message (guests are often refused; pass the server's first
+privilege key to send it as an administrator), a missing recipient refused and
+a channel message unchanged. The same server rules as for the administration
+check apply (fresh server, retries for the same-identity cooldown).
+
 ## Installer and updates while developing
 
 - A build run from `cargo run` is not an installed copy, so the updater reports

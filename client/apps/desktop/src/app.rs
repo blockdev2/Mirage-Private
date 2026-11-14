@@ -13,8 +13,8 @@ use egui::{
 use crate::bridge::{Bridge, Incoming, SocketState};
 use crate::clock;
 use crate::protocol::{
-    AudioEvent, BridgeEvent, ChannelInfo, ClientInfo, Command, DeviceLists, LogLine, Snapshot,
-    StatusEvent,
+    AudioEvent, BridgeEvent, ChannelInfo, ChatScope, ClientInfo, Command, DeviceLists, LogLine,
+    Snapshot, StatusEvent,
 };
 use crate::store::{AddressProblem, Store, TransmitMode};
 use crate::strings::{Strings, PT};
@@ -30,7 +30,10 @@ mod settings;
 mod share;
 mod stream;
 mod updates;
-use chat::{ChatLog, Delivery, Entry, Failure, Incoming as ChatIncoming, Scope, MAX_MESSAGE_BYTES};
+use chat::{
+    ChatLog, Delivery, Destination, Entry, Failure, Incoming as ChatIncoming, Scope,
+    Target as ChatTo, MAX_MESSAGE_BYTES,
+};
 use home::{Dialog, PendingConnect, Section};
 
 const MAX_LOG_LINES: usize = 300;
@@ -216,6 +219,8 @@ pub struct App {
     logo: Option<LogoTexture>,
     /// Why the last attempt to send was refused before it left, if it was.
     chat_notice: Option<&'static str>,
+    /// Who the composer writes to.
+    chat_to: ChatTo,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
     /// Whether the window is currently fullscreen because of a stream.
@@ -328,6 +333,7 @@ impl App {
             upload_queue: Default::default(),
             logo: None,
             chat_notice: None,
+            chat_to: ChatTo::Channel,
             watching: None,
             window_fullscreen: false,
             sharing: None,
@@ -415,6 +421,7 @@ impl App {
                     self.chat.clear();
                     self.session_address = None;
                     self.chat_notice = None;
+                    self.chat_to = ChatTo::Channel;
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
                         self.pending = None;
@@ -485,13 +492,20 @@ impl App {
                 }
             }
             BridgeEvent::Chat(message) => {
-                // The bridge forwards channel messages only, tagged with the
-                // channel they were received in.
-                if let Ok(channel) = message.channel.parse::<u64>() {
+                // Channel messages carry their channel; server-wide and
+                // private ones carry none. Bridges that predate `scope` only
+                // sent channel messages.
+                let (scope, channel) = match message.scope.as_deref() {
+                    Some("server") => (Scope::Server, None),
+                    Some("private") => (Scope::Private, None),
+                    _ => (Scope::Channel, message.channel.parse::<u64>().ok()),
+                };
+                if scope != Scope::Channel || channel.is_some() {
                     let incoming = ChatIncoming {
-                        scope: Scope::Channel,
-                        channel: Some(channel),
-                        from_id: None,
+                        scope,
+                        channel,
+                        from_id: message.from_id,
+                        peer: message.peer_id,
                         author: message.sender,
                         text: message.text,
                         mine: message.from_self,
@@ -1807,12 +1821,72 @@ impl App {
         }
     }
 
+    /// "Para: Canal | Todo o servidor | <pessoa>": who the composer writes to.
+    /// A person is chosen from their menu, not from here.
+    fn chat_target_row(&mut self, ui: &mut egui::Ui, person: Option<&str>) {
+        let t = self.t;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(t.chat_to).small().color(theme::TEXT_3));
+            let mut to = self.chat_to;
+            if ui
+                .selectable_label(
+                    to == ChatTo::Channel,
+                    RichText::new(t.chat_to_channel).small(),
+                )
+                .clicked()
+            {
+                to = ChatTo::Channel;
+            }
+            if ui
+                .selectable_label(
+                    to == ChatTo::Server,
+                    RichText::new(t.chat_to_server).small(),
+                )
+                .clicked()
+            {
+                to = ChatTo::Server;
+            }
+            if let (ChatTo::Person(_), Some(name)) = (to, person) {
+                let label = format!("{name} ✕");
+                ui.selectable_label(true, RichText::new(label).small())
+                    .on_hover_text(t.chat_stop_private)
+                    .clicked()
+                    .then(|| to = ChatTo::Channel);
+            }
+            self.chat_to = to;
+        });
+    }
+
     fn chat_composer(&mut self, ui: &mut egui::Ui, channel_name: &str) {
         let t = self.t;
-        let placeholder = t.chat_placeholder_in(channel_name);
+        // A private recipient who has left is dropped.
+        if let ChatTo::Person(id) = self.chat_to {
+            let present = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.clients.iter().any(|c| c.id == id && !c.is_self));
+            if !present {
+                self.chat_to = ChatTo::Channel;
+            }
+        }
+        let person_name = match self.chat_to {
+            ChatTo::Person(id) => self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.clients.iter().find(|c| c.id == id))
+                .map(|c| c.name.clone()),
+            _ => None,
+        };
+        let placeholder = match (&self.chat_to, &person_name) {
+            (ChatTo::Server, _) => t.chat_placeholder_server.to_string(),
+            (ChatTo::Person(_), Some(name)) => t.chat_placeholder_to(name),
+            _ => t.chat_placeholder_in(channel_name),
+        };
         let mut submit = false;
         theme::input_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
+            self.chat_target_row(ui, person_name.as_deref());
             if let Some((author, _)) = self.chat_reply.clone() {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -1844,7 +1918,10 @@ impl App {
                 vec2(ui.available_width(), 32.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    let can_attach = self.channel_chat && self.staged.len() < MAX_STAGED;
+                    // Files go to the channel only.
+                    let can_attach = self.channel_chat
+                        && self.chat_to == ChatTo::Channel
+                        && self.staged.len() < MAX_STAGED;
                     let attach = ui
                         .add_enabled_ui(can_attach, |ui| {
                             ui.add_sized(
@@ -2136,11 +2213,40 @@ impl App {
         let me = snapshot.clients.iter().find(|c| c.is_self);
         let author = me.map_or_else(|| self.nickname.clone(), |c| c.name.clone());
         let from_id = Some(snapshot.own_client_id);
+        let (scope, to) = match self.chat_to {
+            ChatTo::Channel => (ChatScope::Channel, None),
+            ChatTo::Server => (ChatScope::Server, None),
+            ChatTo::Person(id) if snapshot.clients.iter().any(|c| c.id == id && !c.is_self) => {
+                (ChatScope::Private, Some(id))
+            }
+            // The person left: keep the draft and go back to the channel.
+            ChatTo::Person(_) => {
+                self.chat_to = ChatTo::Channel;
+                return;
+            }
+        };
+        let destination = match scope {
+            ChatScope::Channel => Destination {
+                scope: Scope::Channel,
+                channel: Some(channel),
+                peer: None,
+            },
+            ChatScope::Server => Destination {
+                scope: Scope::Server,
+                channel: None,
+                peer: None,
+            },
+            ChatScope::Private => Destination {
+                scope: Scope::Private,
+                channel: None,
+                peer: to,
+            },
+        };
         self.next_chat_request += 1;
         let request_id = format!("native-{}", self.next_chat_request);
-        self.chat.sent(
+        self.chat.sent_to(
             request_id.clone(),
-            Some(channel),
+            destination,
             from_id,
             author,
             text.clone(),
@@ -2152,6 +2258,8 @@ impl App {
             channel: channel.to_string(),
             text,
             request_id,
+            scope,
+            client: to,
         });
         self.chat_draft.clear();
         self.chat_reply = None;
@@ -2396,8 +2504,19 @@ impl App {
                         );
                         let tag = match entry.scope {
                             Scope::Channel => None,
-                            Scope::Server => Some(t.chat_scope_server),
-                            Scope::Private => Some(t.chat_scope_private),
+                            Scope::Server => Some(t.chat_scope_server.to_string()),
+                            // What we wrote names the other person.
+                            Scope::Private if entry.mine => Some(
+                                snapshot
+                                    .and_then(|s| {
+                                        s.clients.iter().find(|c| Some(c.id) == entry.peer)
+                                    })
+                                    .map_or_else(
+                                        || t.chat_scope_private.to_string(),
+                                        |c| format!("{} {}", t.chat_scope_private_to, c.name),
+                                    ),
+                            ),
+                            Scope::Private => Some(t.chat_scope_private.to_string()),
                         };
                         if let Some(tag) = tag {
                             ui.label(RichText::new(tag).small().color(theme::TEXT_3));

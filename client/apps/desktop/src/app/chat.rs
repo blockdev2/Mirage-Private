@@ -76,6 +76,8 @@ pub struct Entry {
     /// Channel the message belongs to; `None` for server-wide and private ones.
     pub channel: Option<u64>,
     pub from_id: Option<u16>,
+    /// For private messages, the other person (who wrote, or who we wrote to).
+    pub peer: Option<u16>,
     pub author: String,
     pub text: String,
     pub mine: bool,
@@ -103,11 +105,35 @@ impl Entry {
     }
 }
 
+/// Where a message we send goes.
+#[derive(Debug, Clone, Copy)]
+pub struct Destination {
+    pub scope: Scope,
+    /// The channel, for channel messages.
+    pub channel: Option<u64>,
+    /// The recipient, for private messages.
+    pub peer: Option<u16>,
+}
+
+/// Who the composer writes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Target {
+    /// The channel we are in.
+    #[default]
+    Channel,
+    /// Everyone on the server.
+    Server,
+    /// One person, by client id.
+    Person(u16),
+}
+
 /// Everything about a message that arrived from the server.
+#[derive(Clone)]
 pub struct Incoming {
     pub scope: Scope,
     pub channel: Option<u64>,
     pub from_id: Option<u16>,
+    pub peer: Option<u16>,
     pub author: String,
     pub text: String,
     pub mine: bool,
@@ -131,6 +157,7 @@ impl ChatLog {
                 scope: Scope::Channel,
                 channel: Some(channel),
                 from_id: None,
+                peer: None,
                 author: message.author.clone(),
                 text: message.text.clone(),
                 mine: message.mine,
@@ -172,6 +199,7 @@ impl ChatLog {
                 entry.mine
                     && !entry.echoed
                     && entry.scope == message.scope
+                    && entry.peer == message.peer
                     && entry.text == message.text
                     && entry
                         .sent
@@ -192,6 +220,7 @@ impl ChatLog {
             scope: message.scope,
             channel: message.channel,
             from_id: message.from_id,
+            peer: message.peer,
             author: message.author,
             text: message.text,
             mine: message.mine,
@@ -205,6 +234,7 @@ impl ChatLog {
     }
 
     /// A channel message we have just handed to the bridge.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn sent(
         &mut self,
@@ -216,9 +246,37 @@ impl ChatLog {
         now: Instant,
         time: Clock,
     ) {
+        self.sent_to(
+            request,
+            Destination {
+                scope: Scope::Channel,
+                channel,
+                peer: None,
+            },
+            from_id,
+            author,
+            text,
+            now,
+            time,
+        );
+    }
+
+    /// A message we have just handed to the bridge, for any scope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sent_to(
+        &mut self,
+        request: String,
+        to: Destination,
+        from_id: Option<u16>,
+        author: String,
+        text: String,
+        now: Instant,
+        time: Clock,
+    ) {
         self.push(Entry {
-            scope: Scope::Channel,
-            channel,
+            scope: to.scope,
+            channel: to.channel,
+            peer: to.peer,
             from_id,
             author,
             text,
@@ -309,6 +367,7 @@ mod tests {
             scope: Scope::Channel,
             channel: Some(1),
             from_id: Some(id),
+            peer: None,
             author: author.into(),
             text: text.into(),
             mine,
@@ -462,6 +521,39 @@ mod tests {
         let in_two = log.visible(Some(2), 10);
         assert_eq!(in_two.len(), 1);
         assert_eq!(in_two[0].text, "para todos");
+    }
+
+    #[test]
+    fn a_private_message_follows_you_and_its_echo_only_matches_the_same_person() {
+        let mut log = ChatLog::default();
+        let now = Instant::now();
+        let to = |peer| Destination {
+            scope: Scope::Private,
+            channel: None,
+            peer: Some(peer),
+        };
+        log.sent_to(
+            "r1".into(),
+            to(5),
+            Some(7),
+            "eu".into(),
+            "oi".into(),
+            now,
+            TIME,
+        );
+        // Another person's identical private message is a new entry, not the echo.
+        let mut other = incoming("eu", 7, "oi", true);
+        other.scope = Scope::Private;
+        other.channel = None;
+        other.peer = Some(6);
+        log.receive(other.clone(), now, TIME);
+        assert_eq!(log.visible(Some(1), 10).len(), 2);
+        // The echo for the right person confirms the pending one.
+        other.peer = Some(5);
+        log.receive(other, now, TIME);
+        let shown = log.visible(Some(2), 10);
+        assert_eq!(shown.len(), 2);
+        assert!(shown.iter().all(|m| m.scope == Scope::Private));
     }
 
     #[test]

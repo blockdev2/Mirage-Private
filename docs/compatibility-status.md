@@ -39,6 +39,7 @@ UI TypeScript/production build and npm audit passed (zero reported UI vulnerabil
 | Installer/release packaging | Velopack installer and in-app updates (releases up to 0.0.4); screen sharing is not in a release yet; hosted CI has not run (billing) |
 | Disconnect reason | The status after a lost session says why (kick, ban, shutdown, timeout) from the book event; checked live with a kick |
 | Channel passwords | `join` accepts `password` (`cpw`) and snapshots flag `has_password`; the native client shows a lock and asks; a protected channel was created and joined live |
+| Private and server-wide messages | `chat` `scope` `private`/`server`; events carry `scope` and `peer_id`; native menu and "Para" row. Checked with `scripts/check_direct_chat.py` on a throwaway server and in the real window. A guest may be refused server-wide messages by the server. No conversation list, unread badge, notification or saved history; browser frontend ignores them |
 | Server administration | Typed `admin` command: channels, kick/ban/poke/move, ban list, groups, permissions, privilege key. Live check `scripts/check_admin.py` against a throwaway server and the native window (menus, groups and permissions window). Not covered: group creation/deletion, client and channel permission screens, less privileged administrators |
 | Production security readiness | Experimental; current dependency/history remediation and remaining reporting/maintenance work are documented in PUBLICATION.md |
 
@@ -48,7 +49,7 @@ The goal is a client that talks to official TS6 servers for everyday use, not a 
 
 Present and exercised at least once: login and identity, channel/client snapshot, join, nickname, mutes, per-client volume, connection info, Opus voice with capture/playback, push-to-talk and voice activation, noise suppression, channel chat with attachments and emoji, avatars, screen sharing and watching with stream sound.
 
-Added afterwards (see the matrix): kick, ban, poke, move others, channel create/edit/delete, groups and permissions. Not in the backend (each is a gap, not a bug): direct and server-wide messages (the core can send them, the bridge command is channel-only); group creation/deletion and per-client permission screens; away status, client descriptions; whisper and priority speaker; file browser and uploads beyond chat; offline messages; Matrix group chat and S3 files; acoustic echo cancellation; automatic reconnect UI beyond the library's own (the state is only logged); non-Windows platforms. Hosted CI has never run, and a 10-minute call or watch has not been done.
+Added afterwards (see the matrix): kick, ban, poke, move others, channel create/edit/delete, groups and permissions. Private and server-wide messages are now in the bridge and the native window. Not in the backend (each is a gap, not a bug): group creation/deletion and per-client permission screens; away status, client descriptions; whisper and priority speaker; file browser and uploads beyond chat; offline messages; Matrix group chat and S3 files; acoustic echo cancellation; automatic reconnect UI beyond the library's own (the state is only logged); non-Windows platforms. Hosted CI has never run, and a 10-minute call or watch has not been done.
 
 ## Research and chat uncertainty
 

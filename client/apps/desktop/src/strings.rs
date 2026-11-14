@@ -181,6 +181,14 @@ pub struct Strings {
     pub chat_too_long: &'static str,
     pub chat_scope_server: &'static str,
     pub chat_scope_private: &'static str,
+    pub chat_scope_private_to: &'static str,
+    pub chat_to: &'static str,
+    pub chat_to_channel: &'static str,
+    pub chat_to_server: &'static str,
+    pub chat_placeholder_server: &'static str,
+    pub chat_placeholder_person_prefix: &'static str,
+    pub user_message: &'static str,
+    pub chat_stop_private: &'static str,
     pub voice_connected: &'static str,
     pub push_to_talk: &'static str,
     pub mic_mute: &'static str,
@@ -322,6 +330,11 @@ impl Strings {
             Some(topic) => format!("{} • {topic}", self.channel_kind),
             None => self.channel_kind.to_string(),
         }
+    }
+
+    /// Placeholder of the composer when writing privately to `name`.
+    pub fn chat_placeholder_to(&self, name: &str) -> String {
+        format!("{} {name}", self.chat_placeholder_person_prefix)
     }
 
     /// Placeholder of the chat composer, naming the channel.
@@ -571,6 +584,14 @@ pub const PT: Strings = Strings {
     chat_too_long: "Mensagem longa demais. O limite é de 1024 bytes.",
     chat_scope_server: "servidor",
     chat_scope_private: "privado",
+    chat_scope_private_to: "privado para",
+    chat_to: "Para",
+    chat_to_channel: "Canal",
+    chat_to_server: "Todo o servidor",
+    chat_placeholder_server: "Conversar com todo o servidor",
+    chat_placeholder_person_prefix: "Mensagem privada para",
+    user_message: "Mensagem privada",
+    chat_stop_private: "Voltar para o canal",
     voice_connected: "Voz conectada",
     push_to_talk: "Push-to-talk",
     mic_mute: "Silenciar microfone",

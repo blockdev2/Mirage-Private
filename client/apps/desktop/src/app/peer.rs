@@ -112,6 +112,7 @@ impl App {
         let mut changed = false;
         let mut open_info = false;
         let mut moderation: Option<super::admin::AdminDialog> = None;
+        let mut write_to: Option<u16> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -208,6 +209,10 @@ impl App {
                     ui.close();
                 }
                 if !client.is_self {
+                    if menu_item(ui, icon::REPLY, t.user_message).clicked() {
+                        write_to = Some(client.id);
+                        ui.close();
+                    }
                     ui.add_space(2.0);
                     ui.separator();
                     moderation = moderation_items(ui, client);
@@ -215,6 +220,9 @@ impl App {
             });
         if moderation.is_some() {
             self.admin.dialog = moderation;
+        }
+        if let Some(id) = write_to {
+            self.chat_to = super::chat::Target::Person(id);
         }
         if changed {
             self.set_saved_volume(client, volume);

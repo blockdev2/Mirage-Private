@@ -57,6 +57,16 @@ impl Attachment {
     }
 }
 
+/// Who a chat message is for.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatScope {
+    #[default]
+    Channel,
+    Server,
+    Private,
+}
+
 /// Commands from the UI.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -73,9 +83,17 @@ pub enum Command {
     Chat {
         #[serde(default)]
         session_id: String,
+        /// The current channel's id; only checked for the `channel` scope.
+        #[serde(default)]
         channel: String,
         text: String,
         request_id: String,
+        /// Who hears it: the channel (default), everyone on the server, or
+        /// the one client in `client`.
+        #[serde(default)]
+        scope: ChatScope,
+        #[serde(default)]
+        client: Option<u16>,
     },
     /// Send a local file (photo, GIF or any file) to the current channel.
     /// The native frontend picks the file; the bridge reads it, uploads it to
@@ -294,7 +312,14 @@ pub struct DeviceLists {
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event<'a> {
     Chat {
+        /// The channel for `scope` `channel`; empty for the other scopes.
         channel: String,
+        /// `channel`, `server` or `private`.
+        scope: &'static str,
+        /// The sender's client id, when known.
+        from_id: Option<u16>,
+        /// For `private`, the other person (the sender, or who we wrote to).
+        peer_id: Option<u16>,
         sender: String,
         text: String,
         from_self: bool,
@@ -453,6 +478,43 @@ mod tests {
         )
         .expect("channel chat command");
         assert!(!format!("{command:?}").contains("private fixture text"));
+    }
+
+    #[test]
+    fn chat_scope_defaults_to_the_channel_and_accepts_a_private_recipient() {
+        let plain: Command =
+            serde_json::from_str(r#"{"op":"chat","channel":"1","text":"a","request_id":"r"}"#)
+                .unwrap();
+        assert!(matches!(
+            plain,
+            Command::Chat {
+                scope: ChatScope::Channel,
+                client: None,
+                ..
+            }
+        ));
+        let private: Command = serde_json::from_str(
+            r#"{"op":"chat","scope":"private","client":7,"text":"a","request_id":"r"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            private,
+            Command::Chat {
+                scope: ChatScope::Private,
+                client: Some(7),
+                ..
+            }
+        ));
+        let server: Command =
+            serde_json::from_str(r#"{"op":"chat","scope":"server","text":"a","request_id":"r"}"#)
+                .unwrap();
+        assert!(matches!(
+            server,
+            Command::Chat {
+                scope: ChatScope::Server,
+                ..
+            }
+        ));
     }
 
     #[test]

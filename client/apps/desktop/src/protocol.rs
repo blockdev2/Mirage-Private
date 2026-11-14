@@ -229,9 +229,15 @@ pub struct StreamState {
 pub enum Command {
     Chat {
         session_id: String,
+        /// The current channel; ignored by the bridge for other scopes.
         channel: String,
         text: String,
         request_id: String,
+        /// Omitted for the channel, so older bridges still understand it.
+        #[serde(skip_serializing_if = "ChatScope::is_channel")]
+        scope: ChatScope,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client: Option<u16>,
     },
     /// Send a local file to the current channel (photo, GIF or any file).
     ChatAttach {
@@ -536,11 +542,26 @@ mod tests {
             channel: "3".into(),
             text: "oi".into(),
             request_id: "r1".into(),
+            scope: ChatScope::Channel,
+            client: None,
         })
         .unwrap();
         assert_eq!(
             json,
             r#"{"op":"chat","session_id":"s1","channel":"3","text":"oi","request_id":"r1"}"#
+        );
+        let private = serde_json::to_string(&Command::Chat {
+            session_id: "s1".into(),
+            channel: "3".into(),
+            text: "oi".into(),
+            request_id: "r2".into(),
+            scope: ChatScope::Private,
+            client: Some(9),
+        })
+        .unwrap();
+        assert!(
+            private.contains(r#""scope":"private","client":9"#),
+            "{private}"
         );
         let result: BridgeEvent = serde_json::from_str(
             r#"{"ev":"chat_result","request_id":"r1","error":null,"code":null}"#,
@@ -575,9 +596,34 @@ mod tests {
     }
 }
 
+/// Who a chat message is for (`scope` of the bridge's `chat` command).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatScope {
+    #[default]
+    Channel,
+    Server,
+    Private,
+}
+
+impl ChatScope {
+    fn is_channel(&self) -> bool {
+        *self == Self::Channel
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatMessage {
+    /// Empty for server-wide and private messages.
     pub channel: String,
+    /// `channel`, `server` or `private`; absent on older bridges (channel).
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub from_id: Option<u16>,
+    /// For private messages, the other person.
+    #[serde(default)]
+    pub peer_id: Option<u16>,
     pub sender: String,
     pub text: String,
     pub from_self: bool,
