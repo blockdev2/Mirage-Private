@@ -87,6 +87,18 @@ struct ImageViewer {
     offset: egui::Vec2,
 }
 
+/// How long the "private message" toast stays.
+const DM_TOAST: Duration = Duration::from_secs(10);
+
+/// A private message that arrived and has not been dealt with.
+struct DmNotice {
+    peer: u16,
+    name: String,
+    at: Instant,
+    /// The taskbar has been asked for attention.
+    alerted: bool,
+}
+
 /// A chat attachment's local state.
 #[derive(Clone)]
 enum ChatFile {
@@ -221,6 +233,8 @@ pub struct App {
     chat_notice: Option<&'static str>,
     /// Who the composer writes to.
     chat_to: ChatTo,
+    /// A private message just arrived from this person (shown as a toast).
+    dm_notice: Option<DmNotice>,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
     /// Whether the window is currently fullscreen because of a stream.
@@ -334,6 +348,7 @@ impl App {
             logo: None,
             chat_notice: None,
             chat_to: ChatTo::Channel,
+            dm_notice: None,
             watching: None,
             window_fullscreen: false,
             sharing: None,
@@ -422,6 +437,7 @@ impl App {
                     self.session_address = None;
                     self.chat_notice = None;
                     self.chat_to = ChatTo::Channel;
+                    self.dm_notice = None;
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
                         self.pending = None;
@@ -500,6 +516,20 @@ impl App {
                     Some("private") => (Scope::Private, None),
                     _ => (Scope::Channel, message.channel.parse::<u64>().ok()),
                 };
+                if scope == Scope::Private && !message.from_self {
+                    // Say so when it is not the conversation already open.
+                    if let Some(peer) = message
+                        .peer_id
+                        .filter(|p| self.chat_to != ChatTo::Person(*p))
+                    {
+                        self.dm_notice = Some(DmNotice {
+                            peer,
+                            name: message.sender.clone(),
+                            at: Instant::now(),
+                            alerted: false,
+                        });
+                    }
+                }
                 if scope != Scope::Channel || channel.is_some() {
                     let incoming = ChatIncoming {
                         scope,
@@ -847,6 +877,7 @@ impl eframe::App for App {
         }
         self.connection_window(&ctx);
         self.admin_ui(&ctx);
+        self.dm_toast(&ctx);
     }
 }
 
@@ -1237,6 +1268,58 @@ impl App {
             speaking,
         );
         response
+    }
+
+    /// "Mensagem privada de X" with a button to answer, for a few seconds. A
+    /// window that is not in front also asks for attention on the taskbar.
+    fn dm_toast(&mut self, ctx: &egui::Context) {
+        let t = self.t;
+        let Some(notice) = self.dm_notice.as_mut() else {
+            return;
+        };
+        if notice.at.elapsed() > DM_TOAST {
+            self.dm_notice = None;
+            return;
+        }
+        if !notice.alerted {
+            notice.alerted = true;
+            if !ctx.input(|i| i.focused) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+        let (peer, name) = (notice.peer, notice.name.clone());
+        let mut answer = false;
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::NULL.with("dm-toast"))
+            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -150.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(theme::SURFACE_RAISED)
+                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(16, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(t.dm_from(&name)).color(theme::TEXT));
+                            if ui.button(t.dm_answer).clicked() {
+                                answer = true;
+                            }
+                            if ui.button("✕").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            });
+        if answer {
+            self.chat_to = ChatTo::Person(peer);
+        }
+        if answer || dismiss {
+            self.dm_notice = None;
+        }
     }
 
     fn user_card(&mut self, ui: &mut egui::Ui) {

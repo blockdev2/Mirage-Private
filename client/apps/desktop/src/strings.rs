@@ -183,6 +183,8 @@ pub struct Strings {
     pub chat_scope_private: &'static str,
     pub chat_scope_private_to: &'static str,
     pub chat_to: &'static str,
+    pub dm_answer: &'static str,
+    pub dm_from_prefix: &'static str,
     pub status_away: &'static str,
     pub status_set_away: &'static str,
     pub status_set_available: &'static str,
@@ -333,6 +335,11 @@ impl Strings {
             Some(topic) => format!("{} • {topic}", self.channel_kind),
             None => self.channel_kind.to_string(),
         }
+    }
+
+    /// The toast text for a private message from `name`.
+    pub fn dm_from(&self, name: &str) -> String {
+        format!("{} {name}", self.dm_from_prefix)
     }
 
     /// Placeholder of the composer when writing privately to `name`.
@@ -589,6 +596,8 @@ pub const PT: Strings = Strings {
     chat_scope_private: "privado",
     chat_scope_private_to: "privado para",
     chat_to: "Para",
+    dm_answer: "Responder",
+    dm_from_prefix: "Mensagem privada de",
     status_away: "Ausente",
     status_set_away: "Ficar ausente",
     status_set_available: "Ficar disponível",
