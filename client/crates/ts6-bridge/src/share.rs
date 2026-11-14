@@ -9,7 +9,8 @@
 //! the viewer's answer and candidates come back in `notifystreamsignaling`.
 
 use crate::share_media::{
-    CaptureSource, ShareCommand, ShareEvent, ShareFailure, MAX_REMOTE_CANDIDATES, MAX_VIEWERS,
+    CaptureSource, Quality, ShareCommand, ShareEvent, ShareFailure, MAX_REMOTE_CANDIDATES,
+    MAX_VIEWERS,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -125,7 +126,13 @@ impl ShareRegistry {
 
     /// Starts sharing; `own` is our client id (it identifies our own
     /// `notifystreamstarted`).
-    pub fn start(&mut self, own: u16, source: CaptureSource, now: Instant) -> Vec<Action> {
+    pub fn start(
+        &mut self,
+        own: u16,
+        source: CaptureSource,
+        quality: Quality,
+        now: Instant,
+    ) -> Vec<Action> {
         match self.phase {
             Phase::Idle => {}
             // Already starting or sharing: nothing to do.
@@ -143,7 +150,7 @@ impl ShareRegistry {
         self.own = own;
         self.phase = Phase::Capturing { since: now };
         vec![
-            Action::Worker(ShareCommand::Start { source }),
+            Action::Worker(ShareCommand::Start { source, quality }),
             Action::Publish {
                 state: "starting",
                 reason: None,
@@ -455,7 +462,7 @@ mod tests {
     /// Capture ready and the server's confirmation: sharing as stream "s".
     fn live(now: Instant) -> ShareRegistry {
         let mut r = ShareRegistry::default();
-        r.start(OWN, CaptureSource::Monitor(None), now);
+        r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now);
         r.on_worker(ShareEvent::CaptureReady, now);
         r.on_event(&event("notifystreamstarted id=s clid=5"), now);
         r
@@ -472,12 +479,18 @@ mod tests {
     fn capture_comes_first_then_setupstream_then_live() {
         let now = Instant::now();
         let mut r = ShareRegistry::default();
-        let actions = r.start(OWN, CaptureSource::Monitor(Some(1)), now);
+        let actions = r.start(
+            OWN,
+            CaptureSource::Monitor(Some(1)),
+            Quality::default(),
+            now,
+        );
         assert!(matches!(
             actions.as_slice(),
             [
                 Action::Worker(ShareCommand::Start {
-                    source: CaptureSource::Monitor(Some(1))
+                    source: CaptureSource::Monitor(Some(1)),
+                    quality: Quality::Standard
                 }),
                 Action::Publish {
                     state: "starting",
@@ -497,7 +510,8 @@ mod tests {
         let actions = r.on_event(&event("notifystreamstarted id=s clid=5"), now);
         assert_eq!(published(&actions), vec![("live", None, 0)]);
         assert!(
-            r.start(OWN, CaptureSource::Monitor(None), now).is_empty(),
+            r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now)
+                .is_empty(),
             "already sharing"
         );
     }
@@ -655,7 +669,7 @@ mod tests {
     fn stopping_before_the_capture_is_ready_announces_nothing() {
         let now = Instant::now();
         let mut r = ShareRegistry::default();
-        r.start(OWN, CaptureSource::Monitor(None), now);
+        r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now);
         let actions = r.stop(now);
         assert!(sends(&actions, "stopstream").is_empty());
         assert!(closes(&actions));
@@ -668,14 +682,14 @@ mod tests {
     fn stopping_while_announcing_still_removes_the_late_announcement() {
         let now = Instant::now();
         let mut r = ShareRegistry::default();
-        r.start(OWN, CaptureSource::Monitor(None), now);
+        r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now);
         r.on_worker(ShareEvent::CaptureReady, now);
         let actions = r.stop(now);
         assert!(sends(&actions, "stopstream").is_empty());
         assert!(closes(&actions));
         assert!(!r.is_idle());
         assert_eq!(
-            published(&r.start(OWN, CaptureSource::Monitor(None), now)),
+            published(&r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now)),
             vec![("failed", Some("busy"), 0)]
         );
         let late = r.on_event(&event("notifystreamstarted id=s clid=5"), now);
@@ -687,13 +701,13 @@ mod tests {
     fn deadlines_end_a_share_that_never_starts() {
         let now = Instant::now();
         let mut r = ShareRegistry::default();
-        r.start(OWN, CaptureSource::Monitor(None), now);
+        r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now);
         assert!(r.tick(now + Duration::from_secs(14)).is_empty());
         let a = r.tick(now + START_DEADLINE);
         assert_eq!(published(&a), vec![("failed", Some("capture"), 0)]);
 
         let mut r = ShareRegistry::default();
-        r.start(OWN, CaptureSource::Monitor(None), now);
+        r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now);
         r.on_worker(ShareEvent::CaptureReady, now);
         let a = r.tick(now + START_DEADLINE);
         assert_eq!(published(&a), vec![("failed", Some("timeout"), 0)]);
@@ -707,7 +721,7 @@ mod tests {
     fn worker_failures_reach_the_ui_with_a_reason() {
         let now = Instant::now();
         let mut r = ShareRegistry::default();
-        r.start(OWN, CaptureSource::Monitor(None), now);
+        r.start(OWN, CaptureSource::Monitor(None), Quality::default(), now);
         let a = r.on_worker(ShareEvent::Failed(ShareFailure::Unsupported), now);
         assert_eq!(published(&a), vec![("failed", Some("unsupported"), 0)]);
         assert!(closes(&a));

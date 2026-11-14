@@ -22,7 +22,7 @@ mod monitors;
 #[cfg(windows)]
 mod windows_list;
 
-pub use config::{fit_size, CaptureConfig, CaptureSource, EncodedUnit};
+pub use config::{fit_size, CaptureConfig, CaptureSource, EncodedUnit, Quality};
 
 #[cfg(windows)]
 pub use capture::ScreenCapture;

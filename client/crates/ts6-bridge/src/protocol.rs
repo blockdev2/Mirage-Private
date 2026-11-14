@@ -200,6 +200,9 @@ pub enum Command {
         monitor: Option<usize>,
         #[serde(default)]
         window: Option<i64>,
+        /// `light`, `standard` (the default), `high` or `max`.
+        #[serde(default)]
+        quality: Option<String>,
     },
     /// Stop sharing.
     ShareStop,
@@ -450,7 +453,8 @@ mod tests {
             start,
             Command::ShareStart {
                 monitor: Some(1),
-                window: None
+                window: None,
+                ..
             }
         ));
         let primary: Command = serde_json::from_str(r#"{"op":"share_start"}"#).unwrap();
@@ -458,8 +462,15 @@ mod tests {
             primary,
             Command::ShareStart {
                 monitor: None,
-                window: None
+                window: None,
+                ..
             }
+        ));
+        let high: Command =
+            serde_json::from_str(r#"{"op":"share_start","quality":"high"}"#).unwrap();
+        assert!(matches!(
+            high,
+            Command::ShareStart { quality: Some(ref q), .. } if q == "high"
         ));
         let window: Command =
             serde_json::from_str(r#"{"op":"share_start","window":65678}"#).unwrap();

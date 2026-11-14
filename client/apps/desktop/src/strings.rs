@@ -192,6 +192,9 @@ pub struct Strings {
     pub share_starting: &'static str,
     pub share_watching: &'static str,
     pub share_pick: &'static str,
+    pub share_quality: &'static str,
+    /// Light, standard, high, max: name, size and bitrate.
+    pub share_quality_levels: [&'static str; 4],
     pub share_screens: &'static str,
     pub share_windows: &'static str,
     pub share_no_window: &'static str,
@@ -575,6 +578,13 @@ pub const PT: Strings = Strings {
     share_starting: "Iniciando compartilhamento…",
     share_watching: "assistindo",
     share_pick: "Compartilhar o quê?",
+    share_quality: "Qualidade",
+    share_quality_levels: [
+        "Leve · 720p 30 fps · 1,5 Mbps",
+        "Padrão · 720p 30 fps · 3 Mbps",
+        "Alta · 1080p 30 fps · 6 Mbps",
+        "Máxima · 1080p 60 fps · 9 Mbps",
+    ],
     share_screens: "Telas",
     share_windows: "Janelas",
     share_no_window: "Nenhuma janela aberta.",

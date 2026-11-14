@@ -701,7 +701,11 @@ async fn session_task(
                 stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
                 None
             }
-            Some(Command::ShareStart { monitor, window }) => {
+            Some(Command::ShareStart {
+                monitor,
+                window,
+                quality,
+            }) => {
                 let own = session.as_ref().and_then(own_client_id);
                 let actions = match own {
                     Some(own) => {
@@ -710,7 +714,12 @@ async fn session_task(
                             Some(handle) => share_media::CaptureSource::Window(handle),
                             None => share_media::CaptureSource::Monitor(monitor),
                         };
-                        share.start(own, source, std::time::Instant::now())
+                        // Unknown names fall back to the default preset.
+                        let quality = quality
+                            .as_deref()
+                            .and_then(share_media::Quality::from_name)
+                            .unwrap_or_default();
+                        share.start(own, source, quality, std::time::Instant::now())
                     }
                     None => vec![share::Action::Publish {
                         state: "failed",

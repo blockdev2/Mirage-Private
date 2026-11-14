@@ -289,6 +289,9 @@ pub enum Command {
         monitor: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
         window: Option<i64>,
+        /// `light`, `standard`, `high` or `max`; absent is the bridge default.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        quality: Option<&'static str>,
     },
     ShareStop,
 }
@@ -346,7 +349,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Command::ShareStart {
                 monitor: Some(1),
-                window: None
+                window: None,
+                quality: None
             })
             .unwrap(),
             serde_json::json!({"op": "share_start", "monitor": 1})
@@ -354,10 +358,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Command::ShareStart {
                 monitor: None,
-                window: Some(65678)
+                window: Some(65678),
+                quality: Some("high")
             })
             .unwrap(),
-            serde_json::json!({"op": "share_start", "monitor": null, "window": 65678})
+            serde_json::json!({"op": "share_start", "monitor": null, "window": 65678, "quality": "high"})
         );
         assert_eq!(
             serde_json::to_value(Command::ShareStop).unwrap(),

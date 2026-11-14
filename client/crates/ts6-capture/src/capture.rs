@@ -29,6 +29,23 @@ use windows_capture::{
     window::Window,
 };
 
+/// Keeps the process's COM multithreaded apartment alive.
+///
+/// Windows Graphics Capture caches WinRT factories in statics. Each capture
+/// runs on its own thread, and when the last thread of the multithreaded
+/// apartment ends the apartment is torn down: the cached factory then dangles
+/// and the next capture crashes inside `GraphicsCaptureApi::is_supported`
+/// (access violation on the second to fourth start). One never-released usage
+/// count keeps the apartment, and the cached factories, valid.
+fn keep_mta_alive() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: no arguments to get wrong; the cookie is deliberately never
+        // released, so the apartment lives as long as the process.
+        let _ = unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() };
+    });
+}
+
 /// Encoded units waiting for the consumer.
 const QUEUE: usize = 8;
 
@@ -185,6 +202,7 @@ impl ScreenCapture {
     /// screen stays in this process: it is encoded and handed to `units`.
     pub fn start(config: CaptureConfig) -> Result<Self> {
         config.validate().map_err(|reason| anyhow!(reason))?;
+        keep_mta_alive();
         let (sender, units) = sync_channel(QUEUE);
         let keyframe = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));

@@ -12,12 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-pub use ts6_capture::CaptureSource;
 use ts6_capture::EncodedUnit;
 #[cfg(windows)]
 pub use ts6_capture::{
     list_monitors as monitors, list_windows as windows, MonitorInfo, WindowInfo,
 };
+pub use ts6_capture::{CaptureSource, Quality};
 use ts6_stream::{Publisher, Signal};
 
 /// Viewers served at once. Every viewer is a separate peer connection, so the
@@ -39,6 +39,7 @@ pub enum ShareCommand {
     /// Starts the capture; answered with `CaptureReady` or `Failed`.
     Start {
         source: CaptureSource,
+        quality: Quality,
     },
     AddViewer {
         viewer: u16,
@@ -114,7 +115,7 @@ pub struct Source {
 }
 
 /// Starts a capture of the given monitor or window.
-pub type Starter = Box<dyn FnMut(CaptureSource) -> Result<Source, ShareFailure> + Send>;
+pub type Starter = Box<dyn FnMut(CaptureSource, Quality) -> Result<Source, ShareFailure> + Send>;
 
 /// The share worker. Dropping it closes every viewer and stops the capture.
 pub struct ShareWorker {
@@ -204,11 +205,14 @@ async fn run(
             command = queue.recv() => {
                 let Some(command) = command else { break };
                 match command {
-                    ShareCommand::Start { source: chosen } => {
+                    ShareCommand::Start {
+                        source: chosen,
+                        quality,
+                    } => {
                         if source.is_some() {
                             continue;
                         }
-                        let report = match starter(chosen) {
+                        let report = match starter(chosen, quality) {
                             Ok(started) => {
                                 source = Some(started);
                                 ShareEvent::CaptureReady
@@ -376,7 +380,7 @@ fn sample_duration(last: &mut Option<i64>, time_100ns: i64) -> Duration {
 /// Monitor capture with a hardware H.264 encoder; the capture lives on its
 /// own thread and its units are forwarded through a bounded queue.
 #[cfg(windows)]
-fn capture_source(chosen: CaptureSource) -> Result<Source, ShareFailure> {
+fn capture_source(chosen: CaptureSource, quality: Quality) -> Result<Source, ShareFailure> {
     use std::sync::mpsc::RecvTimeoutError;
     use ts6_capture::{CaptureConfig, ScreenCapture};
 
@@ -401,10 +405,10 @@ fn capture_source(chosen: CaptureSource) -> Result<Source, ShareFailure> {
     let thread = std::thread::Builder::new()
         .name("screen-capture".into())
         .spawn(move || {
-            let config = CaptureConfig {
+            let config = quality.apply(CaptureConfig {
                 source: chosen,
                 ..CaptureConfig::default()
-            };
+            });
             let capture = match ScreenCapture::start(config) {
                 Ok(capture) => capture,
                 Err(error) => {
@@ -456,7 +460,7 @@ fn capture_source(chosen: CaptureSource) -> Result<Source, ShareFailure> {
 }
 
 #[cfg(not(windows))]
-fn capture_source(_wanted: CaptureSource) -> Result<Source, ShareFailure> {
+fn capture_source(_wanted: CaptureSource, _quality: Quality) -> Result<Source, ShareFailure> {
     Err(ShareFailure::Unsupported)
 }
 
@@ -507,7 +511,7 @@ mod tests {
         let worker = ShareWorker::spawn_with(
             events_tx,
             LOCALHOST,
-            Box::new(move |_| source.take().ok_or(ShareFailure::Capture)),
+            Box::new(move |_, _| source.take().ok_or(ShareFailure::Capture)),
         )
         .expect("worker");
         Fixture {
@@ -559,12 +563,13 @@ mod tests {
         let worker = ShareWorker::spawn_with(
             events_tx,
             LOCALHOST,
-            Box::new(|_| Err(ShareFailure::Unsupported)),
+            Box::new(|_, _| Err(ShareFailure::Unsupported)),
         )
         .unwrap();
         assert!(worker
             .send(ShareCommand::Start {
-                source: CaptureSource::Monitor(None)
+                source: CaptureSource::Monitor(None),
+                quality: Quality::default(),
             })
             .is_ok());
         assert!(matches!(
@@ -635,6 +640,7 @@ mod tests {
             .worker
             .send(ShareCommand::Start {
                 source: CaptureSource::Monitor(None),
+                quality: Quality::default(),
             })
             .ok()
             .unwrap();
@@ -698,6 +704,7 @@ mod tests {
         worker
             .send(ShareCommand::Start {
                 source: CaptureSource::Monitor(None),
+                quality: Quality::default(),
             })
             .ok()
             .unwrap();
@@ -727,6 +734,7 @@ mod tests {
             .worker
             .send(ShareCommand::Start {
                 source: CaptureSource::Monitor(None),
+                quality: Quality::default(),
             })
             .ok()
             .unwrap();

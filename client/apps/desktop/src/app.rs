@@ -223,6 +223,8 @@ pub struct App {
     share_monitors: Vec<share::MonitorChoice>,
     /// Windows listed at the same time.
     share_windows: Vec<share::WindowChoice>,
+    /// Index into `share::QUALITIES` for the next share (not saved).
+    share_quality: usize,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
     connect_started: Option<Instant>,
@@ -325,6 +327,7 @@ impl App {
             sharing: None,
             share_monitors: Vec::new(),
             share_windows: Vec::new(),
+            share_quality: share::DEFAULT_QUALITY,
             connect_started: None,
             open_channels: HashMap::new(),
             server_open: true,

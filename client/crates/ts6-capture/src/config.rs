@@ -9,6 +9,56 @@ pub enum CaptureSource {
     Window(i64),
 }
 
+/// How much picture and bitrate a share spends. Every viewer is a separate
+/// peer-to-peer upload, so the cost is multiplied by up to four viewers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quality {
+    /// 720p at 30 fps, 1.5 Mbit/s: for weak uplinks.
+    Light,
+    /// 720p at 30 fps, 3 Mbit/s: the default.
+    #[default]
+    Standard,
+    /// 1080p at 30 fps, 6 Mbit/s.
+    High,
+    /// 1080p at 60 fps, 9 Mbit/s: for games, needs a fast uplink.
+    Max,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 4] = [Self::Light, Self::Standard, Self::High, Self::Max];
+
+    /// The name on the bridge wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Standard => "standard",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.name() == name)
+    }
+
+    /// `config` with this preset's size, frame rate and bitrate.
+    pub fn apply(self, config: CaptureConfig) -> CaptureConfig {
+        let (max_width, max_height, fps, bitrate_kbps) = match self {
+            Self::Light => (1280, 720, 30, 1500),
+            Self::Standard => (1280, 720, 30, 3000),
+            Self::High => (1920, 1080, 30, 6000),
+            Self::Max => (1920, 1080, 60, 9000),
+        };
+        CaptureConfig {
+            max_width,
+            max_height,
+            fps,
+            bitrate_kbps,
+            ..config
+        }
+    }
+}
+
 /// Capture and encoding settings. `Default` is a 720p, 30 FPS, 3 Mbit/s
 /// stream, a sensible ceiling for several peer-to-peer viewers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +140,32 @@ pub fn fit_size(source: (u32, u32), max: (u32, u32)) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_preset_is_valid_and_standard_is_the_default() {
+        for quality in Quality::ALL {
+            let config = quality.apply(CaptureConfig::default());
+            assert!(config.validate().is_ok(), "{quality:?}");
+            assert_eq!(Quality::from_name(quality.name()), Some(quality));
+        }
+        assert_eq!(
+            Quality::default().apply(CaptureConfig::default()),
+            CaptureConfig::default()
+        );
+        assert_eq!(Quality::from_name("ultra"), None);
+        // The source stays what the caller chose.
+        let window = CaptureConfig {
+            source: CaptureSource::Window(7),
+            ..CaptureConfig::default()
+        };
+        assert_eq!(Quality::Max.apply(window).source, CaptureSource::Window(7));
+        // Higher presets never ask for less.
+        let bitrates: Vec<u32> = Quality::ALL
+            .iter()
+            .map(|q| q.apply(CaptureConfig::default()).bitrate_kbps)
+            .collect();
+        assert!(bitrates.windows(2).all(|w| w[0] < w[1]));
+    }
 
     #[test]
     fn a_small_source_is_not_upscaled() {

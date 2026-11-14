@@ -19,6 +19,11 @@ pub(super) struct MonitorChoice {
     pub label: String,
 }
 
+/// Bridge names of the quality presets, in the order of `share_quality_levels`.
+pub(super) const QUALITIES: [&str; 4] = ["light", "standard", "high", "max"];
+/// "standard": what a share used before there was a choice.
+pub(super) const DEFAULT_QUALITY: usize = 1;
+
 /// One window in the picker.
 pub(super) struct WindowChoice {
     pub id: i64,
@@ -159,36 +164,50 @@ impl App {
                 }
                 // (monitor index, window handle): exactly one is set.
                 let mut chosen: Option<(Option<usize>, Option<i64>)> = None;
-                egui::Popup::from_toggle_button_response(&response).show(|ui| {
-                    ui.set_min_width(260.0);
-                    ui.label(egui::RichText::new(t.share_pick).color(theme::TEXT_2));
-                    egui::ScrollArea::vertical()
-                        .max_height(360.0)
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new(t.share_screens).color(theme::TEXT_3));
-                            if self.share_monitors.is_empty() {
-                                ui.label(t.share_no_monitor);
-                            }
-                            for monitor in &self.share_monitors {
-                                if ui.button(&monitor.label).clicked() {
-                                    chosen = Some((Some(monitor.index), None));
+                // Picking a quality must not close the picker; picking what to
+                // share starts the share, which replaces this button anyway.
+                egui::Popup::from_toggle_button_response(&response)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.set_min_width(260.0);
+                        ui.label(egui::RichText::new(t.share_quality).color(theme::TEXT_2));
+                        for (index, label) in t.share_quality_levels.iter().enumerate() {
+                            ui.selectable_value(&mut self.share_quality, index, *label);
+                        }
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.label(egui::RichText::new(t.share_pick).color(theme::TEXT_2));
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(t.share_screens).color(theme::TEXT_3));
+                                if self.share_monitors.is_empty() {
+                                    ui.label(t.share_no_monitor);
                                 }
-                            }
-                            ui.add_space(6.0);
-                            ui.label(egui::RichText::new(t.share_windows).color(theme::TEXT_3));
-                            if self.share_windows.is_empty() {
-                                ui.label(t.share_no_window);
-                            }
-                            for window in &self.share_windows {
-                                if ui.button(&window.label).clicked() {
-                                    chosen = Some((None, Some(window.id)));
+                                for monitor in &self.share_monitors {
+                                    if ui.button(&monitor.label).clicked() {
+                                        chosen = Some((Some(monitor.index), None));
+                                    }
                                 }
-                            }
-                        });
-                });
+                                ui.add_space(6.0);
+                                ui.label(egui::RichText::new(t.share_windows).color(theme::TEXT_3));
+                                if self.share_windows.is_empty() {
+                                    ui.label(t.share_no_window);
+                                }
+                                for window in &self.share_windows {
+                                    if ui.button(&window.label).clicked() {
+                                        chosen = Some((None, Some(window.id)));
+                                    }
+                                }
+                            });
+                    });
                 if let Some((monitor, window)) = chosen {
                     self.sharing = Some(Sharing::Starting);
-                    self.send(Command::ShareStart { monitor, window });
+                    self.send(Command::ShareStart {
+                        monitor,
+                        window,
+                        quality: QUALITIES.get(self.share_quality).copied(),
+                    });
                 }
             }
         }
@@ -199,6 +218,16 @@ impl App {
 mod tests {
     use super::*;
     use crate::strings::PT;
+
+    #[test]
+    fn quality_names_match_the_bridge_and_the_labels() {
+        assert_eq!(QUALITIES.len(), PT.share_quality_levels.len());
+        assert_eq!(QUALITIES[DEFAULT_QUALITY], "standard");
+        let mut unique = QUALITIES.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), QUALITIES.len());
+    }
 
     #[test]
     fn window_labels_cut_long_titles_and_keep_the_app_and_size() {
