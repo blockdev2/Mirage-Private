@@ -170,7 +170,7 @@ impl App {
                             changed |= percent_field(ui, client.id, &mut volume, color);
                         });
                     });
-                    changed |= volume_slider(ui, &mut volume);
+                    changed |= volume_slider(ui, &mut volume, MAX_PEER_VOLUME);
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -403,21 +403,21 @@ impl App {
     }
 }
 
-/// Discord-style volume slider, 0–400%, with a mark at 100% and snapping near
+/// Discord-style volume slider, 0 to `max` (400% for people, 200% for a
+/// stream), with a mark at 100% and snapping near
 /// it. Keyboard: arrows change by 5%. Returns true when the value changed.
-fn volume_slider(ui: &mut egui::Ui, value: &mut f32) -> bool {
+pub(super) fn volume_slider(ui: &mut egui::Ui, value: &mut f32, max: f32) -> bool {
     let height = 22.0;
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
     response.widget_info(|| egui::WidgetInfo::slider(true, f64::from(*value * 100.0), "Volume"));
     let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 14.0, 6.0));
-    let to_x = |v: f32| track.left() + track.width() * (v / MAX_PEER_VOLUME);
+    let to_x = |v: f32| track.left() + track.width() * (v / max);
     let before = *value;
 
     if let Some(pointer) = response.interact_pointer_pos() {
         if response.dragged() || response.clicked() {
-            let mut v =
-                ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0) * MAX_PEER_VOLUME;
+            let mut v = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0) * max;
             if (v - 1.0).abs() < SNAP {
                 v = 1.0;
             }
@@ -435,10 +435,7 @@ fn volume_slider(ui: &mut egui::Ui, value: &mut f32) -> bool {
             }
         });
         if step != 0.0 {
-            *value = ((*value + step) * 100.0)
-                .round()
-                .clamp(0.0, MAX_PEER_VOLUME * 100.0)
-                / 100.0;
+            *value = ((*value + step) * 100.0).round().clamp(0.0, max * 100.0) / 100.0;
         }
     }
 

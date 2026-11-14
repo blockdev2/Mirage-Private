@@ -10,26 +10,13 @@ Implemented: TS3-compatible UDP session establishment, channel/client snapshots,
 
 The native frontend is an eframe/egui desktop application. The React/Vite browser frontend remains available for browser-based development with the standalone bridge. Neither frontend is distributed through a packaged installer or release. Previous local experiments used TeamSpeak Server **6.0.0-beta13.1**; their results are summarized in [verification](docs/verification.md) and do not establish compatibility with every TS6 server release.
 
-Both frontends implement current-channel text chat through the bridge. Browser send/receive and reload recovery were verified against a local beta13.1 server; native rendering and interaction remain to be manually validated. Direct-client messages are verified through the CLI but have no dedicated frontend conversation view. The native frontend also sends photos, animated GIFs and files (up to 5 MB) through the channel's classic file transfer, with `:shortcode:` emoji; the bridge path was verified end to end on a loopback server, while the rendered native window was not exercised and default servers deny guest uploads. See [channel chat](docs/channel-chat.md). Matrix chat integration, WebRTC video/screensharing, S3 file integration, and acoustic echo cancellation are not implemented. RNNoise noise suppression is present in the capture pipeline, but real microphone quality, long-running stability, and non-Windows operation remain unverified. The synthetic CLI tone-rate defect was corrected in a loopback retest; sustained voice and late-join behavior still need broader validation.
+Both frontends implement current-channel text chat through the bridge. Browser send/receive and reload recovery were verified against a local beta13.1 server; native rendering and interaction remain to be manually validated. Direct-client messages are verified through the CLI but have no dedicated frontend conversation view. The native frontend also sends photos, animated GIFs and files (up to 5 MB) through the channel's classic file transfer, with `:shortcode:` emoji; the bridge path was verified end to end on a loopback server, while the rendered native window was not exercised and default servers deny guest uploads. See [channel chat](docs/channel-chat.md). Matrix chat integration, S3 file integration, and acoustic echo cancellation are not implemented. RNNoise noise suppression is present in the capture pipeline, but real microphone quality, long-running stability, and non-Windows operation remain unverified. The synthetic CLI tone-rate defect was corrected in a loopback retest; sustained voice and late-join behavior still need broader validation.
 
 **Experimental software:** the RustCrypto advisory identified in the historical audit has been addressed by a dependency migration. Publication uses a clean source import; unsafe local historical commits are excluded. Private security reporting and production readiness still require follow-up. See [publication verification](docs/PUBLICATION.md) and the [historical audit](docs/AUDIT.md).
 
 Local-server results and remaining feature gaps are tracked in [compatibility status](docs/compatibility-status.md). Later tests of the integrated backend against an owner-provided remote server, including chat and synthetic voice in both connection orders, are recorded in [integrated live validation](docs/live-validation-integrated.md).
 
-Manual stream-control and synthetic WebRTC diagnostics now exercise signaling
-and decoded video fixtures. These are not a native screen-sharing feature;
-end-user capture, hardware codecs and official-viewer video remain unverified. A
-standalone [owned-window capture probe](recon/probe-capture/README.md) validates
-WGC, resizing and a GPU texture copy with one final readback. It also drives
-Media Foundation H.264, HEVC and AV1 encoders directly (no FFmpeg), lets the user
-choose the encoder backend and GPU (discrete, integrated or CPU), and streams
-live RTP over loopback UDP with loss recovery; those checks passed on one
-development machine. The desktop client now has a screen share button that
-connects that capture to the TS6 stream signaling (tested on loopback and with
-unit tests only); official-viewer video, a run against a real server and
-cross-network use remain unverified. See
-[streaming research](docs/persistent-chat-and-streaming-research.md) and the
-[native pipeline direction](docs/native-streaming-architecture.md).
+Screen sharing works with the official TeamSpeak 6 client in both directions: Mirage can share a monitor (H.264 High, hardware encoder, to up to four viewers) and watch the official client's share, with the stream's sound, volume, mute and fullscreen. It was verified by hand against the official client on one machine and network (about 58 fps, no freezes in a short run); CI has not run on it yet, a long (10 minute) run has not been done, the sound was confirmed only through packet counters, and across-NAT use without a relay is untested. Known limits: a VPN that makes the server ping very high makes the official client ignore Mirage's answer to its offer; only whole monitors can be shared (no window pick), Mirage does not send sound, and there is no quality or fps choice. Capture, encoding and WebRTC were first validated by the standalone [owned-window capture probe](recon/probe-capture/README.md) and the synthetic diagnostics. See [streaming research](docs/persistent-chat-and-streaming-research.md) for the evidence rounds and the [native pipeline direction](docs/native-streaming-architecture.md).
 
 ## Requirements
 
@@ -74,7 +61,7 @@ user, no administrator prompt) from the project's public GitHub releases page.
 Once installed, Mirage checks that page for a newer version a few seconds after
 it opens (switch this off in Ajustes → Atualizações) and updates itself from
 there; a portable copy cannot. How releases are produced and where they must
-live is in [releasing](docs/RELEASING.md). No release has been published yet.
+live is in [releasing](docs/RELEASING.md). Releases up to 0.0.4 are published; screen sharing is not in a release yet.
 
 The `Build client` workflow compiles the native Windows client. Every run
 uploads `Mirage-windows-x64.zip` (with a `.sha256` file) and the installer
@@ -108,8 +95,8 @@ See [development and configuration](docs/DEVELOPMENT.md), [architecture](docs/ar
 | `client/crates/ts6-input` | Key parsing, Windows key polling, transmit gate |
 | `client/crates/ts6-cli` | Diagnostics and manual measurement commands |
 | `client/crates/ts6-bridge` | Loopback HTTP/WebSocket service and local audio orchestration |
-| `client/crates/ts6-stream` | Native WebRTC publisher and viewer for TS6 streams (loopback-proven; the publisher is wired to the session by the bridge's screen share, untested against the official client) |
-| `client/crates/ts6-capture` | Windows monitor capture and GPU H.264 encoding (hardware encoder only; not wired to the session yet) |
+| `client/crates/ts6-stream` | Native WebRTC publisher and viewer for TS6 streams, with the SDP shaping the official client needs (the bridge's screen share and viewer use it) |
+| `client/crates/ts6-capture` | Windows monitor capture and GPU H.264 encoding (hardware encoder only; used by the bridge's screen share) |
 | `client/apps/desktop` | Native eframe/egui desktop frontend |
 | `client/apps/ui` | React 19, TypeScript 7, Vite 8, CSS |
 | `installer` | Installer icon and splash (generated by `scripts/make_installer_assets.py`) |

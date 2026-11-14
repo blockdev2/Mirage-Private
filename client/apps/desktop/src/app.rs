@@ -215,6 +215,8 @@ pub struct App {
     chat_notice: Option<&'static str>,
     /// The screen stream being watched, if any.
     watching: Option<stream::Watching>,
+    /// Whether the window is currently fullscreen because of a stream.
+    window_fullscreen: bool,
     /// Our own screen share, as the bridge last reported it.
     sharing: Option<share::Sharing>,
     /// Monitors listed when the share picker was last opened.
@@ -317,6 +319,7 @@ impl App {
             logo: None,
             chat_notice: None,
             watching: None,
+            window_fullscreen: false,
             sharing: None,
             share_monitors: Vec::new(),
             connect_started: None,
@@ -736,6 +739,19 @@ impl eframe::App for App {
         if self.status.connected {
             // Keeps the session timer moving even when no event arrives.
             ctx.request_repaint_after(Duration::from_secs(1));
+        }
+
+        self.sync_stream_fullscreen(&ctx);
+        if self.watching.as_ref().is_some_and(|w| w.fullscreen) {
+            // The stream alone, edge to edge. Esc or the corner button returns.
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(Color32::BLACK))
+                .show(ui, |ui| {
+                    let stage = ui.max_rect();
+                    self.stream_stage(ui, stage);
+                });
+            self.dialogs(&ctx);
+            return;
         }
 
         egui::Panel::left("sidebar")
