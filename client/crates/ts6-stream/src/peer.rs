@@ -92,6 +92,15 @@ impl PeerConnectionEventHandler for Shared {
         let Ok(init) = event.candidate.to_json() else {
             return;
         };
+        // The kind only (host, srflx, relay): whether the router's public
+        // address was found tells a blocked STUN apart from a blocked peer.
+        let kind = init
+            .candidate
+            .split(" typ ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or("?");
+        tracing::info!(kind, "local ICE candidate");
         let _ = self.signals.try_send(Signal::IceCandidate {
             sdp: init.candidate,
             mid: candidate_mid(init.sdp_mid, init.sdp_mline_index),

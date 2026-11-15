@@ -116,7 +116,7 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
 }
 
 fn fail(events: &Sender<WorkerEvent>, stream: String, reason: FailReason) {
-    tracing::debug!(?reason, "stream viewer failed");
+    tracing::info!(?reason, "stream viewer failed");
     let _ = events.try_send(WorkerEvent::Failed { stream, reason });
 }
 
@@ -258,6 +258,7 @@ async fn start(
             return Err(FailReason::Unsupported);
         }
     };
+    tracing::info!("stream viewer: offer accepted, answer sent");
     let _ = events.try_send(WorkerEvent::Answer {
         stream: stream.to_owned(),
         sdp: answer,
@@ -359,6 +360,14 @@ struct Viewer {
 impl PeerConnectionEventHandler for Viewer {
     async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
         if let Ok(init) = event.candidate.to_json() {
+            // The kind only; no addresses are logged.
+            let kind = init
+                .candidate
+                .split(" typ ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("?");
+            tracing::info!(kind, "viewer local ICE candidate");
             let _ = self.events.try_send(WorkerEvent::LocalIce {
                 stream: self.stream.clone(),
                 json: local_candidate_json(&init),

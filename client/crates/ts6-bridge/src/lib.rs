@@ -777,6 +777,7 @@ async fn session_task(
                 None
             }
             Some(Command::ShareWorker(report)) => {
+                tracing::info!(?report, "screen share worker");
                 let actions = share.on_worker(report, std::time::Instant::now());
                 share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
                 None
@@ -926,6 +927,21 @@ fn share_actions(
                 }
             }
             share::Action::Worker(command) => {
+                // Stages only: no addresses, SDP or candidates are logged.
+                match &command {
+                    share_media::ShareCommand::AddViewer { viewer } => {
+                        tracing::info!(viewer, "screen share: a viewer asked to watch")
+                    }
+                    share_media::ShareCommand::Signal { viewer, json } => tracing::info!(
+                        viewer,
+                        answer = json.contains("\"answer\""),
+                        "screen share: signal from the viewer"
+                    ),
+                    share_media::ShareCommand::RemoveViewer { viewer } => {
+                        tracing::info!(viewer, "screen share: a viewer left")
+                    }
+                    share_media::ShareCommand::Start { .. } => {}
+                }
                 if sharer.is_none() && matches!(command, share_media::ShareCommand::Start { .. }) {
                     *sharer = spawn_sharer(internal);
                 }
@@ -945,7 +961,10 @@ fn share_actions(
                 state,
                 reason,
                 viewers,
-            } => publish_share(events, state, reason, viewers),
+            } => {
+                tracing::info!(state, ?reason, viewers, "screen share state");
+                publish_share(events, state, reason, viewers)
+            }
         }
     }
 }
