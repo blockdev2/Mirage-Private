@@ -197,6 +197,10 @@ async fn run(
     // produces no new units) has a picture at once.
     let mut last_keyframe: Option<Vec<u8>> = None;
     let mut last_time: Option<i64> = None;
+    // What went out in the last 5 s (samples, bytes, failed sends), logged so
+    // a viewer that sees no picture can be told apart from one never sent to.
+    let (mut sent, mut sent_bytes, mut send_errors) = (0u32, 0usize, 0u32);
+    let mut stats_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(25));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -282,7 +286,20 @@ async fn run(
                                 entry.need_key = false;
                             }
                             // A failed send is a lost packet, not a reason to stop.
-                            let _ = entry.publisher.send_sample(unit.data.clone(), duration).await;
+                            match entry.publisher.send_sample(unit.data.clone(), duration).await {
+                                Ok(()) => {
+                                    sent += 1;
+                                    sent_bytes += unit.data.len();
+                                }
+                                Err(_) => send_errors += 1,
+                            }
+                        }
+                        if stats_at.elapsed() >= Duration::from_secs(5) {
+                            let connected = viewers.values().filter(|v| v.connected).count();
+                            if sent + send_errors > 0 || connected > 0 {
+                                tracing::info!(connected, sent, sent_bytes, send_errors, "screen share, last 5 s");
+                            }
+                            (sent, sent_bytes, send_errors, stats_at) = (0, 0, 0, Instant::now());
                         }
                     }
                     Some(Pumped::Ended) | None => {
