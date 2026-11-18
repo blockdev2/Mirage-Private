@@ -36,7 +36,12 @@ fn main() -> eframe::Result {
             .with_title(instance::window_title(instance.slot))
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([1000.0, 640.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(
+                // Window and taskbar; the file icon comes from build.rs.
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .unwrap_or_default(),
+            ),
         ..Default::default()
     };
     eframe::run_native(
