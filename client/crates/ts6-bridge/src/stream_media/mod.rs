@@ -14,8 +14,16 @@ mod loopback_tests;
 /// Requests from the session loop. Payloads are SDP / ICE JSON as relayed
 /// by the TS6 server; they are never logged.
 pub enum WorkerCommand {
-    Offer { stream: String, sdp: String },
-    RemoteIce { stream: String, json: String },
+    Offer {
+        stream: String,
+        sdp: String,
+    },
+    RemoteIce {
+        stream: String,
+        json: String,
+    },
+    /// Hidden: the connection stays, but nothing is decoded or played.
+    Visible(bool),
     Close,
 }
 

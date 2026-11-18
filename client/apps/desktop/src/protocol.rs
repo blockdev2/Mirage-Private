@@ -324,6 +324,10 @@ pub enum Command {
     StopWatching,
     /// Share a monitor (zero-based index) or one window (its handle) as our
     /// own screen stream.
+    /// Changes a running share's quality without restarting it.
+    ShareQuality {
+        quality: &'static str,
+    },
     ShareStart {
         monitor: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -442,6 +446,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Command::ShareStop).unwrap(),
             serde_json::json!({"op": "share_stop"})
+        );
+        assert_eq!(
+            serde_json::to_value(Command::ShareQuality { quality: "max" }).unwrap(),
+            serde_json::json!({"op": "share_quality", "quality": "max"})
         );
     }
 

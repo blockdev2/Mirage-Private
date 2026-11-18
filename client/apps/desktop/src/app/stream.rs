@@ -153,9 +153,11 @@ impl App {
         let Some(watching) = self.watching.as_mut() else {
             return;
         };
-        if let Some((sequence, frame)) = frames().latest(watching.seen) {
+        if let Some((sequence, frame)) = frames().take_latest(watching.seen) {
             watching.seen = sequence;
-            let image = egui::ColorImage::from_rgba_unmultiplied(
+            // Decoded video is opaque, so premultiplied is the same picture
+            // without the per-pixel unmultiply.
+            let image = egui::ColorImage::from_rgba_premultiplied(
                 [frame.width as usize, frame.height as usize],
                 &frame.rgba,
             );

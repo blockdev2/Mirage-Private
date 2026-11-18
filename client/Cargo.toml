@@ -34,6 +34,23 @@ opt-level = 3
 [profile.dev.package.realfft]
 opt-level = 3
 
+# Dependencies (WebRTC, RTP, Opus, egui) run optimized even in dev builds:
+# unoptimized, a watched 1080p stream drops packets and frames.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The bridge converts every decoded frame (NV12 to RGBA) on its own.
+[profile.dev.package.ts6-bridge]
+opt-level = 3
+
+# Every watched stream frame (up to 1080p, 60 per second) is turned into a
+# texture on the interface thread; unoptimized, that stalls the window.
+[profile.dev.package.epaint]
+opt-level = 3
+
+[profile.dev.package.ecolor]
+opt-level = 3
+
 # DPDFNet runs a neural network every 10 ms, so tract and the numeric crates it
 # leans on need optimization even in debug builds; without it the model runs
 # slower than real time. Listed one by one on purpose: a wildcard would also

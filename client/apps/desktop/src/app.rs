@@ -274,10 +274,16 @@ pub struct App {
     window_fullscreen: bool,
     /// Our own screen share, as the bridge last reported it.
     sharing: Option<share::Sharing>,
-    /// Monitors listed when the share picker was last opened.
-    share_monitors: Vec<share::MonitorChoice>,
-    /// Windows listed at the same time.
-    share_windows: Vec<share::WindowChoice>,
+    /// The share picker dialog, while it is open.
+    share_picker: Option<share::Picker>,
+    /// What the running (or last) share captures.
+    share_source: Option<share::Source>,
+    /// A share to start once the bridge confirms the running one stopped.
+    share_restart: Option<share::Source>,
+    /// Name of what the running share captures, for its panel.
+    share_source_title: String,
+    /// Preview of our own running share, for the panel of the share button.
+    share_previews: share::Previews,
     /// Index into `share::QUALITIES` for the next share (not saved).
     share_quality: usize,
     /// Send the computer's sound with the next share (not saved).
@@ -393,8 +399,11 @@ impl App {
             watching: None,
             window_fullscreen: false,
             sharing: None,
-            share_monitors: Vec::new(),
-            share_windows: Vec::new(),
+            share_picker: None,
+            share_source: None,
+            share_restart: None,
+            share_source_title: String::new(),
+            share_previews: share::Previews::default(),
             share_quality: share::DEFAULT_QUALITY,
             share_audio: false,
             connect_started: None,
@@ -953,6 +962,7 @@ impl eframe::App for App {
         self.update_housekeeping(&ctx);
         self.settings_window(&ctx);
         self.image_viewer_window(&ctx);
+        self.share_picker_window(&ctx);
         // Uploads go one by one so they post in the order they were added.
         if self.pending_attachments.is_empty() {
             if let Some(file) = self.upload_queue.pop_front() {

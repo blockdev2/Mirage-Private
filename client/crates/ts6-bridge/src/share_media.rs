@@ -15,7 +15,8 @@ use tokio::sync::mpsc;
 use ts6_capture::EncodedUnit;
 #[cfg(windows)]
 pub use ts6_capture::{
-    list_monitors as monitors, list_windows as windows, MonitorInfo, WindowInfo,
+    list_monitors as monitors, list_windows as windows, thumbnail, MonitorInfo, Thumbnail,
+    WindowInfo,
 };
 pub use ts6_capture::{CaptureSource, Quality};
 use ts6_stream::{Publisher, Signal};
@@ -52,6 +53,8 @@ pub enum ShareCommand {
     RemoveViewer {
         viewer: u16,
     },
+    /// Changes the running capture's quality; viewers stay connected.
+    SetQuality(Quality),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +114,8 @@ pub struct Source {
     pub units: mpsc::Receiver<Pumped>,
     /// Set to ask the encoder for a keyframe.
     pub keyframe: Arc<AtomicBool>,
+    /// A quality to switch to, picked up by the capture thread.
+    pub quality: Arc<std::sync::Mutex<Option<Quality>>>,
     pub guard: Option<Box<dyn Send>>,
 }
 
@@ -197,6 +202,10 @@ async fn run(
     // produces no new units) has a picture at once.
     let mut last_keyframe: Option<Vec<u8>> = None;
     let mut last_time: Option<i64> = None;
+    // What went out in the last 5 s (samples, bytes, failed sends), logged so
+    // a viewer that sees no picture can be told apart from one never sent to.
+    let (mut sent, mut sent_bytes, mut send_errors) = (0u32, 0usize, 0u32);
+    let mut stats_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(25));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -265,6 +274,17 @@ async fn run(
                             old.publisher.close().await;
                         }
                     }
+                    ShareCommand::SetQuality(quality) => {
+                        if let Some(source) = &source {
+                            *source.quality.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(quality);
+                            // Viewers wait for the new keyframe; drop the old one.
+                            last_keyframe = None;
+                            for viewer in viewers.values_mut() {
+                                viewer.need_key = true;
+                            }
+                        }
+                    }
                 }
             }
             pumped = next_unit(&mut source) => {
@@ -282,7 +302,20 @@ async fn run(
                                 entry.need_key = false;
                             }
                             // A failed send is a lost packet, not a reason to stop.
-                            let _ = entry.publisher.send_sample(unit.data.clone(), duration).await;
+                            match entry.publisher.send_sample(unit.data.clone(), duration).await {
+                                Ok(()) => {
+                                    sent += 1;
+                                    sent_bytes += unit.data.len();
+                                }
+                                Err(_) => send_errors += 1,
+                            }
+                        }
+                        if stats_at.elapsed() >= Duration::from_secs(5) {
+                            let connected = viewers.values().filter(|v| v.connected).count();
+                            if sent + send_errors > 0 || connected > 0 {
+                                tracing::info!(connected, sent, sent_bytes, send_errors, "screen share, last 5 s");
+                            }
+                            (sent, sent_bytes, send_errors, stats_at) = (0, 0, 0, Instant::now());
                         }
                     }
                     Some(Pumped::Ended) | None => {
@@ -401,7 +434,9 @@ fn capture_source(chosen: CaptureSource, quality: Quality) -> Result<Source, Sha
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
     let keyframe = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
+    let quality_change = Arc::new(std::sync::Mutex::new(None));
     let (wanted, halt) = (Arc::clone(&keyframe), Arc::clone(&stop));
+    let changed = Arc::clone(&quality_change);
     let thread = std::thread::Builder::new()
         .name("screen-capture".into())
         .spawn(move || {
@@ -409,7 +444,7 @@ fn capture_source(chosen: CaptureSource, quality: Quality) -> Result<Source, Sha
                 source: chosen,
                 ..CaptureConfig::default()
             });
-            let capture = match ScreenCapture::start(config) {
+            let mut capture = match ScreenCapture::start(config) {
                 Ok(capture) => capture,
                 Err(error) => {
                     tracing::warn!(%error, "screen capture could not start");
@@ -421,6 +456,9 @@ fn capture_source(chosen: CaptureSource, quality: Quality) -> Result<Source, Sha
             while !halt.load(Ordering::Acquire) {
                 if wanted.swap(false, Ordering::AcqRel) {
                     capture.request_keyframe();
+                }
+                if let Some(quality) = changed.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    capture.set_quality(quality);
                 }
                 match capture.units().recv_timeout(Duration::from_millis(100)) {
                     Ok(unit) => match sender.try_send(Pumped::Unit(unit)) {
@@ -453,6 +491,7 @@ fn capture_source(chosen: CaptureSource, quality: Quality) -> Result<Source, Sha
         Ok(true) => Ok(Source {
             units,
             keyframe,
+            quality: quality_change,
             guard: Some(Box::new(guard)),
         }),
         _ => Err(ShareFailure::Capture),
@@ -506,6 +545,7 @@ mod tests {
         let mut source = Some(Source {
             units: units_rx,
             keyframe: Arc::clone(&keyframe),
+            quality: Default::default(),
             guard: None,
         });
         let worker = ShareWorker::spawn_with(

@@ -151,6 +151,57 @@ fn hardware_candidates() -> Vec<IMFActivate> {
     found
 }
 
+/// The PCI device path a hardware encoder announces (`PCI\VEN_1002&DEV_7590…`).
+/// Not exported by the `windows` crate.
+const MFT_ENUM_HARDWARE_DEVICE_PATH: GUID = GUID::from_u128(0x556155e0_8b27_44ac_8dbf_2547b9bd7112);
+
+/// With two GPUs of one vendor, the other GPU's encoder accepts the capture
+/// device, takes one picture and then goes quiet, so a viewer gets no video.
+/// Keep the encoders whose device path names the capture GPU, or every
+/// encoder when none can be matched.
+fn on_capture_gpu(candidates: Vec<IMFActivate>, device: &ID3D11Device) -> Vec<IMFActivate> {
+    // SAFETY: read-only queries on a live device.
+    let gpu = unsafe {
+        device
+            .cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>()
+            .and_then(|d| d.GetAdapter())
+            .and_then(|a| a.GetDesc())
+            .map(|desc| (desc.VendorId, desc.DeviceId))
+    };
+    let Ok(gpu) = gpu else { return candidates };
+    let paths: Vec<Option<String>> = candidates.iter().map(device_path).collect();
+    keep_matching(candidates, &paths, gpu)
+}
+
+fn device_path(activate: &IMFActivate) -> Option<String> {
+    let mut text = [0u16; 512];
+    let mut len = 0;
+    // SAFETY: the buffer is large enough for a PCI path; a longer one fails.
+    unsafe {
+        activate
+            .GetString(&MFT_ENUM_HARDWARE_DEVICE_PATH, &mut text, Some(&mut len))
+            .ok()?;
+    }
+    Some(String::from_utf16_lossy(&text[..len as usize]))
+}
+
+fn keep_matching<T>(candidates: Vec<T>, paths: &[Option<String>], gpu: (u32, u32)) -> Vec<T> {
+    let wanted = format!("VEN_{:04X}&DEV_{:04X}", gpu.0, gpu.1);
+    let matches = |path: &Option<String>| {
+        path.as_deref()
+            .is_some_and(|p| p.to_ascii_uppercase().contains(&wanted))
+    };
+    if !paths.iter().any(matches) {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .zip(paths)
+        .filter(|(_, path)| matches(path))
+        .map(|(candidate, _)| candidate)
+        .collect()
+}
+
 fn media_type(subtype: &GUID, size: (u32, u32), fps: u32) -> Result<IMFMediaType> {
     // SAFETY: plain attribute writes on a fresh media type.
     unsafe {
@@ -288,7 +339,7 @@ impl H264Encoder {
         bitrate_kbps: u32,
     ) -> Result<Self> {
         let manager = device_manager(device)?;
-        let candidates = hardware_candidates();
+        let candidates = on_capture_gpu(hardware_candidates(), device);
         ensure!(
             !candidates.is_empty(),
             "no hardware H.264 encoder is available on this machine"
@@ -563,5 +614,29 @@ fn configure(
             None
         };
         Ok(Configured { transform, events })
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::keep_matching;
+
+    #[test]
+    fn keeps_only_the_capture_gpus_encoder() {
+        // Seen on a Ryzen with a Radeon card: iGPU first, card second, one untagged.
+        let paths = [
+            Some(r"PCI\VEN_1002&DEV_164E&SUBSYS_88771043&REV_C3\4&1".to_string()),
+            Some(r"PCI\VEN_1002&DEV_7590&SUBSYS_86011EAE&REV_C0\6&3".to_string()),
+            None,
+        ];
+        let picked = keep_matching(vec!["igpu", "card", "untagged"], &paths, (0x1002, 0x7590));
+        assert_eq!(picked, vec!["card"]);
+    }
+
+    #[test]
+    fn keeps_every_encoder_when_none_names_the_gpu() {
+        let paths = [None, Some(r"PCI\VEN_10DE&DEV_2684".to_string())];
+        let picked = keep_matching(vec!["a", "b"], &paths, (0x1002, 0x7590));
+        assert_eq!(picked, vec!["a", "b"]);
     }
 }

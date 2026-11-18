@@ -52,6 +52,9 @@ impl std::fmt::Debug for Action {
             Self::Worker(ShareCommand::RemoveViewer { viewer }) => {
                 write!(f, "Worker(Remove {viewer})")
             }
+            Self::Worker(ShareCommand::SetQuality(quality)) => {
+                write!(f, "Worker(Quality {})", quality.name())
+            }
             Self::CloseWorker => write!(f, "CloseWorker"),
             Self::Publish {
                 state,

@@ -246,6 +246,11 @@ pub enum Command {
     },
     /// Stop sharing.
     ShareStop,
+    /// Changes the running share's quality (`light` … `max`) without
+    /// restarting it.
+    ShareQuality {
+        quality: String,
+    },
     /// Internal: a report from the screen share worker.
     #[serde(skip)]
     ShareWorker(crate::share_media::ShareEvent),
@@ -279,6 +284,7 @@ impl std::fmt::Debug for Command {
             Self::StreamWorker(_) => "StreamWorker",
             Self::ShareStart { .. } => "ShareStart",
             Self::ShareStop => "ShareStop",
+            Self::ShareQuality { .. } => "ShareQuality",
             Self::ShareWorker(_) => "ShareWorker",
             Self::Volume { .. } => "Volume",
             Self::ConnectionInfo { .. } => "ConnectionInfo",
@@ -579,6 +585,9 @@ mod tests {
         ));
         let stop: Command = serde_json::from_str(r#"{"op":"share_stop"}"#).unwrap();
         assert!(matches!(stop, Command::ShareStop));
+        let quality: Command =
+            serde_json::from_str(r#"{"op":"share_quality","quality":"max"}"#).unwrap();
+        assert!(matches!(quality, Command::ShareQuality { quality } if quality == "max"));
         let event = serde_json::to_value(Event::ShareState {
             state: "live",
             reason: None,
