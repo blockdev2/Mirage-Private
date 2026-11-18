@@ -51,6 +51,8 @@ const QUEUE: usize = 8;
 
 struct Flags {
     config: CaptureConfig,
+    /// A new size, rate and bitrate to switch to at the next frame.
+    next: Arc<Mutex<Option<CaptureConfig>>>,
     units: SyncSender<EncodedUnit>,
     keyframe: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -89,6 +91,18 @@ struct Handler {
 
 impl Handler {
     fn frame(&mut self, frame: &mut Frame) -> Result<()> {
+        let next = self
+            .flags
+            .next
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(next) = next {
+            // New quality: rebuild the converter and encoder; the stream
+            // goes on, starting again on a keyframe with new parameter sets.
+            self.flags.config = next;
+            self.pipeline = None;
+        }
         let config = self.flags.config;
         let interval = Duration::from_secs(1) / config.fps;
         if self.last.is_some_and(|at| at.elapsed() < interval) {
@@ -191,6 +205,8 @@ where
 /// A running capture. Dropping it stops the capture.
 pub struct ScreenCapture {
     control: Option<CaptureControl<Handler, anyhow::Error>>,
+    config: CaptureConfig,
+    next: Arc<Mutex<Option<CaptureConfig>>>,
     units: Receiver<EncodedUnit>,
     keyframe: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -207,8 +223,10 @@ impl ScreenCapture {
         let keyframe = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
+        let next = Arc::new(Mutex::new(None));
         let flags = Flags {
             config,
+            next: Arc::clone(&next),
             units: sender,
             keyframe: Arc::clone(&keyframe),
             stop: Arc::clone(&stop),
@@ -233,6 +251,8 @@ impl ScreenCapture {
         };
         Ok(Self {
             control: Some(control),
+            config,
+            next,
             units,
             keyframe,
             stop,
@@ -243,6 +263,13 @@ impl ScreenCapture {
     /// Encoded units, oldest first. Use `recv_timeout`: a still screen is quiet.
     pub fn units(&self) -> &Receiver<EncodedUnit> {
         &self.units
+    }
+
+    /// Switches size, frame rate and bitrate without stopping: the encoder is
+    /// rebuilt at the next frame and the stream continues on a keyframe.
+    pub fn set_quality(&mut self, quality: crate::config::Quality) {
+        self.config = quality.apply(self.config);
+        *self.next.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.config);
     }
 
     /// The next unit will be a keyframe (a viewer joined, a packet was lost).

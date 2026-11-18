@@ -4,6 +4,7 @@
 //! they are given (loopback in tests; the machine's address in real use).
 //! Nothing here logs SDP, ICE candidates or addresses.
 
+use crate::runtime::media_runtime;
 use crate::signal::Signal;
 use anyhow::{anyhow, bail, Context, Result};
 use rtc::interceptor::Registry;
@@ -35,7 +36,6 @@ use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCPeerConnectionIceEvent,
     RTCPeerConnectionState,
 };
-use webrtc::runtime::default_runtime;
 
 /// Pending signals the caller has not collected yet. A peer that outruns its
 /// caller drops candidates instead of growing without bound.
@@ -118,7 +118,7 @@ impl PeerConnectionEventHandler for Shared {
 
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let packets = Arc::clone(&self.packets);
-        let Some(runtime) = default_runtime() else {
+        let Some(runtime) = media_runtime() else {
             return;
         };
         runtime.spawn(Box::pin(async move {
@@ -224,7 +224,7 @@ async fn connect(
     let mut media = media;
     let registry = register_default_interceptors(Registry::new(), &mut media)
         .map_err(|_| anyhow!("cannot register interceptors"))?;
-    let runtime = default_runtime().ok_or_else(|| anyhow!("no async runtime available"))?;
+    let runtime = media_runtime().ok_or_else(|| anyhow!("no async runtime available"))?;
     let connection = PeerConnectionBuilder::new()
         .with_configuration(configuration(bind))
         .with_media_engine(media)

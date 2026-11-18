@@ -718,7 +718,7 @@ async fn session_task(
                 None
             }
             Some(Command::StopWatching) => {
-                let actions = streams.stop();
+                let actions = streams.hide();
                 stream_actions(actions, session.as_mut(), &mut viewer, &events, &internal);
                 None
             }
@@ -771,13 +771,26 @@ async fn session_task(
                 share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
                 None
             }
+            Some(Command::ShareQuality { quality }) => {
+                if let (Some(worker), Some(quality)) =
+                    (sharer.as_ref(), share_media::Quality::from_name(&quality))
+                {
+                    if worker
+                        .send(share_media::ShareCommand::SetQuality(quality))
+                        .is_err()
+                    {
+                        tracing::warn!("screen share queue full; quality unchanged");
+                    }
+                }
+                None
+            }
             Some(Command::ShareStop) => {
                 let actions = share.stop(std::time::Instant::now());
                 share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
                 None
             }
             Some(Command::ShareWorker(report)) => {
-                tracing::info!(?report, "screen share worker");
+                tracing::info!(target: SHARE_LOG, ?report, "screen share worker");
                 let actions = share.on_worker(report, std::time::Instant::now());
                 share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
                 None
@@ -908,6 +921,10 @@ fn publish_share(
     );
 }
 
+/// Share stages logged from this file go under the share target, which the
+/// desktop's default log filter keeps (it drops the rest of `ts6_bridge` info).
+const SHARE_LOG: &str = "ts6_bridge::share_media";
+
 /// Carries out what the share registry decided; like `stream_actions`, server
 /// commands never wait, so voice never waits on stream signaling.
 fn share_actions(
@@ -930,17 +947,19 @@ fn share_actions(
                 // Stages only: no addresses, SDP or candidates are logged.
                 match &command {
                     share_media::ShareCommand::AddViewer { viewer } => {
-                        tracing::info!(viewer, "screen share: a viewer asked to watch")
+                        tracing::info!(target: SHARE_LOG, viewer, "screen share: a viewer asked to watch")
                     }
                     share_media::ShareCommand::Signal { viewer, json } => tracing::info!(
+                        target: SHARE_LOG,
                         viewer,
                         answer = json.contains("\"answer\""),
                         "screen share: signal from the viewer"
                     ),
                     share_media::ShareCommand::RemoveViewer { viewer } => {
-                        tracing::info!(viewer, "screen share: a viewer left")
+                        tracing::info!(target: SHARE_LOG, viewer, "screen share: a viewer left")
                     }
-                    share_media::ShareCommand::Start { .. } => {}
+                    share_media::ShareCommand::Start { .. }
+                    | share_media::ShareCommand::SetQuality(_) => {}
                 }
                 if sharer.is_none() && matches!(command, share_media::ShareCommand::Start { .. }) {
                     *sharer = spawn_sharer(internal);
@@ -962,7 +981,7 @@ fn share_actions(
                 reason,
                 viewers,
             } => {
-                tracing::info!(state, ?reason, viewers, "screen share state");
+                tracing::info!(target: SHARE_LOG, state, ?reason, viewers, "screen share state");
                 publish_share(events, state, reason, viewers)
             }
         }
@@ -1502,6 +1521,7 @@ async fn apply_command(
         | Command::StreamWorker(_)
         | Command::ShareStart { .. }
         | Command::ShareStop
+        | Command::ShareQuality { .. }
         | Command::ShareWorker(_) => {}
 
         Command::Volume { client, volume } => engine.set_volume(client, volume),

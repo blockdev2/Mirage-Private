@@ -13,6 +13,7 @@ tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 rtc = "0.21.1"
 webrtc = "0.21.1"
+socket2 = "0.6"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -33,6 +33,7 @@ impl std::fmt::Debug for Action {
             Self::Worker(WorkerCommand::Offer { .. }) => write!(f, "Worker(Offer)"),
             Self::Worker(WorkerCommand::RemoteIce { .. }) => write!(f, "Worker(RemoteIce)"),
             Self::Worker(WorkerCommand::Close) => write!(f, "Worker(Close)"),
+            Self::Worker(WorkerCommand::Visible(on)) => write!(f, "Worker(Visible {on})"),
             Self::Publish { state, reason, .. } => write!(f, "Publish({state}, {reason:?})"),
         }
     }
@@ -53,6 +54,11 @@ struct Watch {
     stream: Option<String>,
     phase: Phase,
     candidates: usize,
+    /// "Stop watching" only hides a connected stream. The official client
+    /// never accepts a second answer from a viewer that left (every later
+    /// join stays unconnected), so the connection stays up and watching the
+    /// same stream again shows it at once.
+    hidden: bool,
 }
 
 #[derive(Default)]
@@ -163,6 +169,7 @@ impl StreamRegistry {
                     return Vec::new();
                 };
                 let command = value.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
+                tracing::debug!(client, command, "stream signaling received");
                 // The publisher re-offers (new ICE credentials) when the first
                 // attempt does not connect: answer it with a fresh peer.
                 if matches!(command, "offer" | "reconnectOffer") {
@@ -203,6 +210,26 @@ impl StreamRegistry {
     }
 
     pub fn watch(&mut self, client: u16, now: Instant) -> Vec<Action> {
+        if let Some(watch) = self
+            .watch
+            .as_mut()
+            .filter(|w| w.client == client && w.hidden)
+        {
+            watch.hidden = false;
+            let state = if watch.phase == Phase::Playing {
+                "playing"
+            } else {
+                "connecting"
+            };
+            return vec![
+                Action::Worker(WorkerCommand::Visible(true)),
+                Action::Publish {
+                    client,
+                    state,
+                    reason: None,
+                },
+            ];
+        }
         let mut actions = self.stop();
         let stream = self.known.get(&client).cloned();
         match &stream {
@@ -221,6 +248,7 @@ impl StreamRegistry {
             stream,
             phase,
             candidates: 0,
+            hidden: false,
         });
         actions.push(Action::Publish {
             client,
@@ -228,6 +256,18 @@ impl StreamRegistry {
             reason: None,
         });
         actions
+    }
+
+    /// What "stop watching" does: a connected stream is hidden and kept, one
+    /// still connecting is left.
+    pub fn hide(&mut self) -> Vec<Action> {
+        match self.watch.as_mut() {
+            Some(watch) if matches!(watch.phase, Phase::Negotiating | Phase::Playing) => {
+                watch.hidden = true;
+                vec![Action::Worker(WorkerCommand::Visible(false))]
+            }
+            _ => self.stop(),
+        }
     }
 
     /// Leaves the watched stream, if any.
@@ -313,7 +353,8 @@ impl StreamRegistry {
 
     /// Ends the watch with a failure shown to the user.
     fn fail(&mut self, reason: &'static str) -> Vec<Action> {
-        let client = self.watch.as_ref().map(|w| w.client);
+        // A hidden stream fails quietly: nobody is looking at it.
+        let client = self.watch.as_ref().filter(|w| !w.hidden).map(|w| w.client);
         let mut actions = self.stop();
         if let Some(client) = client {
             actions.push(Action::Publish {
@@ -402,6 +443,39 @@ mod tests {
             actions.as_slice(),
             [Action::Worker(WorkerCommand::Offer { stream, sdp })] if stream == "s" && sdp == "v=0"
         ));
+    }
+
+    #[test]
+    fn stopping_hides_and_watching_again_shows_without_a_new_join() {
+        let now = Instant::now();
+        let mut r = negotiating(now);
+        r.on_worker(WorkerEvent::Playing { stream: "s".into() });
+        let hidden = r.hide();
+        assert!(matches!(
+            hidden.as_slice(),
+            [Action::Worker(WorkerCommand::Visible(false))]
+        ));
+        assert!(sends(&hidden, "joinstreamrequest").is_empty(), "no leave");
+        let shown = r.watch(302, now);
+        assert!(sends(&shown, "joinstreamrequest").is_empty(), "no join");
+        assert!(matches!(
+            shown[0],
+            Action::Worker(WorkerCommand::Visible(true))
+        ));
+        assert_eq!(published(&shown), vec![("playing", None)]);
+        // Watching someone else leaves the hidden stream for real.
+        r.hide();
+        r.on_event(&event("notifystreamstarted id=t clid=303"), now);
+        let other = r.watch(303, now);
+        assert!(has_close(&other));
+        let joins = sends(&other, "joinstreamrequest");
+        assert_eq!(arg(joins[0], "is_remove"), "1");
+        assert_eq!(arg(joins[1], "id"), "t");
+        // A stream still connecting is simply left.
+        let mut r = StreamRegistry::default();
+        r.on_event(&event("notifystreamstarted id=s clid=302"), now);
+        r.watch(302, now);
+        assert!(has_close(&r.hide()));
     }
 
     #[test]

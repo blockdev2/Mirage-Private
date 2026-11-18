@@ -22,10 +22,19 @@ pub enum Quality {
     High,
     /// 1080p at 60 fps, 9 Mbit/s: for games, needs a fast uplink.
     Max,
+    /// The screen's own resolution (up to 4K) at 60 fps, 20 Mbit/s: no
+    /// scaling at all, for fast uplinks.
+    Source,
 }
 
 impl Quality {
-    pub const ALL: [Quality; 4] = [Self::Light, Self::Standard, Self::High, Self::Max];
+    pub const ALL: [Quality; 5] = [
+        Self::Light,
+        Self::Standard,
+        Self::High,
+        Self::Max,
+        Self::Source,
+    ];
 
     /// The name on the bridge wire.
     pub fn name(self) -> &'static str {
@@ -34,6 +43,7 @@ impl Quality {
             Self::Standard => "standard",
             Self::High => "high",
             Self::Max => "max",
+            Self::Source => "source",
         }
     }
 
@@ -48,6 +58,7 @@ impl Quality {
             Self::Standard => (1280, 720, 30, 3000),
             Self::High => (1920, 1080, 30, 6000),
             Self::Max => (1920, 1080, 60, 9000),
+            Self::Source => (3840, 2160, 60, 20000),
         };
         CaptureConfig {
             max_width,

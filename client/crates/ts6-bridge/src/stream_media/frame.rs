@@ -56,6 +56,17 @@ impl FrameSlot {
         (inner.sequence > after).then(|| (inner.sequence, frame.clone()))
     }
 
+    /// Like `latest`, but moves the frame out instead of copying it: the view
+    /// uploads it once, and a 1080p copy per frame stalls the window.
+    pub fn take_latest(&self, after: u64) -> Option<(u64, Frame)> {
+        let mut inner = self.lock();
+        if inner.sequence <= after {
+            return None;
+        }
+        let sequence = inner.sequence;
+        inner.frame.take().map(|frame| (sequence, frame))
+    }
+
     /// Ends the current stream: its later frames are ignored.
     pub fn close(&self) {
         let mut inner = self.lock();
@@ -102,6 +113,19 @@ mod tests {
         let (sequence, newest) = slot.latest(0).unwrap();
         assert_eq!(newest.rgba[0], 3);
         assert!(slot.latest(sequence).is_none(), "nothing newer yet");
+    }
+
+    #[test]
+    fn taking_moves_the_newest_frame_out_once() {
+        let slot = FrameSlot::default();
+        let g = slot.open();
+        slot.publish(g, frame(1));
+        slot.publish(g, frame(2));
+        let (sequence, newest) = slot.take_latest(0).unwrap();
+        assert_eq!(newest.rgba[0], 2);
+        assert!(slot.take_latest(0).is_none(), "already taken");
+        slot.publish(g, frame(3));
+        assert_eq!(slot.take_latest(sequence).unwrap().1.rgba[0], 3);
     }
 
     #[test]

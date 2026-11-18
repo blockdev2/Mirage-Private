@@ -46,6 +46,11 @@ enum Internal {
     Failed(u64, FailReason),
 }
 
+/// Whether the watched stream is on screen. Hidden, its connection stays up
+/// (see `StreamRegistry::hide`) but its video is not decoded and its sound is
+/// not played. One stream is watched at a time.
+static VISIBLE: AtomicBool = AtomicBool::new(true);
+
 struct Active {
     stream: String,
     generation: u64,
@@ -63,6 +68,17 @@ pub(super) async fn run(mut commands: Receiver<WorkerCommand>, events: Sender<Wo
             command = commands.recv() => match command {
                 None => break,
                 Some(WorkerCommand::Offer { stream, sdp }) => {
+                    // The official client renegotiates on the live connection
+                    // (an offer moments after the first one). Answering that
+                    // with a new peer drops a working picture for one the
+                    // publisher never accepts, so answer on the same peer.
+                    if let Some(current) = active.as_ref().filter(|a| a.stream == stream) {
+                        if let Some(answer) = renegotiate(&current.peer, &sdp).await {
+                            tracing::info!("stream viewer: renegotiated on the same connection");
+                            let _ = events.try_send(WorkerEvent::Answer { stream, sdp: answer });
+                            continue;
+                        }
+                    }
                     close(&mut active).await;
                     match start(&stream, &sdp, &events, &internal_tx).await {
                         Ok(started) => active = Some(started),
@@ -73,12 +89,20 @@ pub(super) async fn run(mut commands: Receiver<WorkerCommand>, events: Sender<Wo
                     if let Some(current) = active.as_mut().filter(|a| a.stream == stream) {
                         if current.remote_candidates < MAX_REMOTE_CANDIDATES {
                             current.remote_candidates += 1;
-                            if let Some(init) = parse_candidate(&json) {
-                                let _ = current.peer.add_ice_candidate(init).await;
-                            }
+                            // Counts only: candidates hold addresses, never logged.
+                            let applied = match parse_candidate(&json) {
+                                Some(init) => current.peer.add_ice_candidate(init).await.is_ok(),
+                                None => false,
+                            };
+                            tracing::debug!(
+                                applied,
+                                count = current.remote_candidates,
+                                "stream viewer: remote candidate"
+                            );
                         }
                     }
                 }
+                Some(WorkerCommand::Visible(on)) => VISIBLE.store(on, Ordering::Relaxed),
                 Some(WorkerCommand::Close) => close(&mut active).await,
             },
             Some(notice) = internal.recv() => {
@@ -106,6 +130,20 @@ pub(super) async fn run(mut commands: Receiver<WorkerCommand>, events: Sender<Wo
         }
     }
     close(&mut active).await;
+}
+
+/// Our answer to a new offer on an existing connection, shaped like the first
+/// one; `None` when the peer refuses it (then a fresh peer is made).
+async fn renegotiate(peer: &Arc<dyn PeerConnection>, sdp: &str) -> Option<String> {
+    check_offer(sdp).ok()?;
+    peer.set_remote_description(RTCSessionDescription::offer(sdp.to_owned()).ok()?)
+        .await
+        .ok()?;
+    let answer = peer.create_answer(None).await.ok()?;
+    peer.set_local_description(answer).await.ok()?;
+    let answer = peer.local_description().await?;
+    let (level, version) = ts6_stream::next_level();
+    Some(ts6_stream::shape(&answer.sdp, level, version))
 }
 
 async fn sleep_until(deadline: Option<tokio::time::Instant>) {
@@ -188,7 +226,7 @@ async fn start(
     internal: &UnboundedSender<Internal>,
 ) -> Result<Active, FailReason> {
     check_offer(sdp).map_err(|_| FailReason::Unsupported)?;
-    let runtime = webrtc::runtime::default_runtime().ok_or(FailReason::Network)?;
+    let runtime = ts6_stream::media_runtime().ok_or(FailReason::Network)?;
     let mut engine = MediaEngine::default();
     // High (what the official client offers) and constrained baseline.
     for (profile, payload_type) in [("640c1f", 102), ("42e01f", 125)] {
@@ -219,6 +257,7 @@ async fn start(
     let keyframe = Arc::new(AtomicBool::new(false));
     let decode = spawn_decoder(generation, internal.clone(), Arc::clone(&keyframe))
         .map_err(|_| FailReason::NoDecoder)?;
+    VISIBLE.store(true, Ordering::Relaxed);
     let handler = Arc::new(Viewer {
         stream: stream.to_owned(),
         generation,
@@ -401,6 +440,8 @@ impl PeerConnectionEventHandler for Viewer {
         self.runtime.spawn(Box::pin(async move {
             let mut builder = new_sample_builder();
             let mut waiting_key = true;
+            // Frames were lost: a keyframe is wanted, but frames keep flowing.
+            let mut repair = false;
             let mut last_pli: Option<Instant> = None;
             let mut fir_sequence = 0u8;
             // Counters for the 5 s log line: where a freeze happens.
@@ -431,24 +472,33 @@ impl PeerConnectionEventHandler for Viewer {
                     since = now;
                 }
                 builder.push(now, packet);
+                let visible = VISIBLE.load(Ordering::Relaxed);
                 while let Some(sample) = builder.pop(now) {
                     samples += 1;
+                    if !visible {
+                        // Shown again later: start on a fresh keyframe.
+                        waiting_key = true;
+                        continue;
+                    }
                     dropped += u32::from(sample.prev_dropped_packets);
                     if keyframe.swap(false, Ordering::Relaxed) {
                         waiting_key = true;
                     }
-                    // Lost packets that retransmission did not recover leave
-                    // later frames referencing missing data: wait for a keyframe
-                    // instead of showing a frozen or smeared picture.
+                    // A loss that retransmission did not recover: keep decoding
+                    // (the decoder conceals the damage for a moment, as browsers
+                    // do) and ask for a keyframe. Holding every frame until the
+                    // next keyframe froze busy streams most of the time.
                     if sample.prev_dropped_packets > 0 {
-                        waiting_key = true;
+                        repair = true;
                     }
                     if waiting_key && !is_keyframe(&sample.data) {
                         skipped += 1;
                         continue;
                     }
-                    keys += u32::from(is_keyframe(&sample.data));
+                    let key = is_keyframe(&sample.data);
+                    keys += u32::from(key);
                     waiting_key = false;
+                    repair &= !key;
                     match decode.try_send(sample.data.to_vec()) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
@@ -458,7 +508,10 @@ impl PeerConnectionEventHandler for Viewer {
                         Err(TrySendError::Disconnected(_)) => return,
                     }
                 }
-                if waiting_key && last_pli.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                if visible
+                    && (waiting_key || repair)
+                    && last_pli.is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+                {
                     last_pli = Some(now);
                     let pli = PictureLossIndication {
                         sender_ssrc: 0,
@@ -497,6 +550,11 @@ async fn play_audio(track: Arc<dyn TrackRemote>) {
             TrackRemoteEvent::OnEnded => break,
             _ => continue,
         };
+        if !VISIBLE.load(Ordering::Relaxed) {
+            // Hidden: silent, and no concealment for the gap when shown again.
+            last = None;
+            continue;
+        }
         let seq = packet.header.sequence_number;
         // Skip late or duplicate packets; conceal a short gap (up to 3 packets).
         if let Some(previous) = last {
