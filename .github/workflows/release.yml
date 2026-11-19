@@ -91,7 +91,7 @@ jobs:
           $env:GH_TOKEN = $env:RELEASES_TOKEN
           gh release upload $env:TAG (Get-ChildItem dist/installer -Filter '*.sha256').FullName --repo $env:RELEASES_REPO --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed with exit code $LASTEXITCODE" }
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Mirage-installer-${{ env.VERSION }}
           path: dist/installer/*
