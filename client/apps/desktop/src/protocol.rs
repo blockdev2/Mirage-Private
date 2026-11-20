@@ -286,6 +286,11 @@ pub enum Command {
     Nick {
         name: String,
     },
+    /// Sends our voice to these people only; empty goes back to the channel.
+    Whisper {
+        clients: Vec<u16>,
+        channels: Vec<u64>,
+    },
     /// Marks us away or present again.
     Away {
         away: bool,

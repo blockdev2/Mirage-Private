@@ -99,6 +99,38 @@ pub struct OwnNetwork {
     pub counted_packets: u64,
 }
 
+/// Who our voice goes to instead of the channel: the people and channels of a
+/// whisper. Empty lists are not a target (that is "no whisper").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WhisperTarget {
+    pub clients: Vec<u16>,
+    pub channels: Vec<u64>,
+}
+
+/// The packet header counts each list in one byte; this is far below it, and
+/// far above what a person picks by hand.
+const WHISPER_CLIENTS_MAX: usize = 64;
+const WHISPER_CHANNELS_MAX: usize = 16;
+
+impl WhisperTarget {
+    /// Removes repeats and refuses an empty or oversized target.
+    pub fn checked(mut self) -> Result<Self, String> {
+        self.clients.sort_unstable();
+        self.clients.dedup();
+        self.channels.sort_unstable();
+        self.channels.dedup();
+        if self.clients.is_empty() && self.channels.is_empty() {
+            return Err("a whisper needs at least one person or channel".into());
+        }
+        if self.clients.len() > WHISPER_CLIENTS_MAX || self.channels.len() > WHISPER_CHANNELS_MAX {
+            return Err(format!(
+                "a whisper takes at most {WHISPER_CLIENTS_MAX} people and {WHISPER_CHANNELS_MAX} channels"
+            ));
+        }
+        Ok(self)
+    }
+}
+
 pub struct Session {
     session_id: String,
     con: Connection,
@@ -107,6 +139,8 @@ pub struct Session {
     pending: VecDeque<Item>,
     /// Voice frames handed to the transport so far (surfaced to the UI).
     audio_frames_sent: u64,
+    /// While set, captured voice goes to these targets, not to the channel.
+    whisper: Option<WhisperTarget>,
     /// Why the connection ended, once it has (kick, ban, timeout, shutdown).
     end_reason: Option<String>,
 }
@@ -150,6 +184,7 @@ impl Session {
             config,
             pending: VecDeque::new(),
             audio_frames_sent: 0,
+            whisper: None,
             end_reason: None,
         };
         session.wait_synced().await?;
@@ -428,13 +463,7 @@ impl Session {
                 for _ in 0..8 {
                     match mic.poll_recv(cx) {
                         Poll::Ready(Some(payload)) => {
-                            let packet = tsproto_packets::packets::OutAudio::new(
-                                &tsproto_packets::packets::AudioData::C2S {
-                                    id: 0,
-                                    codec: tsproto_packets::packets::CodecType::OpusVoice,
-                                    data: &payload,
-                                },
-                            );
+                            let packet = voice_packet(self.whisper.as_ref(), &payload);
                             match self.con.send_audio(packet) {
                                 Ok(()) => {
                                     self.audio_frames_sent += 1;
@@ -750,6 +779,18 @@ impl Session {
             ],
         )
         .await
+    }
+
+    /// Sends our voice to these people and channels only (`None`: back to the
+    /// channel). The server decides whether we may whisper.
+    pub fn set_whisper(&mut self, target: Option<WhisperTarget>) -> Result<(), String> {
+        self.whisper = target.map(WhisperTarget::checked).transpose()?;
+        Ok(())
+    }
+
+    /// The current whisper target, if any.
+    pub fn whisper(&self) -> Option<&WhisperTarget> {
+        self.whisper.as_ref()
     }
 
     /// Voice frames handed to the transport so far (for the UI counters).
@@ -1119,5 +1160,60 @@ mod chat_tests {
             messages[2].target,
             tsclientlib::MessageTarget::Client(tsclientlib::ClientId(42))
         );
+    }
+}
+
+/// One encoded voice frame as a packet: for the channel, or a whisper.
+fn voice_packet(whisper: Option<&WhisperTarget>, payload: &[u8]) -> OutPacket {
+    use tsproto_packets::packets::{AudioData, CodecType, OutAudio};
+    let codec = CodecType::OpusVoice;
+    OutAudio::new(&match whisper {
+        Some(target) => AudioData::C2SWhisper {
+            id: 0,
+            codec,
+            channels: target.channels.clone(),
+            clients: target.clients.clone(),
+            data: payload,
+        },
+        None => AudioData::C2S {
+            id: 0,
+            codec,
+            data: payload,
+        },
+    })
+}
+
+#[cfg(test)]
+mod whisper_tests {
+    use super::*;
+    use tsproto_packets::packets::PacketType;
+
+    #[test]
+    fn a_whisper_target_is_deduplicated_and_bounded() {
+        let target = WhisperTarget {
+            clients: vec![7, 3, 7],
+            channels: vec![],
+        }
+        .checked()
+        .unwrap();
+        assert_eq!(target.clients, vec![3, 7]);
+        assert!(WhisperTarget::default().checked().is_err());
+        let many = WhisperTarget {
+            clients: (0..=WHISPER_CLIENTS_MAX as u16).collect(),
+            channels: vec![],
+        };
+        assert!(many.checked().is_err());
+    }
+
+    #[test]
+    fn voice_goes_as_a_whisper_packet_only_with_a_target() {
+        let target = WhisperTarget {
+            clients: vec![4],
+            channels: vec![],
+        };
+        let whisper = voice_packet(Some(&target), &[1, 2, 3]);
+        assert_eq!(whisper.header().packet_type(), PacketType::VoiceWhisper);
+        let plain = voice_packet(None, &[1, 2, 3]);
+        assert_eq!(plain.header().packet_type(), PacketType::Voice);
     }
 }

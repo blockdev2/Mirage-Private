@@ -138,6 +138,14 @@ pub enum Command {
         #[serde(default)]
         message: Option<String>,
     },
+    /// Sends our voice to these people and channels only; both lists empty
+    /// goes back to the channel. Lasts until changed or the session ends.
+    Whisper {
+        #[serde(default)]
+        clients: Vec<u16>,
+        #[serde(default)]
+        channels: Vec<u64>,
+    },
     Mute {
         #[serde(default)]
         input: Option<bool>,
@@ -267,6 +275,7 @@ impl std::fmt::Debug for Command {
             Self::Join { .. } => "Join",
             Self::Nick { .. } => "Nick",
             Self::Away { .. } => "Away",
+            Self::Whisper { .. } => "Whisper",
             Self::Mute { .. } => "Mute",
             Self::Audio { .. } => "Audio",
             Self::Devices => "Devices",
@@ -651,6 +660,21 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn whisper_takes_people_and_channels_and_defaults_to_none() {
+        match serde_json::from_str(r#"{"op":"whisper","clients":[3,5]}"#).unwrap() {
+            Command::Whisper { clients, channels } => {
+                assert_eq!(clients, vec![3, 5]);
+                assert!(channels.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(matches!(
+            serde_json::from_str(r#"{"op":"whisper"}"#).unwrap(),
+            Command::Whisper { clients, channels } if clients.is_empty() && channels.is_empty()
+        ));
     }
 
     #[test]

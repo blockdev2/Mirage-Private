@@ -253,6 +253,8 @@ pub struct App {
     dm_notice: Option<DmNotice>,
     /// Private messages not read yet: who (client id), their name, how many.
     dm_unread: Vec<(u16, String, u32)>,
+    /// People our voice goes to instead of the channel; empty when normal.
+    whisper: Vec<u16>,
     /// Trying to get back to a server whose connection was lost.
     reconnect: Option<reconnect::Reconnect>,
     /// Set while the reconnection itself starts a connection.
@@ -389,6 +391,7 @@ impl App {
             chat_to: ChatTo::Channel,
             dm_notice: None,
             dm_unread: Vec::new(),
+            whisper: Vec::new(),
             reconnect: None,
             auto_connecting: false,
             rejoin: None,
@@ -515,6 +518,8 @@ impl App {
                     self.chat_to = ChatTo::Channel;
                     self.dm_notice = None;
                     self.dm_unread.clear();
+                    // A new session starts in the channel.
+                    self.whisper.clear();
                     // A failed attempt must not be recorded as a connection.
                     if status.error.is_some() || self.status.connected {
                         self.pending = None;
@@ -974,6 +979,7 @@ impl eframe::App for App {
         self.dm_toast(&ctx);
         self.reconnect_tick(&ctx);
         self.idle_tick(&ctx);
+        self.whisper_sync();
     }
 }
 
@@ -1369,6 +1375,42 @@ impl App {
             speaking,
         );
         response
+    }
+
+    /// Adds a person to the whisper, or takes them off; tells the bridge.
+    pub(super) fn toggle_whisper(&mut self, id: u16) {
+        match self.whisper.iter().position(|w| *w == id) {
+            Some(at) => {
+                self.whisper.remove(at);
+            }
+            None => self.whisper.push(id),
+        }
+        self.send_whisper();
+    }
+
+    fn send_whisper(&mut self) {
+        self.send(Command::Whisper {
+            clients: self.whisper.clone(),
+            channels: Vec::new(),
+        });
+    }
+
+    /// Anyone who left the server is taken off the whisper, so a forgotten
+    /// whisper cannot go on after its people are gone (the last one leaving
+    /// puts the voice back in the channel).
+    fn whisper_sync(&mut self) {
+        if self.whisper.is_empty() {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_ref().filter(|_| self.in_session()) else {
+            return;
+        };
+        let before = self.whisper.len();
+        self.whisper
+            .retain(|id| snapshot.clients.iter().any(|c| c.id == *id && !c.is_self));
+        if self.whisper.len() != before {
+            self.send_whisper();
+        }
     }
 
     /// Goes away after a while without input and comes back with the first
@@ -2066,7 +2108,10 @@ impl App {
     /// under the participants.
     fn call_controls(&mut self, ui: &mut egui::Ui) {
         let t = self.t;
-        let total = 5.0 * CONTROL_SIZE + 4.0 * CONTROL_GAP;
+        let whispering = !self.whisper.is_empty();
+        let count = if whispering { 6.0 } else { 5.0 };
+        let total = count * CONTROL_SIZE + (count - 1.0) * CONTROL_GAP;
+        let mut stop_whisper = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = CONTROL_GAP;
             ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
@@ -2100,6 +2145,20 @@ impl App {
                 self.send_mute();
             }
 
+            if whispering {
+                let names: Vec<&str> = self
+                    .snapshot
+                    .iter()
+                    .flat_map(|s| s.clients.iter())
+                    .filter(|c| self.whisper.contains(&c.id))
+                    .map(|c| c.name.as_str())
+                    .collect();
+                let label = format!("{} {}", t.whisper_active, names.join(", "));
+                if theme::icon_button(ui, icon::SPEAKER_LOW, &label, true, CONTROL_SIZE).clicked() {
+                    stop_whisper = true;
+                }
+            }
+
             self.share_button(ui, CONTROL_SIZE);
 
             if theme::icon_button(ui, icon::DOTS_THREE, t.more_options, false, CONTROL_SIZE)
@@ -2114,6 +2173,10 @@ impl App {
                 self.send(Command::Disconnect);
             }
         });
+        if stop_whisper {
+            self.whisper.clear();
+            self.send_whisper();
+        }
     }
 
     /// Chat under the participants: heading, scrolling history, composer.

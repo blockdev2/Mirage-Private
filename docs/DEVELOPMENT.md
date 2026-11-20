@@ -223,6 +223,10 @@ so the real profile is untouched, and only a loopback test server.
 ## Server administration check
 
 `python scripts/check_admin.py --binary <ts6-bridge.exe> --server-port PORT --token-file key.txt`
+
+## Whisper check
+
+`python scripts/check_whisper.py --binary <ts6-bridge.exe> --server-port PORT` joins three bridges to a throwaway server and checks that a tone goes to the channel, then only to the whisper target, then to the channel again. It plays the tone through the computer's speakers for about 25 seconds.
 needs a throwaway TS6 server with a fresh database (start it from a copy of
 the server archive in an ignored folder; its first `ServerAdmin` privilege key
 is in its log) and drives two bridges: a plain client is refused, the key is
