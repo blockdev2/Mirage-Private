@@ -117,6 +117,12 @@ def main():
                 c["id"] == guest_clid and c["channel_group"] == wanted for c in e["snapshot"]["clients"]))
         print("PASS: a person's channel group was set and shown in the snapshot")
 
+        expect(admin(boss, "client_set_permission", db_id=guest_row["db_id"], permission="i_client_talk_power", value=33), what="client_set_permission")
+        rows = expect(admin(boss, "client_permissions", db_id=guest_row["db_id"]), what="client_permissions")
+        assert any("i_client_talk_power" in r.values() and r.get("permvalue") == "33" for r in rows), rows
+        expect(admin(boss, "client_remove_permission", db_id=guest_row["db_id"], permission="i_client_talk_power"), what="client_remove_permission")
+        print("PASS: a permission was set on a person, listed and removed")
+
         made = admin(boss, "server_group_create", name="Grupo do teste")
         if made["ok"]:
             row = next(r for r in expect(admin(boss, "server_groups"), what="groups") if r.get("name") == "Grupo do teste")
