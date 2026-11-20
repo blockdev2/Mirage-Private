@@ -114,6 +114,7 @@ impl App {
         let mut moderation: Option<super::admin::AdminDialog> = None;
         let mut write_to: Option<u16> = None;
         let mut groups_of: Option<(u64, String)> = None;
+        let mut channel_group_of: Option<(u64, String, u64)> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -220,6 +221,13 @@ impl App {
                         groups_of = Some((client.db_id, client.name.clone()));
                         ui.close();
                     }
+                    if client.db_id != 0
+                        && menu_item(ui, icon::USER_PLUS, "Grupo no canal").clicked()
+                    {
+                        channel_group_of =
+                            Some((client.db_id, client.name.clone(), client.channel_id));
+                        ui.close();
+                    }
                     ui.add_space(2.0);
                     ui.separator();
                     moderation = moderation_items(ui, client);
@@ -230,6 +238,9 @@ impl App {
         }
         if let Some((db_id, name)) = groups_of {
             self.open_memberships(db_id, name);
+        }
+        if let Some((db_id, name, channel)) = channel_group_of {
+            self.open_channel_group(db_id, name, channel);
         }
         if let Some(id) = write_to {
             self.chat_to = super::chat::Target::Person(id);

@@ -618,6 +618,15 @@ mod tests {
     }
 
     #[test]
+    fn a_persons_channel_group_is_set_per_channel() {
+        let set = op(r#"{"action":"set_channel_group","group":5,"channel":4,"db_id":7}"#)
+            .request()
+            .unwrap();
+        assert_eq!(set.name, "setclientchannelgroup");
+        assert_eq!(arg(&set, "cgid"), Some("5"));
+    }
+
+    #[test]
     fn kick_picks_the_reason_id_for_channel_or_server() {
         let channel = op(r#"{"action":"kick","client":5,"reason":"calma"}"#)
             .request()
