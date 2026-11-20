@@ -218,7 +218,7 @@ e.g. 1.25 at 125%). To see a share, run a second bridge that shares (a small
 script on `check_channel_chat.Peer` with `share_start`) and use `watch`.
 `MIRAGE_DEV_OUT` is the folder for the screenshots. Use an isolated `APPDATA`
 so the real profile is untouched, and only a loopback test server.
-The code is compiled out of release builds.
+`MIRAGE_DEV_IDLE_FILE` names a file holding the idle time in whole seconds; the automatic away reads it instead of the system's input idle time, so it can be driven by writing to the file (set `idle_away_minutes` in the isolated profile's `profiles.json` first). The code is compiled out of release builds.
 
 ## Server administration check
 
