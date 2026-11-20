@@ -11,8 +11,21 @@ pub const CHECK_EVERY: Duration = Duration::from_secs(5);
 pub const CHOICES: [u32; 5] = [0, 5, 10, 15, 30];
 
 /// How long since the last keyboard or mouse input anywhere on the computer.
-#[cfg(windows)]
+///
+/// Debug builds can read it from a file instead (`MIRAGE_DEV_IDLE_FILE`, whole
+/// seconds), so the whole away path is testable without leaving the computer
+/// alone; release builds never look at it.
 pub fn idle_time() -> Option<Duration> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("MIRAGE_DEV_IDLE_FILE") {
+        let secs = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+        return Some(Duration::from_secs(secs));
+    }
+    system_idle_time()
+}
+
+#[cfg(windows)]
+fn system_idle_time() -> Option<Duration> {
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     let mut info = LASTINPUTINFO {
@@ -29,7 +42,7 @@ pub fn idle_time() -> Option<Duration> {
 }
 
 #[cfg(not(windows))]
-pub fn idle_time() -> Option<Duration> {
+fn system_idle_time() -> Option<Duration> {
     None
 }
 
