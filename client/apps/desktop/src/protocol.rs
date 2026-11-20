@@ -53,6 +53,9 @@ pub struct ClientInfo {
     /// Marked away; older bridges do not send it.
     #[serde(default)]
     pub away: bool,
+    /// What they wrote when going away; older bridges do not send it.
+    #[serde(default)]
+    pub away_message: Option<String>,
     /// The server's database id (group operations); 0 when unknown.
     #[serde(default)]
     pub db_id: u64,

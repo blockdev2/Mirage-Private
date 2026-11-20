@@ -1305,7 +1305,11 @@ impl App {
     }
 
     fn member_row(&mut self, ui: &mut egui::Ui, client: &ClientInfo, depth: usize) {
-        let row = self.member_row_inner(ui, client, depth);
+        let mut row = self.member_row_inner(ui, client, depth);
+        // The row cuts long text short; the tooltip has the whole message.
+        if let Some(text) = client.away_message.as_deref().filter(|_| client.away) {
+            row = row.on_hover_text(format!("{}: {text}", self.t.status_away));
+        }
         self.peer_menu(&row, client);
     }
 
@@ -1329,7 +1333,8 @@ impl App {
             theme::TEXT_2
         };
         let shown = if client.away {
-            format!("{} ({})", client.name, self.t.status_away.to_lowercase())
+            let status = self.t.status_away.to_lowercase();
+            format!("{} ({status})", client.name)
         } else {
             client.name.clone()
         };
@@ -1884,8 +1889,26 @@ impl App {
         );
 
         let baseline = rect.bottom() - 14.0;
-        let you = client.is_self.then(|| {
-            painter.layout_no_wrap(t.you.to_string(), FontId::proportional(12.0), theme::TEXT_3)
+        let mut tag = Vec::new();
+        if client.is_self {
+            tag.push(t.you.to_string());
+        }
+        if client.away {
+            let status = t.status_away.to_lowercase();
+            tag.push(match &client.away_message {
+                Some(text) => format!("{status}: {text}"),
+                None => status,
+            });
+        }
+        // Long away messages give way (ellipsis) so the name keeps its room.
+        let you = (!tag.is_empty()).then(|| {
+            theme::fit_text(
+                painter,
+                &tag.join(", "),
+                FontId::proportional(12.0),
+                theme::TEXT_3,
+                width * 0.45,
+            )
         });
         // Name, "Você" and the microphone icon share the bottom row. The name
         // gives way (with an ellipsis) so they can never overlap.

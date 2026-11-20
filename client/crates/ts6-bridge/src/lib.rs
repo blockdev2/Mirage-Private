@@ -1847,6 +1847,7 @@ mod cue_tests {
                     myteamspeak_avatar: None,
                     is_streaming: false,
                     away: false,
+                    away_message: None,
                     db_id: 0,
                 })
                 .collect(),

@@ -56,6 +56,8 @@ pub struct ClientInfo {
     pub is_streaming: bool,
     /// Marked away (the status "ausente"/"away"), with or without a message.
     pub away: bool,
+    /// The text the client left when going away; `None` without one.
+    pub away_message: Option<String>,
     /// The server's database id of this client (what group and permission
     /// operations take); 0 when the server has not told us.
     pub db_id: u64,
@@ -130,6 +132,12 @@ impl Snapshot {
                     .and_then(crate::media::myteamspeak_avatar_url),
                 is_streaming: c.is_streaming.unwrap_or(false),
                 away: c.away_message.is_some(),
+                away_message: c
+                    .away_message
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string),
                 db_id: c.database_id.0,
             })
             .collect();
@@ -246,6 +254,7 @@ mod tests {
             myteamspeak_avatar: None,
             is_streaming: true,
             away: false,
+            away_message: None,
             db_id: 0,
         };
         let json = serde_json::to_value(&client).unwrap();

@@ -90,6 +90,22 @@ def main():
         room = b.until(lambda e: e.get("ev") == "chat" and e["text"] == "no canal")
         assert room["scope"] == "channel" and room["channel"] == channel, room
         print("PASS: a channel message still carries its channel")
+
+        def bob_as_seen_by_alice(event):
+            if event.get("ev") != "state":
+                return None
+            return next((c for c in event["snapshot"]["clients"] if c["id"] == id_b), None)
+
+        b.send({"op": "away", "away": True, "message": "volto logo"})
+        seen = a.until(lambda e: (c := bob_as_seen_by_alice(e)) is not None and c["away"])
+        away_bob = bob_as_seen_by_alice(seen)
+        assert away_bob["away_message"] == "volto logo", away_bob
+        # Going away again without text would keep the old text: come back first.
+        b.send({"op": "away", "away": False})
+        a.until(lambda e: (c := bob_as_seen_by_alice(e)) is not None and not c["away"])
+        b.send({"op": "away", "away": True})
+        a.until(lambda e: (c := bob_as_seen_by_alice(e)) is not None and c["away"] and c["away_message"] is None)
+        print("PASS: an away message reaches the others; away without text has none")
         return 0
     finally:
         for child in children:
