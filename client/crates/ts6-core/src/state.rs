@@ -58,6 +58,8 @@ pub struct ClientInfo {
     pub away: bool,
     /// The text the client left when going away; `None` without one.
     pub away_message: Option<String>,
+    /// The channel group this client has in the channel it is in; 0 unknown.
+    pub channel_group: u64,
     /// The server's database id of this client (what group and permission
     /// operations take); 0 when the server has not told us.
     pub db_id: u64,
@@ -138,6 +140,7 @@ impl Snapshot {
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                     .map(str::to_string),
+                channel_group: c.channel_group.0,
                 db_id: c.database_id.0,
             })
             .collect();
@@ -255,6 +258,7 @@ mod tests {
             is_streaming: true,
             away: false,
             away_message: None,
+            channel_group: 0,
             db_id: 0,
         };
         let json = serde_json::to_value(&client).unwrap();

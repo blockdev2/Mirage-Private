@@ -1848,6 +1848,7 @@ mod cue_tests {
                     is_streaming: false,
                     away: false,
                     away_message: None,
+                    channel_group: 0,
                     db_id: 0,
                 })
                 .collect(),

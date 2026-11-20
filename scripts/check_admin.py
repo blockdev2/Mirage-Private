@@ -102,6 +102,21 @@ def main():
         boss.until(lambda e: e.get("ev") == "state" and not any(c["id"] == channel["id"] for c in e["snapshot"]["channels"]))
         print("PASS: a client was moved and poked, then the channel was deleted")
 
+        # The guest was moved out of the deleted channel; read where it is now.
+        state = boss.until(lambda e: e.get("ev") == "state" and any(
+            c["id"] == guest_clid and c["db_id"] and c["channel_id"] != channel["id"]
+            for c in e["snapshot"]["clients"]))
+        guest_row = next(c for c in state["snapshot"]["clients"] if c["id"] == guest_clid)
+        regular = [r for r in expect(admin(boss, "channel_groups"), what="channel_groups") if r.get("type") == "1"]
+        assert len(regular) >= 2, regular
+        for row in regular[:2]:
+            wanted = int(row["cgid"])
+            expect(admin(boss, "set_channel_group", group=wanted, channel=guest_row["channel_id"], db_id=guest_row["db_id"]), what="set_channel_group")
+            # The server announces the change; the snapshot carries it.
+            boss.until(lambda e: e.get("ev") == "state" and any(
+                c["id"] == guest_clid and c["channel_group"] == wanted for c in e["snapshot"]["clients"]))
+        print("PASS: a person's channel group was set and shown in the snapshot")
+
         made = admin(boss, "server_group_create", name="Grupo do teste")
         if made["ok"]:
             row = next(r for r in expect(admin(boss, "server_groups"), what="groups") if r.get("name") == "Grupo do teste")

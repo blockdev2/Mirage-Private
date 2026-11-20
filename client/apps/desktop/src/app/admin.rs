@@ -51,9 +51,19 @@ pub(super) enum Purpose {
     PersonGroups(u64),
     /// Say this, then read the person's groups again.
     MemberChanged(u64, &'static str),
+    /// The channel groups, for a person's channel group dialog.
+    ChannelGroupList,
 }
 
 pub(super) enum AdminDialog {
+    /// The channel group one person has in the channel they are in: one is
+    /// chosen at a time.
+    ChannelGroup {
+        db_id: u64,
+        name: String,
+        channel: u64,
+        groups: Vec<Row>,
+    },
     /// The server groups one person belongs to, each with a check box.
     Memberships {
         db_id: u64,
@@ -247,6 +257,7 @@ impl App {
                 | Purpose::Bans
                 | Purpose::DialogGroups
                 | Purpose::PersonGroups(_)
+                | Purpose::ChannelGroupList
                     if empty_list =>
                 {
                     self.fill(purpose, Vec::new());
@@ -279,6 +290,17 @@ impl App {
             }
             other => self.fill(other, rows),
         }
+    }
+
+    /// Opens the channel group dialog of one person in their channel.
+    pub(super) fn open_channel_group(&mut self, db_id: u64, name: String, channel: u64) {
+        self.admin.dialog = Some(AdminDialog::ChannelGroup {
+            db_id,
+            name,
+            channel,
+            groups: Vec::new(),
+        });
+        self.admin_send(Purpose::ChannelGroupList, "channel_groups", json!({}));
     }
 
     /// Opens the group dialog of one person and asks for what it shows.
@@ -358,6 +380,15 @@ impl App {
                     if *open == db_id {
                         *member = Some(rows.iter().filter_map(|g| number(g, "sgid")).collect());
                     }
+                }
+            }
+            Purpose::ChannelGroupList => {
+                if let Some(AdminDialog::ChannelGroup { groups, .. }) = self.admin.dialog.as_mut() {
+                    *groups = rows
+                        .into_iter()
+                        .filter(|g| g.get("type").is_none_or(|t| t == "1"))
+                        .collect();
+                    groups.sort_by_key(|g| number(g, "sortid").unwrap_or(0));
                 }
             }
             Purpose::Done(_)
@@ -484,6 +515,53 @@ impl App {
         let mut send: Option<(Purpose, &'static str, Value)> = None;
         let mut join: Option<(u64, String)> = None;
         match &mut dialog {
+            AdminDialog::ChannelGroup {
+                db_id,
+                name,
+                channel,
+                groups,
+            } => {
+                // The server tells everyone a person's group in their channel, so
+                // the choice follows the snapshot: a change shows up by itself.
+                let current = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.clients.iter().find(|c| c.db_id == *db_id))
+                    .map(|c| c.channel_group);
+                dialog_window(ctx, &format!("Grupo de {name} no canal"), |ui| {
+                    ui.set_min_width(300.0);
+                    if groups.is_empty() {
+                        ui.label(RichText::new("Carregando…").color(theme::TEXT_3));
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for group in groups.iter() {
+                                let (Some(id), label) =
+                                    (number(group, "cgid"), field(group, "name"))
+                                else {
+                                    continue;
+                                };
+                                let chosen = current == Some(id);
+                                if ui.radio(chosen, label).clicked() && !chosen {
+                                    send = Some((
+                                        Purpose::Done("Grupo no canal alterado."),
+                                        "set_channel_group",
+                                        json!({
+                                            "group": id,
+                                            "channel": *channel,
+                                            "db_id": *db_id,
+                                        }),
+                                    ));
+                                }
+                            }
+                        });
+                    ui.add_space(12.0);
+                    if theme::button(ui, "Fechar", None, Tone::Secondary, 110.0).clicked() {
+                        keep = false;
+                    }
+                });
+            }
             AdminDialog::Memberships {
                 db_id,
                 name,
