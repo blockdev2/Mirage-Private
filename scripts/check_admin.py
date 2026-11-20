@@ -130,6 +130,23 @@ def main():
         else:
             print("INFO: creating a group refused:", made["error"])
 
+        made = admin(boss, "channel_group_create", name="Grupo de canal do teste")
+        if made["ok"]:
+            row = next(r for r in expect(admin(boss, "channel_groups"), what="channel groups") if r.get("name") == "Grupo de canal do teste")
+            assert row.get("type") == "1", row
+            cgid = int(row["cgid"])
+            expect(admin(boss, "channel_group_rename", group=cgid, name="Grupo de canal renomeado"), what="rename")
+            assert any(r.get("name") == "Grupo de canal renomeado" for r in expect(admin(boss, "channel_groups"), what="channel groups"))
+            expect(admin(boss, "channel_group_set_permission", group=cgid, permission="i_channel_needed_modify_power", value=50), what="set channel group perm")
+            rows = expect(admin(boss, "channel_group_permissions", group=cgid), what="channel group perms")
+            assert any("i_channel_needed_modify_power" in r.values() for r in rows), rows
+            expect(admin(boss, "channel_group_remove_permission", group=cgid, permission="i_channel_needed_modify_power"), what="remove channel group perm")
+            expect(admin(boss, "channel_group_delete", group=cgid, force=True), what="delete")
+            assert not any(r.get("cgid") == str(cgid) for r in expect(admin(boss, "channel_groups"), what="channel groups"))
+            print("PASS: a channel group was created, renamed, given a permission and deleted")
+        else:
+            print("INFO: creating a channel group refused:", made["error"])
+
         bad = admin(boss, "server_group_remove_permission", group=1, permission="Not A Perm")
         assert bad["ok"] is False and bad["code"] == "invalid", bad
         print("PASS: a malformed permission name is rejected locally")

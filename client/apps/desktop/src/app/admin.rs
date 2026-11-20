@@ -21,6 +21,73 @@ use crate::theme::{self, icon, Tone};
 
 pub(super) type Row = BTreeMap<String, String>;
 
+/// Which kind of group a screen or request is about: both have the same
+/// operations under different names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    Server,
+    Channel,
+}
+
+impl Kind {
+    /// The column that holds a group's id in the server's list.
+    fn id_key(self) -> &'static str {
+        match self {
+            Kind::Server => "sgid",
+            Kind::Channel => "cgid",
+        }
+    }
+
+    fn list(self) -> &'static str {
+        match self {
+            Kind::Server => "server_groups",
+            Kind::Channel => "channel_groups",
+        }
+    }
+
+    fn permissions(self) -> &'static str {
+        match self {
+            Kind::Server => "server_group_permissions",
+            Kind::Channel => "channel_group_permissions",
+        }
+    }
+
+    fn set_permission(self) -> &'static str {
+        match self {
+            Kind::Server => "server_group_set_permission",
+            Kind::Channel => "channel_group_set_permission",
+        }
+    }
+
+    fn remove_permission(self) -> &'static str {
+        match self {
+            Kind::Server => "server_group_remove_permission",
+            Kind::Channel => "channel_group_remove_permission",
+        }
+    }
+
+    fn create(self) -> &'static str {
+        match self {
+            Kind::Server => "server_group_create",
+            Kind::Channel => "channel_group_create",
+        }
+    }
+
+    fn rename(self) -> &'static str {
+        match self {
+            Kind::Server => "server_group_rename",
+            Kind::Channel => "channel_group_rename",
+        }
+    }
+
+    fn delete(self) -> &'static str {
+        match self {
+            Kind::Server => "server_group_delete",
+            Kind::Channel => "channel_group_delete",
+        }
+    }
+}
+
 const TOAST_SECS: u64 = 6;
 /// More than this many unanswered requests means the bridge is not answering.
 const PENDING_MAX: usize = 64;
@@ -38,12 +105,12 @@ pub(super) enum Purpose {
     /// Say this when it worked.
     Done(&'static str),
     /// Say this, then read the group's permissions again.
-    Edited(u64, &'static str),
+    Edited(Kind, u64, &'static str),
     /// Say this, then read the list of groups again.
-    GroupsChanged(&'static str),
-    Groups,
+    GroupsChanged(Kind, &'static str),
+    Groups(Kind),
     Catalog,
-    GroupPermissions(u64),
+    GroupPermissions(Kind, u64),
     Bans,
     /// The server's regular groups, for a person's group dialog.
     DialogGroups,
@@ -113,12 +180,14 @@ pub(super) enum AdminDialog {
         name: String,
         password: String,
     },
-    /// A new server group (`id` None) or a new name for one.
+    /// A new group (`id` None) or a new name for one.
     GroupName {
+        kind: Kind,
         id: Option<u64>,
         name: String,
     },
     GroupDelete {
+        kind: Kind,
         id: u64,
         name: String,
     },
@@ -127,7 +196,19 @@ pub(super) enum AdminDialog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Groups,
+    ChannelGroups,
     Bans,
+}
+
+impl Tab {
+    /// The kind of group the tab lists; none for the ban list.
+    fn kind(self) -> Option<Kind> {
+        match self {
+            Tab::Groups => Some(Kind::Server),
+            Tab::ChannelGroups => Some(Kind::Channel),
+            Tab::Bans => None,
+        }
+    }
 }
 
 pub(super) struct Panel {
@@ -251,9 +332,9 @@ impl App {
             // An empty list comes back as an error on some servers.
             let empty_list = raw.contains("EmptyResultSet");
             match purpose {
-                Purpose::Groups
+                Purpose::Groups(_)
                 | Purpose::Catalog
-                | Purpose::GroupPermissions(_)
+                | Purpose::GroupPermissions(..)
                 | Purpose::Bans
                 | Purpose::DialogGroups
                 | Purpose::PersonGroups(_)
@@ -268,17 +349,17 @@ impl App {
         }
         match purpose {
             Purpose::Done(text) => self.toast(text, false),
-            Purpose::Edited(group, text) => {
+            Purpose::Edited(kind, group, text) => {
                 self.toast(text, false);
                 self.admin_send(
-                    Purpose::GroupPermissions(group),
-                    "server_group_permissions",
+                    Purpose::GroupPermissions(kind, group),
+                    kind.permissions(),
                     json!({ "group": group }),
                 );
             }
-            Purpose::GroupsChanged(text) => {
+            Purpose::GroupsChanged(kind, text) => {
                 self.toast(text, false);
-                self.admin_send(Purpose::Groups, "server_groups", json!({}));
+                self.admin_send(Purpose::Groups(kind), kind.list(), json!({}));
             }
             Purpose::MemberChanged(db_id, text) => {
                 self.toast(text, false);
@@ -331,23 +412,37 @@ impl App {
                     })
                     .collect();
             }
-            Purpose::Groups => {
-                if let Some(panel) = self.admin.panel.as_mut() {
+            Purpose::Groups(kind) => {
+                // An answer for the other kind of group arrived after a tab change.
+                if let Some(panel) = self
+                    .admin
+                    .panel
+                    .as_mut()
+                    .filter(|p| p.tab.kind() == Some(kind))
+                {
                     panel.groups = rows;
                     panel
                         .groups
                         .sort_by_key(|g| number(g, "sortid").unwrap_or(0));
                     // The chosen group may have just been deleted.
                     if panel.group.is_some_and(|id| {
-                        !panel.groups.iter().any(|g| number(g, "sgid") == Some(id))
+                        !panel
+                            .groups
+                            .iter()
+                            .any(|g| number(g, kind.id_key()) == Some(id))
                     }) {
                         panel.group = None;
                         panel.permissions.clear();
                     }
                 }
             }
-            Purpose::GroupPermissions(group) => {
-                if let Some(panel) = self.admin.panel.as_mut() {
+            Purpose::GroupPermissions(kind, group) => {
+                if let Some(panel) = self
+                    .admin
+                    .panel
+                    .as_mut()
+                    .filter(|p| p.tab.kind() == Some(kind))
+                {
                     if panel.group == Some(group) {
                         panel.permissions = rows;
                         panel.permissions.sort_by_key(|p| field(p, "permsid"));
@@ -393,7 +488,7 @@ impl App {
             }
             Purpose::Done(_)
             | Purpose::Edited(..)
-            | Purpose::GroupsChanged(_)
+            | Purpose::GroupsChanged(..)
             | Purpose::MemberChanged(..) => {}
         }
     }
@@ -458,7 +553,7 @@ impl App {
             new_value: 1,
             ask: None,
         });
-        self.admin_send(Purpose::Groups, "server_groups", json!({}));
+        self.admin_send(Purpose::Groups(Kind::Server), "server_groups", json!({}));
         if !self.admin.catalog_asked {
             self.admin.catalog_asked = true;
             self.admin_send(Purpose::Catalog, "permission_list", json!({}));
@@ -776,11 +871,12 @@ impl App {
                     }
                 });
             }
-            AdminDialog::GroupName { id, name } => {
-                let title = if id.is_some() {
-                    "Renomear grupo"
-                } else {
-                    "Novo grupo"
+            AdminDialog::GroupName { kind, id, name } => {
+                let title = match (*kind, id.is_some()) {
+                    (Kind::Server, true) => "Renomear grupo",
+                    (Kind::Server, false) => "Novo grupo",
+                    (Kind::Channel, true) => "Renomear grupo de canal",
+                    (Kind::Channel, false) => "Novo grupo de canal",
                 };
                 dialog_window(ctx, title, |ui| {
                     ui.label("Nome");
@@ -792,20 +888,20 @@ impl App {
                     } else if go {
                         send = Some(match id {
                             Some(group) => (
-                                Purpose::GroupsChanged("Grupo renomeado."),
-                                "server_group_rename",
+                                Purpose::GroupsChanged(*kind, "Grupo renomeado."),
+                                kind.rename(),
                                 json!({ "group": *group, "name": name.trim() }),
                             ),
                             None => (
-                                Purpose::GroupsChanged("Grupo criado."),
-                                "server_group_create",
+                                Purpose::GroupsChanged(*kind, "Grupo criado."),
+                                kind.create(),
                                 json!({ "name": name.trim() }),
                             ),
                         });
                     }
                 });
             }
-            AdminDialog::GroupDelete { id, name } => {
+            AdminDialog::GroupDelete { kind, id, name } => {
                 dialog_window(ctx, "Excluir grupo", |ui| {
                     ui.label(format!(
                         "Excluir o grupo \"{name}\"? Quem está nele perde o grupo e as permissões que ele dava. Isso não pode ser desfeito."
@@ -813,8 +909,8 @@ impl App {
                     ui.add_space(12.0);
                     if buttons(ui, t, t.delete, Tone::Danger, &mut keep) {
                         send = Some((
-                            Purpose::GroupsChanged("Grupo excluído."),
-                            "server_group_delete",
+                            Purpose::GroupsChanged(*kind, "Grupo excluído."),
+                            kind.delete(),
                             json!({ "group": *id, "force": true }),
                         ));
                     }
@@ -864,11 +960,20 @@ impl App {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
                         (Tab::Groups, "Grupos e permissões"),
+                        (Tab::ChannelGroups, "Grupos de canal"),
                         (Tab::Bans, "Banimentos"),
                     ] {
-                        if ui.selectable_label(panel.tab == tab, label).clicked() {
+                        if ui.selectable_label(panel.tab == tab, label).clicked()
+                            && panel.tab != tab
+                        {
                             panel.tab = tab;
-                            if tab == Tab::Bans {
+                            if let Some(kind) = tab.kind() {
+                                // The list on screen belongs to the other kind.
+                                panel.groups.clear();
+                                panel.group = None;
+                                panel.permissions.clear();
+                                requests.push((Purpose::Groups(kind), kind.list(), json!({})));
+                            } else {
                                 requests.push((Purpose::Bans, "ban_list", json!({})));
                             }
                         }
@@ -876,7 +981,10 @@ impl App {
                 });
                 ui.separator();
                 match panel.tab {
-                    Tab::Groups => self.groups_tab(ui, &mut panel, &mut requests),
+                    Tab::Groups => self.groups_tab(ui, &mut panel, &mut requests, Kind::Server),
+                    Tab::ChannelGroups => {
+                        self.groups_tab(ui, &mut panel, &mut requests, Kind::Channel)
+                    }
                     Tab::Bans => bans_tab(ui, &panel, &mut requests),
                 }
             });
@@ -896,6 +1004,7 @@ impl App {
         ui: &mut egui::Ui,
         panel: &mut Panel,
         requests: &mut Vec<(Purpose, &'static str, Value)>,
+        kind: Kind,
     ) {
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
@@ -912,7 +1021,7 @@ impl App {
                                 panel
                                     .groups
                                     .iter()
-                                    .find(|g| number(g, "sgid") == Some(id))
+                                    .find(|g| number(g, kind.id_key()) == Some(id))
                                     // Templates and query groups are not ours to change.
                                     .filter(|g| field(g, "type") == "1")
                                     .map(|g| (id, field(g, "name")))
@@ -920,6 +1029,7 @@ impl App {
                             ui.horizontal(|ui| {
                                 if ui.small_button("Novo").clicked() {
                                     panel.ask = Some(AdminDialog::GroupName {
+                                        kind,
                                         id: None,
                                         name: String::new(),
                                     });
@@ -927,12 +1037,14 @@ impl App {
                                 if let Some((id, name)) = &chosen {
                                     if ui.small_button("Renomear").clicked() {
                                         panel.ask = Some(AdminDialog::GroupName {
+                                            kind,
                                             id: Some(*id),
                                             name: name.clone(),
                                         });
                                     }
                                     if ui.small_button("Excluir").clicked() {
                                         panel.ask = Some(AdminDialog::GroupDelete {
+                                            kind,
                                             id: *id,
                                             name: name.clone(),
                                         });
@@ -941,7 +1053,7 @@ impl App {
                             });
                             ui.separator();
                             for group in &panel.groups {
-                                let Some(id) = number(group, "sgid") else {
+                                let Some(id) = number(group, kind.id_key()) else {
                                     continue;
                                 };
                                 // Template groups (type 0) and query groups (2) are not ours to edit.
@@ -958,8 +1070,8 @@ impl App {
                                     panel.group = Some(id);
                                     panel.permissions.clear();
                                     requests.push((
-                                        Purpose::GroupPermissions(id),
-                                        "server_group_permissions",
+                                        Purpose::GroupPermissions(kind, id),
+                                        kind.permissions(),
                                         json!({ "group": id }),
                                     ));
                                 }
@@ -1005,22 +1117,27 @@ impl App {
                                     if value != before
                                         && (response.drag_stopped() || response.lost_focus())
                                     {
+                                        // Only server groups have the negated and skip flags.
+                                        let mut args = json!({
+                                            "group": group,
+                                            "permission": name,
+                                            "value": value,
+                                        });
+                                        if kind == Kind::Server {
+                                            args["negated"] =
+                                                (field(row, "permnegated") == "1").into();
+                                            args["skip"] = (field(row, "permskip") == "1").into();
+                                        }
                                         requests.push((
-                                            Purpose::Edited(group, "Permissão alterada."),
-                                            "server_group_set_permission",
-                                            json!({
-                                                "group": group,
-                                                "permission": name,
-                                                "value": value,
-                                                "negated": field(row, "permnegated") == "1",
-                                                "skip": field(row, "permskip") == "1",
-                                            }),
+                                            Purpose::Edited(kind, group, "Permissão alterada."),
+                                            kind.set_permission(),
+                                            args,
                                         ));
                                     }
                                     if ui.small_button("Remover").clicked() {
                                         requests.push((
-                                            Purpose::Edited(group, "Permissão removida."),
-                                            "server_group_remove_permission",
+                                            Purpose::Edited(kind, group, "Permissão removida."),
+                                            kind.remove_permission(),
                                             json!({ "group": group, "permission": name }),
                                         ));
                                     }
@@ -1042,8 +1159,8 @@ impl App {
                     let can = !name.is_empty() && known;
                     if ui.add_enabled(can, egui::Button::new("Definir")).clicked() {
                         requests.push((
-                            Purpose::Edited(group, "Permissão definida."),
-                            "server_group_set_permission",
+                            Purpose::Edited(kind, group, "Permissão definida."),
+                            kind.set_permission(),
                             json!({ "group": group, "permission": name, "value": panel.new_value }),
                         ));
                         panel.new_name.clear();
