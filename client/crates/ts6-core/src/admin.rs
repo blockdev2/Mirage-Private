@@ -196,6 +196,20 @@ pub enum AdminOp {
         force: bool,
     },
     ChannelGroups,
+    /// A new regular channel group (no permissions yet).
+    ChannelGroupCreate {
+        name: String,
+    },
+    ChannelGroupRename {
+        group: u64,
+        name: String,
+    },
+    /// `force` also removes the group from the people who still have it.
+    ChannelGroupDelete {
+        group: u64,
+        #[serde(default)]
+        force: bool,
+    },
     ServerGroupMembers {
         group: u64,
     },
@@ -404,6 +418,25 @@ impl AdminOp {
                 .arg("sgid", group)
                 .arg("force", u8::from(*force)),
             ChannelGroups => Request::new("channelgrouplist").replies(&["notifychannelgrouplist"]),
+            ChannelGroupCreate { name } => {
+                if name.trim().is_empty() {
+                    return Err("a group needs a name".into());
+                }
+                Request::new("channelgroupadd")
+                    .text("name", name)?
+                    .arg("type", 1)
+            }
+            ChannelGroupRename { group, name } => {
+                if name.trim().is_empty() {
+                    return Err("a group needs a name".into());
+                }
+                Request::new("channelgrouprename")
+                    .arg("cgid", group)
+                    .text("name", name)?
+            }
+            ChannelGroupDelete { group, force } => Request::new("channelgroupdel")
+                .arg("cgid", group)
+                .arg("force", u8::from(*force)),
             ServerGroupMembers { group } => Request::new("servergroupclientlist")
                 .arg("sgid", group)
                 .arg("-names", "")
@@ -624,6 +657,31 @@ mod tests {
             .unwrap();
         assert_eq!(set.name, "setclientchannelgroup");
         assert_eq!(arg(&set, "cgid"), Some("5"));
+    }
+
+    #[test]
+    fn channel_groups_can_be_created_renamed_and_deleted() {
+        let create = op(r#"{"action":"channel_group_create","name":"Moderação"}"#)
+            .request()
+            .unwrap();
+        assert_eq!(create.name, "channelgroupadd");
+        assert_eq!(arg(&create, "type"), Some("1"));
+        let rename = op(r#"{"action":"channel_group_rename","group":9,"name":"Mods"}"#)
+            .request()
+            .unwrap();
+        assert_eq!(rename.name, "channelgrouprename");
+        assert_eq!(arg(&rename, "cgid"), Some("9"));
+        let delete = op(r#"{"action":"channel_group_delete","group":9,"force":true}"#)
+            .request()
+            .unwrap();
+        assert_eq!(delete.name, "channelgroupdel");
+        assert_eq!(arg(&delete, "force"), Some("1"));
+        for json in [
+            r#"{"action":"channel_group_create","name":" "}"#,
+            r#"{"action":"channel_group_rename","group":1,"name":""}"#,
+        ] {
+            assert!(op(json).request().is_err(), "{json}");
+        }
     }
 
     #[test]
