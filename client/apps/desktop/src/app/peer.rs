@@ -116,6 +116,7 @@ impl App {
         let mut groups_of: Option<(u64, String)> = None;
         let mut channel_group_of: Option<(u64, String, u64)> = None;
         let mut permissions_of: Option<u64> = None;
+        let mut whisper_toggle: Option<u16> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -222,6 +223,16 @@ impl App {
                         groups_of = Some((client.db_id, client.name.clone()));
                         ui.close();
                     }
+                    let whispering = self.whisper.contains(&client.id);
+                    let whisper_label = if whispering {
+                        t.user_whisper_stop
+                    } else {
+                        t.user_whisper
+                    };
+                    if menu_item(ui, icon::SPEAKER_LOW, whisper_label).clicked() {
+                        whisper_toggle = Some(client.id);
+                        ui.close();
+                    }
                     if client.db_id != 0
                         && menu_item(ui, icon::INFO, "Permissões da pessoa").clicked()
                     {
@@ -245,6 +256,9 @@ impl App {
         }
         if let Some((db_id, name)) = groups_of {
             self.open_memberships(db_id, name);
+        }
+        if let Some(id) = whisper_toggle {
+            self.toggle_whisper(id);
         }
         if let Some(db_id) = permissions_of {
             self.open_permissions(super::admin::Kind::ClientPerm, db_id);

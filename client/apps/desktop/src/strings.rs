@@ -201,6 +201,11 @@ pub struct Strings {
     pub chat_placeholder_server: &'static str,
     pub chat_placeholder_person_prefix: &'static str,
     pub user_message: &'static str,
+    /// Menu: send my voice to this person only (and take them off again).
+    pub user_whisper: &'static str,
+    pub user_whisper_stop: &'static str,
+    /// The call button while whispering: "Sussurrando para" + names.
+    pub whisper_active: &'static str,
     pub chat_stop_private: &'static str,
     pub voice_connected: &'static str,
     pub push_to_talk: &'static str,
@@ -645,6 +650,9 @@ pub const PT: Strings = Strings {
     chat_placeholder_server: "Conversar com todo o servidor",
     chat_placeholder_person_prefix: "Mensagem privada para",
     user_message: "Mensagem privada",
+    user_whisper: "Sussurrar para esta pessoa",
+    user_whisper_stop: "Parar de sussurrar para ela",
+    whisper_active: "Sussurrando para",
     chat_stop_private: "Voltar para o canal",
     voice_connected: "Voz conectada",
     push_to_talk: "Push-to-talk",

@@ -51,7 +51,7 @@ The goal is a client that talks to official TS6 servers for everyday use, not a 
 
 Present and exercised at least once: login and identity, channel/client snapshot, join, nickname, mutes, per-client volume, connection info, Opus voice with capture/playback, push-to-talk and voice activation, noise suppression, channel chat with attachments and emoji, avatars, screen sharing and watching with stream sound.
 
-Added afterwards (see the matrix): kick, ban, poke, move others, channel create/edit/delete, groups and permissions. Private and server-wide messages are now in the bridge and the native window. Not in the backend (each is a gap, not a bug): permission templates and the permission overview; client descriptions; whisper and priority speaker; file browser and uploads beyond chat; offline messages; Matrix group chat and S3 files; acoustic echo cancellation; non-Windows platforms. Hosted CI has never run, and a 10-minute call or watch has not been done.
+Added afterwards (see the matrix): kick, ban, poke, move others, channel create/edit/delete, groups and permissions. Private and server-wide messages are now in the bridge and the native window. Not in the backend (each is a gap, not a bug): permission templates and the permission overview; client descriptions; whisper to channels or groups, a whisper hold key and priority speaker (whisper to chosen people works: live check); file browser and uploads beyond chat; offline messages; Matrix group chat and S3 files; acoustic echo cancellation; non-Windows platforms. Hosted CI has never run, and a 10-minute call or watch has not been done.
 
 ## Research and chat uncertainty
 

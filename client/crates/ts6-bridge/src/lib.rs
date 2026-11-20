@@ -1398,6 +1398,25 @@ async fn apply_command(
             None => log(events, "warn", "not connected"),
         },
 
+        Command::Whisper { clients, channels } => match session.as_mut() {
+            Some(active) => {
+                let target = (!clients.is_empty() || !channels.is_empty())
+                    .then_some(ts6_core::WhisperTarget { clients, channels });
+                match active.set_whisper(target) {
+                    Ok(()) => log(
+                        events,
+                        "info",
+                        match active.whisper() {
+                            Some(_) => "whispering",
+                            None => "whisper off",
+                        },
+                    ),
+                    Err(error) => log(events, "error", error),
+                }
+            }
+            None => log(events, "warn", "not connected"),
+        },
+
         Command::Mute { input, output } => match session.as_mut() {
             Some(active) => {
                 let muted_input = input.unwrap_or(false);
