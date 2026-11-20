@@ -115,6 +115,7 @@ impl App {
         let mut write_to: Option<u16> = None;
         let mut groups_of: Option<(u64, String)> = None;
         let mut channel_group_of: Option<(u64, String, u64)> = None;
+        let mut permissions_of: Option<u64> = None;
         // Clicks inside the menu (slider, % field, buttons) must keep it open;
         // only a click outside closes it.
         egui::Popup::context_menu(response)
@@ -222,6 +223,12 @@ impl App {
                         ui.close();
                     }
                     if client.db_id != 0
+                        && menu_item(ui, icon::INFO, "Permissões da pessoa").clicked()
+                    {
+                        permissions_of = Some(client.db_id);
+                        ui.close();
+                    }
+                    if client.db_id != 0
                         && menu_item(ui, icon::USER_PLUS, "Grupo no canal").clicked()
                     {
                         channel_group_of =
@@ -238,6 +245,9 @@ impl App {
         }
         if let Some((db_id, name)) = groups_of {
             self.open_memberships(db_id, name);
+        }
+        if let Some(db_id) = permissions_of {
+            self.open_permissions(super::admin::Kind::ClientPerm, db_id);
         }
         if let Some((db_id, name, channel)) = channel_group_of {
             self.open_channel_group(db_id, name, channel);
