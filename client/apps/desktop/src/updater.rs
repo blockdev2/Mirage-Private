@@ -14,7 +14,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
 /// Public releases of Mirage.
-pub const DEFAULT_SOURCE: &str = "https://github.com/3d2faebf4bca96cacf2aa10dc002bf42/Mirage";
+pub const DEFAULT_SOURCE: &str = "https://github.com/blockdev2/Mirage-Private";
 /// Overrides [`DEFAULT_SOURCE`]: a repository URL or a folder holding a release.
 pub const SOURCE_ENV: &str = "MIRAGE_UPDATE_URL";
 
