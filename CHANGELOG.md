@@ -4,6 +4,8 @@ Entries describe repository changes. Tagged releases are published as GitHub rel
 
 ## Unreleased
 
+- Updates are now found: the app checks the releases of the Mirage repository. Installs from 0.1.4 or earlier must run this Setup once.
+
 **Screen sharing now works with the official TeamSpeak client, both ways.**
 
 - Share quality "Personalizado": pick resolution (360p to the screen's own), 5/30/60 fps, bitrate with − and +, and the sound bitrate; the share settings are remembered.
