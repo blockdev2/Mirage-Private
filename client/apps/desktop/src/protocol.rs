@@ -312,6 +312,7 @@ pub enum Command {
         vad_threshold: f32,
         noise_suppression: u8,
         monitor: bool,
+        bitrate_kbps: u32,
     },
     Devices,
     Refresh,
@@ -338,6 +339,8 @@ pub enum Command {
     /// Changes a running share's quality without restarting it.
     ShareQuality {
         quality: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom: Option<crate::store::CustomShare>,
     },
     ShareStart {
         monitor: Option<usize>,
@@ -346,6 +349,10 @@ pub enum Command {
         /// `light`, `standard`, `high` or `max`; absent is the bridge default.
         #[serde(skip_serializing_if = "Option::is_none")]
         quality: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom: Option<crate::store::CustomShare>,
+        /// Show Windows' yellow border around what is shared.
+        border: bool,
         /// Send the computer's sound in our voice.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         audio: bool,
@@ -439,27 +446,35 @@ mod tests {
                 monitor: Some(1),
                 window: None,
                 quality: None,
+                custom: None,
+                border: true,
                 audio: false
             })
             .unwrap(),
-            serde_json::json!({"op": "share_start", "monitor": 1})
+            serde_json::json!({"op": "share_start", "monitor": 1, "border": true})
         );
         assert_eq!(
             serde_json::to_value(Command::ShareStart {
                 monitor: None,
                 window: Some(65678),
                 quality: Some("high"),
+                custom: None,
+                border: true,
                 audio: true
             })
             .unwrap(),
-            serde_json::json!({"op": "share_start", "monitor": null, "window": 65678, "quality": "high", "audio": true})
+            serde_json::json!({"op": "share_start", "monitor": null, "window": 65678, "quality": "high", "border": true, "audio": true})
         );
         assert_eq!(
             serde_json::to_value(Command::ShareStop).unwrap(),
             serde_json::json!({"op": "share_stop"})
         );
         assert_eq!(
-            serde_json::to_value(Command::ShareQuality { quality: "max" }).unwrap(),
+            serde_json::to_value(Command::ShareQuality {
+                quality: "max",
+                custom: None
+            })
+            .unwrap(),
             serde_json::json!({"op": "share_quality", "quality": "max"})
         );
     }

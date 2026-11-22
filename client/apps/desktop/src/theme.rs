@@ -34,6 +34,9 @@ pub const ACCENT_SOFT: Color32 = Color32::from_rgb(38, 43, 54);
 /// while keeping white text readable on top of it.
 pub const SELECTION: Color32 = Color32::from_rgb(52, 84, 140);
 pub const SUCCESS: Color32 = Color32::from_rgb(61, 214, 140);
+pub const SUCCESS_SOFT: Color32 = Color32::from_rgb(16, 46, 34);
+pub const WARNING_SOFT: Color32 = Color32::from_rgb(52, 40, 16);
+pub const SUCCESS_SOFT_HOVER: Color32 = Color32::from_rgb(22, 62, 45);
 pub const WARNING: Color32 = Color32::from_rgb(245, 185, 74);
 pub const DANGER: Color32 = Color32::from_rgb(229, 72, 77);
 pub const DANGER_HOVER: Color32 = Color32::from_rgb(240, 96, 101);
@@ -385,6 +388,40 @@ pub fn icon_button(
     } else {
         response
     }
+}
+
+/// Icon button in the "on air" green: something running that can be pressed
+/// (the share button while sharing). `label` is the name and the tooltip.
+pub fn icon_button_live(ui: &mut Ui, glyph: &str, label: &str, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let hovered = response.hovered();
+    let fill = if hovered {
+        SUCCESS_SOFT_HOVER
+    } else {
+        SUCCESS_SOFT
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(6), fill);
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(6),
+        Stroke::new(1.0, SUCCESS),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::new(size * 0.45, icons()),
+        SUCCESS,
+    );
+    if response.has_focus() {
+        focus_ring(painter, rect);
+    }
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(label)
 }
 
 /// Solid red icon button, reserved for ending the call.

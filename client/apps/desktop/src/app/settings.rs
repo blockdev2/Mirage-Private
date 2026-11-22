@@ -690,6 +690,9 @@ impl App {
                 // Applies live as well: no microphone restart.
                 changed_live |= audio.noise != before;
                 ui.add_space(8.0);
+                sub_heading(ui, t.voice_bitrate_title);
+                apply |= voice_bitrate(ui, t, &mut audio.bitrate_kbps);
+                ui.add_space(8.0);
                 setting_row(ui, t.monitor_title, Some(t.monitor_hint), |ui| {
                     changed_live |=
                         theme::toggle(ui, &mut audio.monitor, t.monitor_title).changed();
@@ -900,6 +903,57 @@ fn editable_name(ui: &mut Ui, name: &str, label: &str) -> egui::Response {
     response
         .on_hover_cursor(egui::CursorIcon::Text)
         .on_hover_text(label)
+}
+
+/// Voice bitrate: presets, or a custom value on a slider. Returns true when a
+/// new value should reach the engine (a custom value once the drag ends, so
+/// the microphone is not restarted on every step).
+fn voice_bitrate(ui: &mut Ui, t: &Strings, kbps: &mut u32) -> bool {
+    let presets = crate::store::VOICE_KBPS_PRESETS;
+    let custom = presets.len();
+    let id = ui.make_persistent_id("voice-bitrate-custom");
+    let mut custom_open =
+        ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) || !presets.contains(kbps);
+    let labels: Vec<String> = presets
+        .iter()
+        .map(|k| format!("{k}"))
+        .chain(std::iter::once(t.voice_bitrate_custom.to_string()))
+        .collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let selected = if custom_open {
+        custom
+    } else {
+        presets.iter().position(|k| k == kbps).unwrap_or(custom)
+    };
+    let mut changed = false;
+    match segmented(ui, &refs, selected) {
+        Some(index) if index == custom => custom_open = true,
+        Some(index) => {
+            custom_open = false;
+            *kbps = presets[index];
+            changed = true;
+        }
+        None => {}
+    }
+    ui.data_mut(|d| d.insert_temp(id, custom_open));
+    if custom_open {
+        ui.add_space(6.0);
+        let response = ui.add(
+            egui::Slider::new(
+                kbps,
+                crate::store::VOICE_KBPS_MIN..=crate::store::VOICE_KBPS_MAX,
+            )
+            .suffix(" kbps"),
+        );
+        changed |= response.drag_stopped() || (response.changed() && !response.dragged());
+    }
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(t.voice_bitrate_hint(*kbps))
+            .small()
+            .color(theme::TEXT_3),
+    );
+    changed
 }
 
 /// Equal-width options in one bar. Returns the index clicked this frame.

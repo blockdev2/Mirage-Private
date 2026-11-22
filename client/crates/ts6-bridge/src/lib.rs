@@ -731,8 +731,12 @@ async fn session_task(
                 monitor,
                 window,
                 quality,
+                custom,
+                border,
                 audio,
             }) => {
+                share_media::SHOW_BORDER
+                    .store(border.unwrap_or(true), std::sync::atomic::Ordering::Relaxed);
                 let own = session.as_ref().and_then(own_client_id);
                 let actions = match own {
                     Some(own) => {
@@ -742,10 +746,8 @@ async fn session_task(
                             None => share_media::CaptureSource::Monitor(monitor),
                         };
                         // Unknown names fall back to the default preset.
-                        let quality = quality
-                            .as_deref()
-                            .and_then(share_media::Quality::from_name)
-                            .unwrap_or_default();
+                        let quality =
+                            protocol::share_quality(quality.as_deref(), custom).unwrap_or_default();
                         // Stream sound is best effort: where the system cannot
                         // capture it the share goes ahead without sound.
                         let audio = audio
@@ -771,10 +773,11 @@ async fn session_task(
                 share_actions(actions, session.as_mut(), &mut sharer, &events, &internal);
                 None
             }
-            Some(Command::ShareQuality { quality }) => {
-                if let (Some(worker), Some(quality)) =
-                    (sharer.as_ref(), share_media::Quality::from_name(&quality))
-                {
+            Some(Command::ShareQuality { quality, custom }) => {
+                if let (Some(worker), Some(quality)) = (
+                    sharer.as_ref(),
+                    protocol::share_quality(Some(&quality), custom),
+                ) {
                     if worker
                         .send(share_media::ShareCommand::SetQuality(quality))
                         .is_err()
@@ -1443,9 +1446,14 @@ async fn apply_command(
             vad_threshold,
             noise_suppression,
             monitor,
+            bitrate_kbps,
         } => {
             if let Some(monitor) = monitor {
                 config.monitor = monitor;
+            }
+            if let Some(kbps) = bitrate_kbps {
+                let kbps = kbps.clamp(audio::MIN_VOICE_KBPS, audio::MAX_VOICE_KBPS);
+                config.bitrate = i32::try_from(kbps * 1000).unwrap_or(audio::DEFAULT_VOICE_BITRATE);
             }
             if let Some(level) = noise_suppression {
                 config.noise_suppression = ts6_audio::denoise::NoiseSuppression::from_level(level);

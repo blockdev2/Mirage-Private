@@ -22,6 +22,11 @@ const MIC_QUEUE_FRAMES: usize = 4;
 /// quiet game audio, above digital silence.
 const STREAM_KEY_THRESHOLD_DB: f32 = -55.0;
 
+/// What the voice was always sent at; Opus takes 6 to 510 kbit/s.
+pub const DEFAULT_VOICE_BITRATE: i32 = 64_000;
+pub const MIN_VOICE_KBPS: u32 = 6;
+pub const MAX_VOICE_KBPS: u32 = 510;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioConfig {
     pub enabled: bool,
@@ -36,6 +41,8 @@ pub struct AudioConfig {
     pub noise_suppression: ts6_audio::denoise::NoiseSuppression,
     /// Play our own processed microphone back locally.
     pub monitor: bool,
+    /// Opus voice bitrate in bits per second.
+    pub bitrate: i32,
 }
 
 impl Default for AudioConfig {
@@ -49,6 +56,7 @@ impl Default for AudioConfig {
             voice_activation: true,
             threshold_db: ts6_audio::vad::DEFAULT_THRESHOLD_DB,
             noise_suppression: ts6_audio::denoise::NoiseSuppression::Standard,
+            bitrate: DEFAULT_VOICE_BITRATE,
             monitor: false,
         }
     }
@@ -235,7 +243,7 @@ impl AudioEngine {
             match ts6_audio::start_capture(
                 ts6_audio::CaptureConfig {
                     device: config.input_device.clone(),
-                    bitrate: 64_000,
+                    bitrate: config.bitrate,
                     // Push-to-talk gates downstream; otherwise voice activation
                     // decides, unless continuous transmission was chosen.
                     // In stream mode with a key there is no gate downstream, so the

@@ -6,6 +6,12 @@ Entries describe repository changes. Tagged releases are published as GitHub rel
 
 **Screen sharing now works with the official TeamSpeak client, both ways.**
 
+- Share quality "Personalizado": pick resolution (360p to the screen's own), 5/30/60 fps, bitrate with − and +, and the sound bitrate; the share settings are remembered.
+- Voice bitrate up to 320 kbps (presets or a custom value) in Ajustes → Áudio.
+- See your own share (click your live card), pop any stream out into its own window, and no black bars around the picture.
+- The share button is green while sharing; the yellow Windows border can be turned off (Windows 11).
+- Computer sound in a share no longer lights up your own "speaking" mark.
+- Redesigned Atualizações page; updates are checked on start and once a day; new installer animation.
 - Watch the official client's share inside Mirage, with its sound, volume, mute and fullscreen.
 - Share a whole screen or a single window, picked from live previews, in five quality levels up to the screen's own resolution at 60 fps (changeable while sharing), and optionally send the computer's sound (everything except Mirage).
 - New app icon: the Mirage symbol (palm, sun and island) on the executable, the window, the taskbar and the installer.

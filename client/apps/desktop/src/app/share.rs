@@ -48,7 +48,9 @@ pub(super) struct Picker {
 }
 
 /// Bridge names of the quality presets, in the order of `share_quality_levels`.
-pub(super) const QUALITIES: [&str; 5] = ["light", "standard", "high", "max", "source"];
+pub(super) const QUALITIES: [&str; 6] = ["light", "standard", "high", "max", "source", "custom"];
+/// "Personalizado": the values come from `share_custom`.
+pub(super) const CUSTOM_QUALITY: usize = 5;
 /// "standard": what a share used before there was a choice.
 pub(super) const DEFAULT_QUALITY: usize = 1;
 
@@ -64,14 +66,50 @@ const COLUMNS: usize = 3;
 
 /// Small still pictures of sources, taken on a helper thread so a slow
 /// window never stalls the interface.
-#[derive(Default)]
 pub(super) struct Previews {
     textures: HashMap<Source, egui::TextureHandle>,
     pending: Option<Receiver<Vec<(Source, egui::ColorImage)>>>,
     taken_at: Option<Instant>,
+    every: Duration,
+    size: (u32, u32),
 }
 
+impl Default for Previews {
+    fn default() -> Self {
+        Self {
+            textures: HashMap::new(),
+            pending: None,
+            taken_at: None,
+            every: PREVIEW_EVERY,
+            size: PREVIEW_SIZE,
+        }
+    }
+}
+
+/// What our own share shows: big enough for the stage, about 5 per second.
+/// It is a copy of the screen, not the encoded stream (no decoder needed).
+const SELF_VIEW_EVERY: Duration = Duration::from_millis(200);
+const SELF_VIEW_SIZE: (u32, u32) = (1280, 720);
+
 impl Previews {
+    pub(super) fn live() -> Self {
+        Self {
+            every: SELF_VIEW_EVERY,
+            size: SELF_VIEW_SIZE,
+            ..Self::default()
+        }
+    }
+
+    /// The newest picture of our own running share, refreshed as it is used.
+    pub(super) fn own_share(
+        &mut self,
+        ctx: &egui::Context,
+        source: Option<Source>,
+    ) -> Option<egui::TextureHandle> {
+        self.refresh(ctx, source.into_iter().collect());
+        source.and_then(|s| self.get(s).cloned())
+    }
+
     /// Picks up finished pictures and starts the next round when due.
     fn refresh(&mut self, ctx: &egui::Context, sources: Vec<Source>) {
         if let Some(pending) = &self.pending {
@@ -94,12 +132,12 @@ impl Previews {
                 Err(TryRecvError::Disconnected) => self.pending = None,
             }
         }
-        let due = self.taken_at.is_none_or(|at| at.elapsed() >= PREVIEW_EVERY);
+        let due = self.taken_at.is_none_or(|at| at.elapsed() >= self.every);
         if self.pending.is_none() && due && !sources.is_empty() {
             self.taken_at = Some(Instant::now());
-            self.pending = take_previews(ctx.clone(), sources);
+            self.pending = take_previews(ctx.clone(), sources, self.size);
         }
-        ctx.request_repaint_after(Duration::from_millis(250));
+        ctx.request_repaint_after(self.every.min(Duration::from_millis(250)));
     }
 
     fn get(&self, source: Source) -> Option<&egui::TextureHandle> {
@@ -111,6 +149,7 @@ impl Previews {
 fn take_previews(
     ctx: egui::Context,
     sources: Vec<Source>,
+    max: (u32, u32),
 ) -> Option<Receiver<Vec<(Source, egui::ColorImage)>>> {
     use ts6_bridge::share_media::{thumbnail, CaptureSource};
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -124,7 +163,7 @@ fn take_previews(
                         Source::Monitor(index) => CaptureSource::Monitor(Some(index)),
                         Source::Window(id) => CaptureSource::Window(id),
                     };
-                    let picture = thumbnail(capture, PREVIEW_SIZE.0, PREVIEW_SIZE.1)?;
+                    let picture = thumbnail(capture, max.0, max.1)?;
                     let size = [picture.width as usize, picture.height as usize];
                     Some((
                         source,
@@ -143,6 +182,7 @@ fn take_previews(
 fn take_previews(
     _ctx: egui::Context,
     _sources: Vec<Source>,
+    _max: (u32, u32),
 ) -> Option<Receiver<Vec<(Source, egui::ColorImage)>>> {
     None
 }
@@ -367,6 +407,106 @@ fn segmented(
     picked
 }
 
+/// The row's name, left-aligned in a fixed column so the options line up.
+fn row_label(ui: &mut egui::Ui, label: &str) {
+    ui.allocate_ui_with_layout(
+        vec2(110.0, 28.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(vec2(110.0, 28.0));
+            ui.label(egui::RichText::new(label).color(theme::TEXT_2));
+        },
+    );
+}
+
+/// A hairline between rows of the custom quality, in the faintest border.
+fn row_divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 9.0), Sense::hover());
+    let y = rect.center().y.round() + 0.5;
+    ui.painter().line_segment(
+        [pos2(rect.left(), y), pos2(rect.right(), y)],
+        Stroke::new(1.0, theme::BORDER_SOFT),
+    );
+}
+
+/// One labelled row of options for the custom quality.
+fn option_row<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    options: &[(T, String)],
+    value: &mut T,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        row_label(ui, label);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (option, text) in options {
+            if segment(ui, text, *value == *option).clicked() && *value != *option {
+                *value = *option;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// The "Personalizado" settings: resolution, frame rate, bitrate and the
+/// voice/sound bitrate. Returns (video changed, sound changed).
+fn custom_rows(
+    ui: &mut egui::Ui,
+    t: &Strings,
+    custom: &mut crate::store::CustomShare,
+    audio_kbps: &mut u32,
+) -> (bool, bool) {
+    use crate::store::{SHARE_FPS, SHARE_HEIGHTS, SHARE_KBPS_MAX, SHARE_KBPS_MIN, SHARE_KBPS_STEP};
+    let heights: Vec<(u32, String)> = SHARE_HEIGHTS
+        .iter()
+        .map(|&h| {
+            (
+                h,
+                if h == 0 {
+                    t.share_custom_native.to_string()
+                } else {
+                    h.to_string()
+                },
+            )
+        })
+        .collect();
+    let fps: Vec<(u32, String)> = SHARE_FPS.iter().map(|&f| (f, f.to_string())).collect();
+    let mut video = option_row(ui, t.share_custom_resolution, &heights, &mut custom.height);
+    row_divider(ui);
+    video |= option_row(ui, t.share_custom_fps, &fps, &mut custom.fps);
+    row_divider(ui);
+    ui.horizontal(|ui| {
+        row_label(ui, t.share_custom_bitrate);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let kbps = &mut custom.bitrate_kbps;
+        if segment(ui, "\u{2212}", false).clicked() && *kbps > SHARE_KBPS_MIN {
+            *kbps = kbps.saturating_sub(SHARE_KBPS_STEP).max(SHARE_KBPS_MIN);
+            video = true;
+        }
+        let drag = ui.add(
+            egui::DragValue::new(kbps)
+                .range(SHARE_KBPS_MIN..=SHARE_KBPS_MAX)
+                .speed(50.0)
+                .suffix(" kbps"),
+        );
+        // A drag would rebuild the encoder at every step: only when it ends.
+        video |= drag.drag_stopped() || (drag.changed() && !drag.dragged());
+        if segment(ui, "+", false).clicked() && *kbps < SHARE_KBPS_MAX {
+            *kbps = (*kbps + SHARE_KBPS_STEP).min(SHARE_KBPS_MAX);
+            video = true;
+        }
+    });
+    let audio_options: Vec<(u32, String)> = [64u32, 96, 128, 192, 256, 320]
+        .iter()
+        .map(|&k| (k, k.to_string()))
+        .collect();
+    row_divider(ui);
+    let audio = option_row(ui, t.share_custom_audio, &audio_options, audio_kbps);
+    (video, audio)
+}
+
 /// A picture fitted (letterboxed) inside `area`, or a placeholder glyph.
 fn paint_preview(
     painter: &egui::Painter,
@@ -468,6 +608,11 @@ impl App {
     /// Applies a report from the bridge about our own share.
     pub(super) fn on_share_state(&mut self, update: ShareState) {
         let t = self.t;
+        // Our share ended (not just restarting): close the view of it.
+        let ended = matches!(update.state.as_str(), "stopped" | "failed");
+        if ended && self.share_restart.is_none() && self.watching_self() {
+            self.watching = None;
+        }
         match update.state.as_str() {
             "starting" => self.sharing = Some(Sharing::Starting),
             "live" => {
@@ -501,6 +646,20 @@ impl App {
         }
     }
 
+    /// The quality and sound choice come back next time Mirage opens.
+    fn remember_share_settings(&mut self) {
+        let data = &mut self.store.data;
+        if data.share_quality != Some(self.share_quality)
+            || data.share_audio != self.share_audio
+            || data.share_custom != self.share_custom
+        {
+            data.share_quality = Some(self.share_quality);
+            data.share_audio = self.share_audio;
+            data.share_custom = self.share_custom;
+            self.store.save();
+        }
+    }
+
     fn send_share_start(&mut self, source: Source) {
         let (monitor, window) = match source {
             Source::Monitor(index) => (Some(index), None),
@@ -508,10 +667,13 @@ impl App {
         };
         self.sharing = Some(Sharing::Starting);
         self.share_source = Some(source);
+        self.remember_share_settings();
         self.send(Command::ShareStart {
             monitor,
             window,
             quality: QUALITIES.get(self.share_quality).copied(),
+            custom: (self.share_quality == CUSTOM_QUALITY).then_some(self.share_custom),
+            border: !self.store.data.share_hide_border,
             audio: self.share_audio,
         });
     }
@@ -545,7 +707,7 @@ impl App {
                 format!("{} ({viewers} {})", t.share_live, t.share_watching)
             }
         };
-        let response = theme::icon_button(ui, icon::SHARE_SCREEN, &label, true, size);
+        let response = theme::icon_button_live(ui, icon::SHARE_SCREEN, &label, size);
         let mut action = None;
         egui::Popup::from_toggle_button_response(&response)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -560,8 +722,11 @@ impl App {
                 egui::Popup::close_all(ui.ctx());
             }
             Some(LiveAction::Quality) => {
+                self.remember_share_settings();
                 if let Some(quality) = QUALITIES.get(self.share_quality) {
-                    self.send(Command::ShareQuality { quality });
+                    let custom =
+                        (self.share_quality == CUSTOM_QUALITY).then_some(self.share_custom);
+                    self.send(Command::ShareQuality { quality, custom });
                 }
             }
             None => {}
@@ -623,6 +788,17 @@ impl App {
             .iter()
             .map(|l| quality_name(l))
             .collect();
+        let names: Vec<&str> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                if i == CUSTOM_QUALITY {
+                    t.voice_bitrate_custom
+                } else {
+                    *n
+                }
+            })
+            .collect();
         if let Some(index) = segmented(
             ui,
             width,
@@ -637,6 +813,22 @@ impl App {
         if let Some(label) = t.share_quality_levels.get(self.share_quality) {
             let detail = label.split_once(" · ").map_or(*label, |(_, rest)| rest);
             ui.label(egui::RichText::new(detail).color(theme::TEXT_3).size(12.0));
+        }
+        if self.share_quality == CUSTOM_QUALITY {
+            ui.add_space(10.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            let (video, audio) = custom_rows(
+                ui,
+                t,
+                &mut self.share_custom,
+                &mut self.store.data.audio.bitrate_kbps,
+            );
+            if video {
+                action = Some(LiveAction::Quality);
+            }
+            if audio {
+                self.apply_audio();
+            }
         }
 
         ui.add_space(16.0);
@@ -666,6 +858,7 @@ impl App {
         picker.previews.refresh(ctx, sources);
         let mut close = false;
         let mut start = None;
+        let mut audio_changed = false;
         let modal = egui::Modal::new(egui::Id::unique("share-picker"))
             .frame(
                 theme::card()
@@ -761,7 +954,30 @@ impl App {
                 if let Some(label) = t.share_quality_levels.get(self.share_quality) {
                     ui.label(egui::RichText::new(*label).color(theme::TEXT_3).size(12.0));
                 }
+                if self.share_quality == CUSTOM_QUALITY {
+                    ui.add_space(10.0);
+                    let (_, audio) = custom_rows(
+                        ui,
+                        t,
+                        &mut self.share_custom,
+                        &mut self.store.data.audio.bitrate_kbps,
+                    );
+                    audio_changed |= audio;
+                }
                 ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let mut border = !self.store.data.share_hide_border;
+                    if theme::toggle(ui, &mut border, t.share_border)
+                        .on_hover_text(t.share_border_hint)
+                        .changed()
+                    {
+                        self.store.data.share_hide_border = !border;
+                        self.store.save();
+                    }
+                    ui.label(egui::RichText::new(t.share_border).color(theme::TEXT_2))
+                        .on_hover_text(t.share_border_hint);
+                });
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     theme::toggle(ui, &mut self.share_audio, t.share_audio)
                         .on_hover_text(t.share_audio_hint);
@@ -786,6 +1002,9 @@ impl App {
             });
         if modal.should_close() {
             close = true;
+        }
+        if audio_changed {
+            self.apply_audio();
         }
         if let Some(source) = start {
             if let Some(picker) = self.share_picker.take() {
@@ -828,7 +1047,17 @@ mod tests {
             .iter()
             .map(|l| quality_name(l))
             .collect();
-        assert_eq!(names, ["Leve", "Padrão", "Alta", "Máxima", "Original"]);
+        assert_eq!(
+            names,
+            [
+                "Leve",
+                "Padrão",
+                "Alta",
+                "Máxima",
+                "Original",
+                "Personalizado"
+            ]
+        );
     }
 
     #[test]

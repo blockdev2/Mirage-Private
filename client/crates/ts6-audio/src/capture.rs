@@ -226,6 +226,14 @@ impl Processor {
             let noise = NoiseSuppression::from_level(self.live.noise.load(Ordering::Relaxed));
             self.denoiser.process(&mut frame, noise);
             self.monitor.push(&frame);
+            // The microphone alone, before the computer's sound is mixed in:
+            // "you are talking" must not light up for a game or a video.
+            let mut mic_level = level_db(&frame);
+            if let Some(open) = &self.mic_open {
+                if !open.load(Ordering::Relaxed) {
+                    mic_level = f32::NEG_INFINITY;
+                }
+            }
             if let Some(open) = &self.mic_open {
                 // Stream mode: the microphone only when allowed, plus the
                 // computer's sound, so stream sound passes without the key.
@@ -268,7 +276,11 @@ impl Processor {
                 // An empty payload ends the voice session for every listener.
                 Decision::End => self.send(Vec::new()),
             }
-            let transmitting = self.vad.as_ref().is_none_or(VoiceActivation::is_open);
+            let mut transmitting = self.vad.as_ref().is_none_or(VoiceActivation::is_open);
+            if self.mic_open.is_some() {
+                // Stream mode: shown as talking only when the microphone is.
+                transmitting &= mic_level >= threshold;
+            }
             self.live
                 .transmitting
                 .store(transmitting, Ordering::Relaxed);

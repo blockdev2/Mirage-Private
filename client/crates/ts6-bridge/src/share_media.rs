@@ -119,6 +119,10 @@ pub struct Source {
     pub guard: Option<Box<dyn Send>>,
 }
 
+/// Whether the next capture shows Windows' yellow border; set from the share
+/// command just before the capture starts (one share at a time).
+pub static SHOW_BORDER: AtomicBool = AtomicBool::new(true);
+
 /// Starts a capture of the given monitor or window.
 pub type Starter = Box<dyn FnMut(CaptureSource, Quality) -> Result<Source, ShareFailure> + Send>;
 
@@ -441,6 +445,7 @@ fn capture_source(chosen: CaptureSource, quality: Quality) -> Result<Source, Sha
         .name("screen-capture".into())
         .spawn(move || {
             let config = quality.apply(CaptureConfig {
+                border: SHOW_BORDER.load(Ordering::Relaxed),
                 source: chosen,
                 ..CaptureConfig::default()
             });

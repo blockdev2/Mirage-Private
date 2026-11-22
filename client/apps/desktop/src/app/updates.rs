@@ -1,9 +1,10 @@
 //! The updates page of the settings window.
 //!
-//! One panel says what is installed and what is happening, with a thin line
-//! like a horizon and a small sun on it: it travels while the app looks for an
-//! update, fills while one downloads, and rests at the end when it is ready.
-//! Everything slow runs in the updater's worker; this page only reads its state.
+//! One panel: the app's icon and version, a chip with where things stand, when
+//! it last looked, and the one button that moves things forward. A progress
+//! track appears only while something is happening: a sweeping segment while
+//! it looks, a filling bar while it downloads. Everything slow runs in the
+//! updater's worker; this page only reads its state.
 
 use egui::{
     pos2, vec2, Align, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, Ui,
@@ -42,14 +43,31 @@ impl App {
                 None => {
                     self.startup_update_check = true;
                     if !self.store.data.skip_update_check {
-                        self.updater.check();
+                        self.check_updates();
                     }
                 }
             }
+        } else if !self.store.data.skip_update_check
+            && crate::store::now_secs().saturating_sub(self.store.data.last_update_check)
+                >= DAILY_CHECK_SECS
+            && matches!(
+                self.updater.state(),
+                UpdateState::Idle | UpdateState::UpToDate | UpdateState::Failed(_)
+            )
+        {
+            // Left open for days: look again once a day.
+            self.check_updates();
         }
         if self.updater.state() == UpdateState::Restarting {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+
+    /// Looks for an update and remembers when, for the daily check and the page.
+    pub(super) fn check_updates(&mut self) {
+        self.updater.check();
+        self.store.data.last_update_check = crate::store::now_secs();
+        self.store.save();
     }
 
     pub(super) fn updates_page(&mut self, ui: &mut Ui) {
@@ -58,7 +76,7 @@ impl App {
         // Looking when the page opens is what people expect; once per opening.
         if state == UpdateState::Idle && !self.profile_edit.updates_checked {
             self.profile_edit.updates_checked = true;
-            self.updater.check();
+            self.check_updates();
         }
         let mut action = None;
         ui.add_space(14.0);
@@ -80,26 +98,46 @@ impl App {
                 }
             });
         } else {
+            let checked = self.store.data.last_update_check;
             panel(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Image::new(egui::include_image!("../../assets/icon.png"))
+                            .fit_to_exact_size(vec2(64.0, 64.0))
+                            .corner_radius(14),
+                    );
+                    ui.add_space(14.0);
                     ui.vertical(|ui| {
-                        ui.label(
-                            RichText::new(t.upd_installed)
-                                .size(12.5)
-                                .color(theme::TEXT_3),
-                        );
-                        ui.label(
-                            RichText::new(self.updater.current_version())
-                                .font(FontId::new(40.0, theme::semibold())),
-                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("Mirage {}", self.updater.current_version()))
+                                    .font(FontId::new(22.0, theme::semibold()))
+                                    .color(theme::TEXT),
+                            );
+                            ui.add_space(6.0);
+                            state_chip(ui, t, &state);
+                        });
+                        ui.add_space(2.0);
+                        let when = if checked == 0 {
+                            t.upd_never_checked.to_string()
+                        } else {
+                            t.upd_checked_ago(crate::store::now_secs().saturating_sub(checked))
+                        };
+                        ui.label(RichText::new(when).size(12.5).color(theme::TEXT_3));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         action = main_button(ui, t, &state);
                     });
                 });
-                ui.add_space(14.0);
-                horizon(ui, &state);
-                ui.add_space(12.0);
+                if matches!(
+                    state,
+                    UpdateState::Checking | UpdateState::Downloading { .. }
+                ) {
+                    ui.add_space(18.0);
+                    progress_track(ui, &state);
+                }
+                ui.add_space(16.0);
                 status_line(ui, t, &state);
             });
         }
@@ -130,7 +168,7 @@ impl App {
         });
 
         match action {
-            Some(Action::Check) => self.updater.check(),
+            Some(Action::Check) => self.check_updates(),
             Some(Action::Download) => self.updater.download(),
             Some(Action::Restart) => self.updater.apply(),
             Some(Action::OpenDownloads) => ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
@@ -221,40 +259,52 @@ fn release_notes(ui: &mut Ui, t: &crate::strings::Strings, release: &Release) {
     ui.label(RichText::new(shown).size(13.5).color(theme::TEXT_2));
 }
 
-/// The horizon: a hairline across the panel and a small sun.
-fn horizon(ui: &mut Ui, state: &UpdateState) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
-    let y = rect.center().y;
-    let (left, right) = (rect.left() + 6.0, rect.right() - 6.0);
-    let span = right - left;
-    let time = ui.input(|i| i.time) as f32;
-    let (position, fill, color) = match state {
+/// Seconds between automatic checks while the app stays open.
+const DAILY_CHECK_SECS: u64 = 24 * 60 * 60;
+
+/// A small pill naming where things stand.
+fn state_chip(ui: &mut Ui, t: &crate::strings::Strings, state: &UpdateState) {
+    let (text, ink, fill) = match state {
+        UpdateState::UpToDate => (t.upd_chip_current, theme::SUCCESS, theme::SUCCESS_SOFT),
+        UpdateState::Checking => (t.upd_chip_checking, theme::TEXT_2, theme::SURFACE_HOVER),
+        UpdateState::Available(_) => (t.upd_chip_new, theme::WARNING, theme::WARNING_SOFT),
+        UpdateState::Downloading { .. } => {
+            (t.upd_chip_downloading, theme::TEXT, theme::SURFACE_HOVER)
+        }
+        UpdateState::Ready(_) | UpdateState::Restarting => {
+            (t.upd_chip_ready, theme::SUCCESS, theme::SUCCESS_SOFT)
+        }
+        UpdateState::Failed(_) => (t.upd_chip_failed, theme::DANGER, theme::DANGER_SOFT),
+        UpdateState::Idle | UpdateState::Unavailable => return,
+    };
+    theme::chip(ui, text, ink, fill);
+}
+
+/// Only while something happens: a segment that sweeps across while it looks
+/// (it has no length to show), a bar that fills while it downloads.
+fn progress_track(ui: &mut Ui, state: &UpdateState) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    let round = CornerRadius::same(3);
+    painter.rect_filled(rect, round, theme::BG);
+    match state {
         UpdateState::Checking => {
-            // Back and forth until the answer comes.
             ui.ctx().request_repaint();
-            ((time * 0.9).sin() * 0.5 + 0.5, 0.0, theme::TEXT)
+            let time = ui.input(|i| i.time) as f32;
+            // 1.4 s per sweep, eased so it starts and lands softly.
+            let phase = (time / 1.4).fract();
+            let eased = phase * phase * (3.0 - 2.0 * phase);
+            let width = rect.width() * 0.28;
+            let left = rect.left() - width + (rect.width() + width) * eased;
+            let segment =
+                egui::Rect::from_min_size(pos2(left, rect.top()), vec2(width, rect.height()));
+            painter.rect_filled(segment, round, theme::ACCENT);
         }
         UpdateState::Downloading { percent } => {
-            let p = f32::from(*percent) / 100.0;
-            (p, p, theme::ACCENT)
+            let p = f32::from(*percent).clamp(0.0, 100.0) / 100.0;
+            let filled = egui::Rect::from_min_size(rect.min, vec2(rect.width() * p, rect.height()));
+            painter.rect_filled(filled, round, theme::SUCCESS);
         }
-        UpdateState::Ready(_) | UpdateState::Restarting => (1.0, 1.0, theme::SUCCESS),
-        UpdateState::UpToDate => (1.0, 0.0, theme::SUCCESS),
-        UpdateState::Available(_) => (0.0, 0.0, theme::WARNING),
-        _ => (0.0, 0.0, theme::TEXT_3),
-    };
-    let painter = ui.painter();
-    painter.line_segment(
-        [pos2(left, y), pos2(right, y)],
-        Stroke::new(1.5, theme::BORDER),
-    );
-    if fill > 0.0 {
-        painter.line_segment(
-            [pos2(left, y), pos2(left + span * fill, y)],
-            Stroke::new(2.0, color),
-        );
+        _ => {}
     }
-    let sun = pos2(left + span * position, y);
-    painter.circle_filled(sun, 11.0, color.gamma_multiply(0.12));
-    painter.circle_filled(sun, 6.0, color);
 }
