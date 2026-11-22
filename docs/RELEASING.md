@@ -31,7 +31,7 @@ never touched by an update or an uninstall of the program files.
 The app reads releases **without any token**, so they must be in a repository
 that is readable anonymously. A release in a private repository is invisible to
 users and the updater would report an error. The default feed is
-`https://github.com/3d2faebf4bca96cacf2aa10dc002bf42/Mirage` (constant
+`https://github.com/blockdev2/Mirage-Private` (constant
 `DEFAULT_SOURCE` in `client/apps/desktop/src/updater.rs`); change that constant
 if releases move. Never put a token in the client.
 
