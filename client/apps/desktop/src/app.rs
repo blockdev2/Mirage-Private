@@ -290,6 +290,8 @@ pub struct App {
     share_quality: usize,
     /// Send the computer's sound with the next share (not saved).
     share_audio: bool,
+    /// The values of the "Personalizado" quality.
+    share_custom: crate::store::CustomShare,
     /// When the last connect request was sent. While it is recent the button
     /// stays disabled: repeated clicks make the server flood-ban this address.
     connect_started: Option<Instant>,
@@ -321,6 +323,13 @@ impl App {
         theme::apply(&cc.egui_ctx);
         stream::install_waker(&cc.egui_ctx);
         let store = Store::open();
+        let share_quality = store
+            .data
+            .share_quality
+            .filter(|q| *q < share::QUALITIES.len())
+            .unwrap_or(share::DEFAULT_QUALITY);
+        let share_audio = store.data.share_audio;
+        let share_custom = store.data.share_custom;
         // Start from the server used last, if any.
         let address = store
             .data
@@ -406,9 +415,10 @@ impl App {
             share_source: None,
             share_restart: None,
             share_source_title: String::new(),
-            share_previews: share::Previews::default(),
-            share_quality: share::DEFAULT_QUALITY,
-            share_audio: false,
+            share_previews: share::Previews::live(),
+            share_quality,
+            share_audio,
+            share_custom,
             connect_started: None,
             open_channels: HashMap::new(),
             server_open: true,
@@ -830,6 +840,9 @@ impl App {
             vad_threshold: audio.threshold_db,
             noise_suppression: audio.noise.level(),
             monitor: audio.monitor,
+            bitrate_kbps: audio
+                .bitrate_kbps
+                .clamp(crate::store::VOICE_KBPS_MIN, crate::store::VOICE_KBPS_MAX),
         });
         self.store.save();
     }
@@ -968,6 +981,7 @@ impl eframe::App for App {
         self.settings_window(&ctx);
         self.image_viewer_window(&ctx);
         self.share_picker_window(&ctx);
+        self.stream_popout(&ctx);
         // Uploads go one by one so they post in the order they were added.
         if self.pending_attachments.is_empty() {
             if let Some(file) = self.upload_queue.pop_front() {
@@ -1989,7 +2003,8 @@ impl App {
                 .watching
                 .as_ref()
                 .is_some_and(|w| w.client == client.id);
-            if !client.is_self && !watched {
+            // Our own card opens what we are sharing, like the others' do.
+            if !watched {
                 let response = response.on_hover_text(t.watch_stream);
                 if response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

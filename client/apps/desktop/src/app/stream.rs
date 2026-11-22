@@ -27,6 +27,10 @@ pub(super) struct Watching {
     pub state: WatchState,
     /// The stream fills the whole window.
     pub fullscreen: bool,
+    /// The stream is shown in its own window instead of the main one.
+    pub popped: bool,
+    /// The fullscreen state last sent to the separate window.
+    popped_fullscreen: bool,
     texture: Option<egui::TextureHandle>,
     /// Sequence of the last frame shown.
     seen: u64,
@@ -54,14 +58,37 @@ const STRIP_HEIGHT: f32 = 96.0;
 const STRIP_GAP: f32 = 12.0;
 
 impl App {
+    /// Whether the stream view shows our own share.
+    pub(super) fn watching_self(&self) -> bool {
+        let own = self.snapshot.as_ref().map(|s| s.own_client_id);
+        self.watching
+            .as_ref()
+            .is_some_and(|w| Some(w.client) == own)
+    }
+
     pub(super) fn watch_stream(&mut self, client: u16) {
         if self.watching.as_ref().is_some_and(|w| w.client == client) {
+            return;
+        }
+        if self.snapshot.as_ref().map(|s| s.own_client_id) == Some(client) {
+            // Our own share: shown from the screen copy, nothing to join.
+            self.watching = Some(Watching {
+                client,
+                state: WatchState::Playing,
+                fullscreen: false,
+                popped: false,
+                popped_fullscreen: false,
+                texture: None,
+                seen: 0,
+            });
             return;
         }
         self.watching = Some(Watching {
             client,
             state: WatchState::Connecting,
             fullscreen: false,
+            popped: false,
+            popped_fullscreen: false,
             texture: None,
             seen: 0,
         });
@@ -69,7 +96,8 @@ impl App {
     }
 
     pub(super) fn stop_watching(&mut self) {
-        if self.watching.take().is_some() {
+        let own = self.watching_self();
+        if self.watching.take().is_some() && !own {
             self.send(Command::StopWatching);
         }
     }
@@ -125,14 +153,107 @@ impl App {
         let width = ui.available_width();
         let stage_height = (room - STRIP_HEIGHT - STRIP_GAP).max(STRIP_HEIGHT);
         let (stage, _) = ui.allocate_exact_size(vec2(width, stage_height), Sense::hover());
-        self.stream_stage(ui, stage);
+        if self.watching.as_ref().is_some_and(|w| w.popped) {
+            self.popped_placeholder(ui, stage);
+        } else {
+            self.stream_stage(ui, stage);
+        }
         ui.add_space(STRIP_GAP);
         self.participants_content(ui, participants, STRIP_HEIGHT, None);
     }
 
+    /// Where the stream was, while it is in its own window.
+    fn popped_placeholder(&mut self, ui: &mut egui::Ui, stage: Rect) {
+        let t = self.t;
+        let painter = ui.painter();
+        painter.rect_filled(stage, CornerRadius::same(8), theme::SURFACE);
+        painter.rect_stroke(
+            stage,
+            CornerRadius::same(8),
+            Stroke::new(1.0, theme::BORDER_SOFT),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            stage.center() - vec2(0.0, 30.0),
+            Align2::CENTER_CENTER,
+            icon::ARROW_SQUARE_OUT,
+            FontId::new(28.0, theme::icons()),
+            theme::TEXT_3,
+        );
+        painter.text(
+            stage.center(),
+            Align2::CENTER_CENTER,
+            t.stream_popped,
+            FontId::new(14.0, theme::medium()),
+            theme::TEXT_2,
+        );
+        let button = Rect::from_center_size(stage.center() + vec2(0.0, 40.0), vec2(170.0, 40.0));
+        let mut child = ui.new_child(UiBuilder::new().max_rect(button));
+        if theme::button(
+            &mut child,
+            t.stream_pop_in,
+            None,
+            theme::Tone::Secondary,
+            170.0,
+        )
+        .clicked()
+        {
+            if let Some(watching) = self.watching.as_mut() {
+                watching.popped = false;
+            }
+        }
+    }
+
+    /// The stream in a window of its own, while it is popped out. Closing that
+    /// window brings the stream back into the main one.
+    pub(super) fn stream_popout(&mut self, ctx: &egui::Context) {
+        if !self.watching.as_ref().is_some_and(|w| w.popped) {
+            return;
+        }
+        let title = self
+            .watching
+            .as_ref()
+            .and_then(|w| {
+                let snapshot = self.snapshot.as_ref()?;
+                snapshot.clients.iter().find(|c| c.id == w.client)
+            })
+            .map(|c| format!("{} · Mirage", c.name))
+            .unwrap_or_else(|| "Mirage".to_string());
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("mirage-stream-window"),
+            egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size([1280.0, 760.0])
+                .with_min_inner_size([480.0, 300.0]),
+            |ctx, _class| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(Color32::from_rgb(8, 9, 11)))
+                    .show(ctx, |ui| {
+                        let stage = ui.max_rect();
+                        self.stream_stage(ui, stage);
+                    });
+                let closed = ctx.input(|i| i.viewport().close_requested());
+                if let Some(watching) = self.watching.as_mut() {
+                    if closed {
+                        watching.popped = false;
+                        watching.fullscreen = false;
+                    } else if watching.fullscreen != watching.popped_fullscreen {
+                        watching.popped_fullscreen = watching.fullscreen;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                            watching.fullscreen,
+                        ));
+                    }
+                }
+            },
+        );
+    }
+
     /// Puts the window in or out of fullscreen to match the stream view.
     pub(super) fn sync_stream_fullscreen(&mut self, ctx: &egui::Context) {
-        let wanted = self.watching.as_ref().is_some_and(|w| w.fullscreen);
+        let wanted = self
+            .watching
+            .as_ref()
+            .is_some_and(|w| w.fullscreen && !w.popped);
         if wanted != self.window_fullscreen {
             self.window_fullscreen = wanted;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(wanted));
@@ -150,10 +271,18 @@ impl App {
             })
             .map(|c| c.name.clone())
             .unwrap_or_default();
+        let own = self.watching_self();
+        let own_picture = if own {
+            self.share_previews.own_share(ui.ctx(), self.share_source)
+        } else {
+            None
+        };
         let Some(watching) = self.watching.as_mut() else {
             return;
         };
-        if let Some((sequence, frame)) = frames().take_latest(watching.seen) {
+        if own {
+            watching.texture = own_picture;
+        } else if let Some((sequence, frame)) = frames().take_latest(watching.seen) {
             watching.seen = sequence;
             // Decoded video is opaque, so premultiplied is the same picture
             // without the per-pixel unmultiply.
@@ -173,8 +302,22 @@ impl App {
             }
         }
 
+        // With a picture the stage is just the picture, floating on the page
+        // (no black bars); the overlays follow its corners.
+        let picture = match (watching.state, &watching.texture) {
+            (WatchState::Failed(_), _) | (_, None) => None,
+            (_, Some(texture)) => {
+                // Contain: the whole screen, never distorted.
+                let size = texture.size_vec2();
+                let scale = (stage.width() / size.x).min(stage.height() / size.y);
+                Some(Rect::from_center_size(stage.center(), size * scale))
+            }
+        };
+        let stage = picture.unwrap_or(stage);
         let painter = ui.painter().with_clip_rect(stage);
-        painter.rect_filled(stage, CornerRadius::same(8), Color32::from_rgb(8, 9, 11));
+        if picture.is_none() {
+            painter.rect_filled(stage, CornerRadius::same(8), Color32::from_rgb(8, 9, 11));
+        }
         match (watching.state, &watching.texture) {
             (WatchState::Failed(text), _) => {
                 painter.text(
@@ -193,16 +336,9 @@ impl App {
                 );
             }
             (_, Some(texture)) => {
-                // Contain: the whole screen, letterboxed, never distorted.
-                let size = texture.size_vec2();
-                let scale = (stage.width() / size.x).min(stage.height() / size.y);
-                let shown = Rect::from_center_size(stage.center(), size * scale);
-                painter.image(
-                    texture.id(),
-                    shown,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                egui::Image::new((texture.id(), stage.size()))
+                    .corner_radius(8)
+                    .paint_at(ui, stage);
             }
             (_, None) => {
                 let spin = ui.input(|i| i.time) as f32 * 4.0;
@@ -261,6 +397,31 @@ impl App {
             .clicked()
         {
             self.stop_watching();
+            return;
+        }
+        let popped = self.watching.as_ref().is_some_and(|w| w.popped);
+        let pop = close.translate(vec2(-44.0, 0.0));
+        painter.rect(
+            pop,
+            CornerRadius::same(8),
+            Color32::from_black_alpha(140),
+            Stroke::NONE,
+            egui::StrokeKind::Inside,
+        );
+        let pop_label = if popped {
+            t.stream_pop_in
+        } else {
+            t.stream_pop_out
+        };
+        let mut pop_ui = ui.new_child(UiBuilder::new().max_rect(pop));
+        if theme::glyph_button(&mut pop_ui, icon::ARROW_SQUARE_OUT, pop_label, 36.0, 0.0)
+            .on_hover_text(pop_label)
+            .clicked()
+        {
+            if let Some(watching) = self.watching.as_mut() {
+                watching.popped = !watching.popped;
+                watching.fullscreen = false;
+            }
             return;
         }
 

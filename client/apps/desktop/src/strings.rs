@@ -58,6 +58,11 @@ pub struct Strings {
     pub invite_copied: &'static str,
     pub invite_hint: &'static str,
     pub monitor_title: &'static str,
+    pub voice_bitrate_title: &'static str,
+    pub stream_pop_out: &'static str,
+    pub stream_pop_in: &'static str,
+    pub stream_popped: &'static str,
+    pub voice_bitrate_custom: &'static str,
     pub monitor_hint: &'static str,
     pub hide_address: &'static str,
     pub address_hint: &'static str,
@@ -228,7 +233,14 @@ pub struct Strings {
     pub share_audio_hint: &'static str,
     pub share_quality: &'static str,
     /// Light, standard, high, max: name, size and bitrate.
-    pub share_quality_levels: [&'static str; 5],
+    pub share_quality_levels: [&'static str; 6],
+    pub share_custom_resolution: &'static str,
+    pub share_border: &'static str,
+    pub share_border_hint: &'static str,
+    pub share_custom_fps: &'static str,
+    pub share_custom_bitrate: &'static str,
+    pub share_custom_audio: &'static str,
+    pub share_custom_native: &'static str,
     pub share_screens: &'static str,
     pub share_windows: &'static str,
     pub share_no_window: &'static str,
@@ -313,7 +325,13 @@ pub struct Strings {
     pub about_license: &'static str,
     pub about_license_value: &'static str,
     pub about_service: &'static str,
-    pub upd_installed: &'static str,
+    pub upd_never_checked: &'static str,
+    pub upd_chip_current: &'static str,
+    pub upd_chip_checking: &'static str,
+    pub upd_chip_new: &'static str,
+    pub upd_chip_downloading: &'static str,
+    pub upd_chip_ready: &'static str,
+    pub upd_chip_failed: &'static str,
     pub upd_check_again: &'static str,
     pub upd_checking: &'static str,
     pub upd_up_to_date: &'static str,
@@ -444,6 +462,30 @@ impl Strings {
         format!("A versão {version} está pronta para instalar.")
     }
 
+    /// Under the voice bitrate choice: what it costs and what it is good for.
+    pub fn voice_bitrate_hint(&self, kbps: u32) -> String {
+        let note = match kbps {
+            0..=40 => "economiza internet, voz um pouco abafada",
+            41..=80 => "o padrão, voz clara",
+            81..=160 => "voz mais rica",
+            _ => "máxima; ajuda em música, quase nada na voz",
+        };
+        format!("{kbps} kbps · {note}")
+    }
+
+    /// "Verificado agora mesmo", "Verificado há 5 min", "… há 3 h", "… há 2 dias".
+    pub fn upd_checked_ago(&self, secs: u64) -> String {
+        match secs {
+            0..=59 => "Verificado agora mesmo".to_string(),
+            60..=3599 => format!("Verificado há {} min", secs / 60),
+            3600..=86399 => format!("Verificado há {} h", secs / 3600),
+            _ => match secs / 86400 {
+                1 => "Verificado há 1 dia".to_string(),
+                days => format!("Verificado há {days} dias"),
+            },
+        }
+    }
+
     pub fn upd_progress(&self, percent: u8) -> String {
         format!("{} {percent}%", self.upd_downloading)
     }
@@ -505,6 +547,11 @@ pub const PT: Strings = Strings {
     invite_copied: "Link copiado",
     invite_hint: "Copia um link que leva direto a este canal",
     monitor_title: "Ouvir meu microfone",
+    voice_bitrate_title: "Qualidade da voz (kbps)",
+    stream_pop_out: "Abrir em outra janela",
+    stream_pop_in: "Trazer de volta",
+    stream_popped: "A transmissão está aberta em outra janela.",
+    voice_bitrate_custom: "Outro",
     monitor_hint: "Toca sua voz já processada nos fones. Use fones para evitar eco.",
     hide_address: "Ocultar endereço",
     address_hint: "servidor.exemplo.com",
@@ -680,7 +727,15 @@ pub const PT: Strings = Strings {
         "Alta · 1080p 30 fps · 6 Mbps",
         "Máxima · 1080p 60 fps · 9 Mbps",
         "Original · resolução da tela até 4K · 60 fps · 20 Mbps",
+        "Personalizado · resolução, FPS e taxa de bits à sua escolha",
     ],
+    share_custom_resolution: "Resolução",
+    share_border: "Mostrar a borda amarela na tela compartilhada",
+    share_border_hint: "O Windows desenha uma borda amarela em volta do que está sendo transmitido. Desligada, ela some (Windows 11); vale a partir da próxima transmissão.",
+    share_custom_fps: "FPS",
+    share_custom_bitrate: "Taxa de bits",
+    share_custom_audio: "Áudio (kbps)",
+    share_custom_native: "Original",
     share_screens: "Telas",
     share_windows: "Janelas",
     share_no_window: "Nenhuma janela aberta.",
@@ -764,7 +819,13 @@ pub const PT: Strings = Strings {
     about_license: "Licença",
     about_license_value: "MIT, código aberto",
     about_service: "Serviço local",
-    upd_installed: "Versão instalada",
+    upd_never_checked: "Ainda não procurou atualizações",
+    upd_chip_current: "Atualizado",
+    upd_chip_checking: "Procurando",
+    upd_chip_new: "Nova versão",
+    upd_chip_downloading: "Baixando",
+    upd_chip_ready: "Pronta",
+    upd_chip_failed: "Falhou",
     upd_check_again: "Procurar de novo",
     upd_checking: "Procurando…",
     upd_up_to_date: "Você já está na versão mais recente.",

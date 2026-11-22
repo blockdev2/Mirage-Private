@@ -191,7 +191,11 @@ where
     let settings = Settings::new(
         item,
         CursorCaptureSettings::WithCursor,
-        DrawBorderSettings::Default,
+        if flags.config.border {
+            DrawBorderSettings::Default
+        } else {
+            DrawBorderSettings::WithoutBorder
+        },
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,

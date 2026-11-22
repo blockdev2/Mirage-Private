@@ -67,6 +67,32 @@ pub enum ChatScope {
     Private,
 }
 
+/// A hand-picked share quality; bounded by `Quality::custom`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct CustomQuality {
+    /// Picture height; 0 is the screen's own size.
+    #[serde(default)]
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+/// The preset named `quality`, or the custom one when it says `custom`.
+pub fn share_quality(
+    quality: Option<&str>,
+    custom: Option<CustomQuality>,
+) -> Option<crate::share_media::Quality> {
+    match (quality, custom) {
+        (Some("custom"), Some(c)) => Some(crate::share_media::Quality::custom(
+            c.height,
+            c.fps,
+            c.bitrate_kbps,
+        )),
+        (Some(name), _) => crate::share_media::Quality::from_name(name),
+        (None, _) => None,
+    }
+}
+
 /// Commands from the UI.
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -178,6 +204,9 @@ pub enum Command {
         /// Hear our own processed microphone locally.
         #[serde(default)]
         monitor: Option<bool>,
+        /// Opus voice bitrate in kbit/s (6 to 510).
+        #[serde(default)]
+        bitrate_kbps: Option<u32>,
     },
     /// Ask for the device lists again (after plugging a headset, for example).
     Devices,
@@ -245,9 +274,15 @@ pub enum Command {
         monitor: Option<usize>,
         #[serde(default)]
         window: Option<i64>,
-        /// `light`, `standard` (the default), `high` or `max`.
+        /// `light`, `standard` (the default), `high`, `max`, `source` or
+        /// `custom` (then `custom` holds the values).
         #[serde(default)]
         quality: Option<String>,
+        #[serde(default)]
+        custom: Option<CustomQuality>,
+        /// Show Windows' yellow capture border (the default).
+        #[serde(default)]
+        border: Option<bool>,
         /// Send the computer's sound (all but Mirage) in our voice.
         #[serde(default)]
         audio: bool,
@@ -258,6 +293,8 @@ pub enum Command {
     /// restarting it.
     ShareQuality {
         quality: String,
+        #[serde(default)]
+        custom: Option<CustomQuality>,
     },
     /// Internal: a report from the screen share worker.
     #[serde(skip)]
@@ -596,7 +633,7 @@ mod tests {
         assert!(matches!(stop, Command::ShareStop));
         let quality: Command =
             serde_json::from_str(r#"{"op":"share_quality","quality":"max"}"#).unwrap();
-        assert!(matches!(quality, Command::ShareQuality { quality } if quality == "max"));
+        assert!(matches!(quality, Command::ShareQuality { quality, .. } if quality == "max"));
         let event = serde_json::to_value(Event::ShareState {
             state: "live",
             reason: None,

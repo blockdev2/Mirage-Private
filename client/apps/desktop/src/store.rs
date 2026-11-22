@@ -240,6 +240,11 @@ pub const MAX_PEER_VOLUME: f32 = 4.0;
 /// Default voice activation threshold in dBFS (matches the bridge's default).
 pub const DEFAULT_VAD_DB: f32 = -42.0;
 pub const VAD_MIN_DB: f32 = -70.0;
+/// Voice bitrate presets in kbit/s, and the range of a custom value.
+pub const VOICE_KBPS_PRESETS: [u32; 6] = [32, 64, 96, 128, 192, 320];
+pub const DEFAULT_VOICE_KBPS: u32 = 64;
+pub const VOICE_KBPS_MIN: u32 = 16;
+pub const VOICE_KBPS_MAX: u32 = 320;
 pub const VAD_MAX_DB: f32 = -10.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,6 +260,8 @@ pub struct AudioSettings {
     /// Not saved: hearing yourself is a quick check, never a startup surprise.
     #[serde(skip)]
     pub monitor: bool,
+    /// Voice bitrate in kbit/s.
+    pub bitrate_kbps: u32,
 }
 
 impl Default for AudioSettings {
@@ -268,6 +275,7 @@ impl Default for AudioSettings {
             input_device: String::new(),
             output_device: String::new(),
             monitor: false,
+            bitrate_kbps: DEFAULT_VOICE_KBPS,
         }
     }
 }
@@ -290,10 +298,47 @@ pub struct Data {
     pub transcripts: std::collections::HashMap<String, Vec<SavedMessage>>,
     /// Do not look for an update when the app opens (the Updates page still can).
     pub skip_update_check: bool,
+    /// When the app last looked for an update (Unix seconds; 0 never).
+    pub last_update_check: u64,
     /// Go away by itself after this many minutes without using the computer;
     /// 0 turns it off.
     pub idle_away_minutes: u32,
+    /// The screen share quality last used (index into the presets).
+    pub share_quality: Option<usize>,
+    /// Send the computer's sound with a share, as last chosen.
+    pub share_audio: bool,
+    /// The values of the "Personalizado" share quality.
+    pub share_custom: CustomShare,
+    /// Hide Windows' yellow border around what is shared.
+    pub share_hide_border: bool,
 }
+
+/// A hand-picked share quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomShare {
+    /// Picture height; 0 is the screen's own size.
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+impl Default for CustomShare {
+    fn default() -> Self {
+        Self {
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6000,
+        }
+    }
+}
+
+/// Choices offered for a custom share.
+pub const SHARE_HEIGHTS: [u32; 6] = [360, 480, 720, 1080, 1440, 0];
+pub const SHARE_FPS: [u32; 3] = [5, 30, 60];
+pub const SHARE_KBPS_STEP: u32 = 500;
+pub const SHARE_KBPS_MIN: u32 = 500;
+pub const SHARE_KBPS_MAX: u32 = 50_000;
 
 /// One chat message as kept on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

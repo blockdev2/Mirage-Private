@@ -25,6 +25,13 @@ pub enum Quality {
     /// The screen's own resolution (up to 4K) at 60 fps, 20 Mbit/s: no
     /// scaling at all, for fast uplinks.
     Source,
+    /// Chosen by hand; build it with `Quality::custom`, which bounds it.
+    Custom {
+        /// Picture height (16:9 width follows); 0 is the screen's own size.
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    },
 }
 
 impl Quality {
@@ -44,6 +51,22 @@ impl Quality {
             Self::High => "high",
             Self::Max => "max",
             Self::Source => "source",
+            Self::Custom { .. } => "custom",
+        }
+    }
+
+    /// A hand-picked quality, kept within what the encoder and a viewer take:
+    /// 240 to 2160 lines (or 0, the screen's own), 1 to 60 fps, 300 to
+    /// 50000 kbit/s.
+    pub fn custom(height: u32, fps: u32, bitrate_kbps: u32) -> Self {
+        Self::Custom {
+            height: if height == 0 {
+                0
+            } else {
+                height.clamp(240, 2160)
+            },
+            fps: fps.clamp(1, 60),
+            bitrate_kbps: bitrate_kbps.clamp(300, 50_000),
         }
     }
 
@@ -58,6 +81,19 @@ impl Quality {
             Self::Standard => (1280, 720, 30, 3000),
             Self::High => (1920, 1080, 30, 6000),
             Self::Max => (1920, 1080, 60, 9000),
+            Self::Custom {
+                height,
+                fps,
+                bitrate_kbps,
+            } => {
+                let (w, h) = if height == 0 {
+                    (3840, 2160)
+                } else {
+                    // Even 16:9 width for the height.
+                    ((height * 16 / 9 + 1) & !1, height)
+                };
+                (w, h, fps, bitrate_kbps)
+            }
             Self::Source => (3840, 2160, 60, 20000),
         };
         CaptureConfig {
@@ -79,6 +115,9 @@ pub struct CaptureConfig {
     pub max_height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// The yellow border Windows draws around what is being captured. Off
+    /// works on Windows 11; older systems keep showing it.
+    pub border: bool,
 }
 
 impl Default for CaptureConfig {
@@ -89,6 +128,7 @@ impl Default for CaptureConfig {
             max_height: 720,
             fps: 30,
             bitrate_kbps: 3000,
+            border: true,
         }
     }
 }
@@ -229,5 +269,33 @@ mod tests {
             time_100ns: 0,
         };
         assert!(!format!("{unit:?}").contains("[7"));
+    }
+
+    #[test]
+    fn a_custom_quality_is_bounded_and_valid() {
+        let q = Quality::custom(1080, 30, 8000);
+        let c = q.apply(CaptureConfig::default());
+        assert_eq!(
+            (c.max_width, c.max_height, c.fps, c.bitrate_kbps),
+            (1920, 1080, 30, 8000)
+        );
+        assert!(c.validate().is_ok());
+        let native = Quality::custom(0, 60, 20_000).apply(CaptureConfig::default());
+        assert_eq!((native.max_width, native.max_height), (3840, 2160));
+        assert_eq!(
+            Quality::custom(5, 500, 1),
+            Quality::Custom {
+                height: 240,
+                fps: 60,
+                bitrate_kbps: 300
+            }
+        );
+        assert_eq!(
+            Quality::custom(480, 5, 1000)
+                .apply(CaptureConfig::default())
+                .max_width,
+            854
+        );
+        assert_eq!(Quality::from_name("custom"), None);
     }
 }
