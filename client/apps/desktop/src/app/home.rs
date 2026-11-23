@@ -21,14 +21,16 @@ use std::time::Instant;
 
 /// Widest the hub content grows on large windows.
 const HOME_MAX_WIDTH: f32 = 1480.0;
-const SIDE_COLUMN_WIDTH: f32 = 344.0;
-const COLUMN_GAP: f32 = 24.0;
-/// Below this content width the two columns stack into one.
-const STACK_BREAKPOINT: f32 = 860.0;
 const SEARCH_WIDTH: f32 = 300.0;
 /// Content width from which the header puts search beside the title.
 const HEADER_SPLIT_WIDTH: f32 = 700.0;
 const RECENTS_SHOWN: usize = 5;
+/// The home column and roughly how tall it stands, for centering it.
+const LAUNCHER_WIDTH: f32 = 640.0;
+const LAUNCHER_HEIGHT: f32 = 470.0;
+const CONNECT_WIDTH: f32 = 140.0;
+const BAR_HEIGHT: f32 = 54.0;
+const BAR_RADIUS: u8 = 12;
 const ROW_BUTTON: f32 = 32.0;
 
 /// Which screen the main area shows.
@@ -327,50 +329,242 @@ fn list_row(ui: &mut egui::Ui, spec: &RowSpec<'_>) -> RowOutcome {
     .inner
 }
 
-/// Full-width row that opens or closes a section: icon, label, caret.
-fn disclosure_row(ui: &mut egui::Ui, glyph: &str, label: &str, open: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, label));
-    let painter = ui.painter();
-    let fill = if response.hovered() {
+/// What leads a pill: an icon, or a person's small round picture.
+enum Lead<'a> {
+    Glyph(&'a str),
+    Face(&'a str, Option<&'a egui::TextureHandle>),
+}
+
+const FACE: f32 = 22.0;
+
+/// A small rounded choice under the address bar. `on` marks it chosen
+/// (green); `menu` adds a caret for the ones that open a list.
+fn pill(ui: &mut egui::Ui, lead: Lead, label: &str, on: bool, menu: bool) -> egui::Response {
+    let font = FontId::new(14.0, theme::medium());
+    let icon_font = FontId::new(15.0, theme::icons());
+    let ink = if on { theme::SUCCESS } else { theme::TEXT_2 };
+    let painter = ui.painter().clone();
+    let text = painter.layout_no_wrap(label.to_string(), font, ink);
+    let glyph = match lead {
+        Lead::Glyph(g) => Some(painter.layout_no_wrap(g.to_string(), icon_font.clone(), ink)),
+        Lead::Face(..) => None,
+    };
+    let lead_width = glyph.as_ref().map_or(FACE, |g| g.size().x);
+    let caret = menu
+        .then(|| painter.layout_no_wrap(icon::CARET_DOWN.to_string(), icon_font, theme::TEXT_3));
+    let gap = 8.0;
+    // A face sits closer to the pill's rounded edge than an icon does.
+    let left = if glyph.is_some() { 14.0 } else { 7.0 };
+    let width = left
+        + 14.0
+        + text.size().x
+        + lead_width
+        + gap
+        + caret.as_ref().map_or(0.0, |g| g.size().x + gap);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 36.0), Sense::click());
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, label));
+    let fill = if response.hovered() && ui.is_enabled() {
         theme::SURFACE_HOVER
     } else {
-        theme::SURFACE_RAISED
+        theme::SURFACE
     };
-    painter.rect_filled(rect, CornerRadius::same(6), fill);
-    painter.rect_stroke(
+    let stroke = if on {
+        theme::SUCCESS.gamma_multiply(0.45)
+    } else {
+        theme::BORDER_SOFT
+    };
+    painter.rect(
         rect,
-        CornerRadius::same(6),
-        Stroke::new(1.0, theme::BORDER),
+        CornerRadius::same(18),
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    let mut x = rect.left() + left;
+    let y = rect.center().y;
+    match (glyph, lead) {
+        (Some(g), _) => painter.galley(pos2(x, y - g.size().y / 2.0), g, ink),
+        (None, Lead::Face(name, photo)) => {
+            let face = Rect::from_center_size(pos2(x + FACE / 2.0, y), vec2(FACE, FACE));
+            match photo {
+                Some(texture) => theme::photo_at(ui, face, texture, None),
+                None => theme::avatar_tiny(&painter, face.center(), FACE, name, false),
+            }
+        }
+        (None, Lead::Glyph(_)) => {}
+    }
+    x += lead_width + gap;
+    let w = text.size().x;
+    painter.galley(pos2(x, y - text.size().y / 2.0), text, ink);
+    x += w + gap;
+    if let Some(g) = caret {
+        painter.galley(pos2(x, y - g.size().y / 2.0), g, theme::TEXT_3);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The connect button as the bar's own right end rather than a button
+/// sitting inside it. Painted after the bar over the bar's exact outline, so
+/// it has the bar's full height and its right corners; the outline is drawn
+/// again on top so the two read as one shape. It brightens once there is
+/// somewhere to go (an address typed, or a last server for Enter).
+fn paint_connect_cap(
+    ui: &egui::Ui,
+    bar: Rect,
+    ring: Color32,
+    response: &egui::Response,
+    label: &str,
+    enabled: bool,
+    ready: bool,
+) {
+    let ctx = ui.ctx();
+    let lit = ctx.animate_bool_with_time(response.id.with("lit"), ready, 0.18);
+    let hover = ctx.animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered() && enabled,
+        0.1,
+    );
+    let cap = Rect::from_min_max(pos2(bar.right() - CONNECT_WIDTH, bar.top()), bar.max);
+    let corner = CornerRadius {
+        nw: 0,
+        sw: 0,
+        ne: BAR_RADIUS,
+        se: BAR_RADIUS,
+    };
+    let calm = theme::lerp_color(theme::SURFACE, theme::SURFACE_HOVER, hover);
+    let bright = theme::lerp_color(theme::ACCENT, theme::ACCENT_HOVER, hover);
+    let painter = ui.painter();
+    painter.rect_filled(cap, corner, theme::lerp_color(calm, bright, lit));
+    painter.line_segment(
+        [pos2(cap.left(), cap.top()), pos2(cap.left(), cap.bottom())],
+        Stroke::new(1.0, theme::lerp_color(ring, theme::ACCENT, lit)),
+    );
+    painter.rect_stroke(
+        bar,
+        CornerRadius::same(BAR_RADIUS),
+        Stroke::new(1.0, theme::lerp_color(ring, theme::ACCENT, 0.0)),
         StrokeKind::Inside,
     );
-    if response.has_focus() {
-        theme::focus_ring(painter, rect);
-    }
+    let ink = if enabled {
+        theme::lerp_color(theme::TEXT_2, theme::BG, lit)
+    } else {
+        theme::TEXT_3
+    };
     painter.text(
-        rect.left_center() + vec2(14.0, 0.0),
-        Align2::LEFT_CENTER,
+        cap.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(15.5, theme::semibold()),
+        ink,
+    );
+}
+
+/// A hidden address as round dots centered on the bar's middle line (the
+/// font's own bullet sits small and high). Clicking it starts editing.
+fn masked_address(ui: &mut egui::Ui, width: f32, chars: usize) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, BAR_HEIGHT), Sense::click());
+    let painter = ui.painter();
+    let step = 11.0;
+    let count = chars.min(((width - 8.0) / step) as usize);
+    for n in 0..count {
+        let center = pos2(rect.left() + 4.0 + step * n as f32, rect.center().y);
+        painter.circle_filled(center, 3.5, theme::TEXT);
+    }
+    response.on_hover_cursor(egui::CursorIcon::Text)
+}
+
+/// One person in the "Entrar como" list: picture, name, a quiet second
+/// line, and a check on the one in use.
+fn profile_choice(
+    ui: &mut egui::Ui,
+    name: &str,
+    note: Option<&str>,
+    photo: Option<&egui::TextureHandle>,
+    current: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, current, name));
+    let painter = ui.painter().clone();
+    if response.hovered() || current {
+        let fill = if response.hovered() {
+            theme::SURFACE_HOVER
+        } else {
+            theme::SURFACE_RAISED
+        };
+        painter.rect_filled(rect, CornerRadius::same(8), fill);
+    }
+    let size = 30.0;
+    let face = Rect::from_center_size(
+        pos2(rect.left() + 10.0 + size / 2.0, rect.center().y),
+        vec2(size, size),
+    );
+    match photo {
+        Some(texture) => theme::photo_at(ui, face, texture, None),
+        None => theme::avatar_tiny(&painter, face.center(), size, name, false),
+    }
+    let x = face.right() + 12.0;
+    let room = rect.right() - x - 36.0;
+    let title = theme::fit_text(
+        &painter,
+        name,
+        FontId::new(14.5, theme::medium()),
+        theme::TEXT,
+        room,
+    );
+    match note {
+        Some(note) => {
+            painter.galley(pos2(x, rect.center().y - 17.0), title, theme::TEXT);
+            let sub = theme::fit_text(
+                &painter,
+                note,
+                FontId::new(12.5, egui::FontFamily::Proportional),
+                theme::TEXT_3,
+                room,
+            );
+            painter.galley(pos2(x, rect.center().y + 2.0), sub, theme::TEXT_3);
+        }
+        None => {
+            let h = title.size().y;
+            painter.galley(pos2(x, rect.center().y - h / 2.0), title, theme::TEXT);
+        }
+    }
+    if current {
+        painter.text(
+            pos2(rect.right() - 16.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            icon::CHECK,
+            FontId::new(16.0, theme::icons()),
+            theme::SUCCESS,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A plain action row at the bottom of a menu, icon and label.
+fn menu_action(ui: &mut egui::Ui, glyph: &str, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let painter = ui.painter();
+    let ink = if response.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(8), theme::SURFACE_HOVER);
+        theme::TEXT
+    } else {
+        theme::TEXT_2
+    };
+    painter.text(
+        pos2(rect.left() + 10.0 + 15.0, rect.center().y),
+        Align2::CENTER_CENTER,
         glyph,
         FontId::new(16.0, theme::icons()),
-        theme::TEXT_2,
+        ink,
     );
     painter.text(
-        rect.left_center() + vec2(40.0, 0.0),
+        pos2(rect.left() + 52.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::new(14.0, egui::FontFamily::Proportional),
-        theme::TEXT,
-    );
-    painter.text(
-        rect.right_center() - vec2(14.0, 0.0),
-        Align2::RIGHT_CENTER,
-        if open {
-            icon::CARET_UP
-        } else {
-            icon::CARET_DOWN
-        },
-        FontId::new(14.0, theme::icons()),
-        theme::TEXT_2,
+        FontId::new(14.0, theme::medium()),
+        ink,
     );
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -474,7 +668,7 @@ impl App {
         if self.nav_item(ui, icon::PLUS, t.add_server, false) {
             self.open_favorite_dialog(None);
         }
-        if self.in_session() && self.nav_item(ui, icon::GEAR, "Administração", false) {
+        if self.in_session() && self.nav_item(ui, icon::GEAR, "AdministraÃ§Ã£o", false) {
             self.open_admin_window();
         }
 
@@ -530,62 +724,430 @@ impl App {
 // Main screens ----------------------------------------------------------------
 
 impl App {
+    /// The home screen: one centered column. A greeting, the address with its
+    /// connect button, the few choices that go with it as small pills, then
+    /// the recent servers.
     pub(super) fn home_view(&mut self, ui: &mut egui::Ui) {
-        let t = self.t;
         egui::ScrollArea::vertical()
             .id_salt("home")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Keep a gutter so cards never touch the scroll bar.
                 let usable = ui.available_width() - 16.0;
-                let width = usable.min(HOME_MAX_WIDTH);
+                let width = usable.min(LAUNCHER_WIDTH);
                 let pad = ((usable - width) / 2.0).max(0.0);
+                // A little above the middle, where the eye lands first.
+                let room = ui.available_height().min(4000.0);
+                ui.add_space(((room - LAUNCHER_HEIGHT) * 0.42).max(32.0));
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.add_space(pad);
                     ui.vertical(|ui| {
                         ui.set_width(width);
-                        self.page_header(ui, t.home_title, t.home_subtitle, width, true);
-                        if self.store.save_failed {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new(t.save_failed).small().color(theme::WARNING));
-                        }
-                        ui.add_space(20.0);
-
-                        if width < STACK_BREAKPOINT {
-                            self.quick_connect_card(ui);
-                            ui.add_space(COLUMN_GAP);
-                            self.profile_card(ui);
-                            ui.add_space(COLUMN_GAP);
-                            self.main_column(ui);
-                        } else {
-                            let main = width - SIDE_COLUMN_WIDTH - COLUMN_GAP;
-                            ui.horizontal_top(|ui| {
-                                ui.spacing_mut().item_spacing.x = COLUMN_GAP;
-                                ui.allocate_ui_with_layout(
-                                    vec2(main, 0.0),
-                                    Layout::top_down(Align::Min),
-                                    |ui| {
-                                        ui.set_width(main);
-                                        self.main_column(ui);
-                                    },
-                                );
-                                ui.allocate_ui_with_layout(
-                                    vec2(SIDE_COLUMN_WIDTH, 0.0),
-                                    Layout::top_down(Align::Min),
-                                    |ui| {
-                                        ui.set_width(SIDE_COLUMN_WIDTH);
-                                        self.quick_connect_card(ui);
-                                        ui.add_space(COLUMN_GAP);
-                                        self.profile_card(ui);
-                                    },
-                                );
-                            });
-                        }
-                        ui.add_space(8.0);
+                        self.launcher(ui);
+                        ui.add_space(32.0);
                     });
                 });
             });
+    }
+
+    fn launcher(&mut self, ui: &mut egui::Ui) {
+        let t = self.t;
+        let active = self.store.active_profile_id();
+        let profile = active
+            .as_deref()
+            .and_then(|id| self.store.profile(id))
+            .cloned();
+
+        let (hour, _) = crate::clock::local_hour_minute();
+        let greeting = match hour {
+            5..=11 => t.greet_morning,
+            12..=17 => t.greet_afternoon,
+            _ => t.greet_evening,
+        };
+        ui.label(RichText::new(greeting).size(15.0).color(theme::TEXT_3));
+        ui.add_space(2.0);
+        let title = profile
+            .as_ref()
+            .map_or(t.launcher_title_plain.to_string(), |p| {
+                t.launcher_title(&p.nickname)
+            });
+        ui.add(
+            egui::Label::new(RichText::new(title).font(FontId::new(34.0, theme::bold())))
+                .truncate(),
+        );
+        if self.store.save_failed {
+            ui.add_space(6.0);
+            ui.label(RichText::new(t.save_failed).small().color(theme::WARNING));
+        }
+        ui.add_space(22.0);
+
+        // The address bar, with its connect button inside.
+        let connecting = self.is_connecting();
+        let enabled = self.can_connect();
+        let mut submit = false;
+        let mut clicked = false;
+        let ring = if self.address_focused {
+            theme::TEXT_3
+        } else {
+            theme::BORDER
+        };
+        let mut cap = None;
+        let bar = egui::Frame::new()
+            .fill(theme::SURFACE)
+            .corner_radius(CornerRadius::same(BAR_RADIUS))
+            .inner_margin(Margin {
+                left: 18,
+                right: 0,
+                top: 0,
+                bottom: 0,
+            })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    // Painted, not laid out as text, so it sits on the bar's
+                    // exact middle like the address beside it.
+                    let (spot, _) = ui.allocate_exact_size(vec2(20.0, BAR_HEIGHT), Sense::hover());
+                    ui.painter().text(
+                        spot.center(),
+                        Align2::CENTER_CENTER,
+                        icon::GLOBE,
+                        FontId::new(20.0, theme::icons()),
+                        theme::TEXT_2,
+                    );
+                    let before = self.address.clone();
+                    // Hidden like every other address, but readable while edited.
+                    let conceal = !self.show_addresses && !self.address_focused;
+                    let field = (ui.available_width() - CONNECT_WIDTH - 12.0).max(80.0);
+                    let field_id = ui.scope_id().with("launcher-address");
+                    if conceal && !self.address.is_empty() {
+                        if masked_address(ui, field, self.address.chars().count()).clicked() {
+                            // The field exists only from the next frame on.
+                            ui.data_mut(|d| d.insert_temp(field_id, true));
+                            self.address_focused = true;
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        // Its own row so the text sits in the middle of the bar.
+                        let edit = ui
+                            .allocate_ui_with_layout(
+                                vec2(field, BAR_HEIGHT),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.address)
+                                            .id(field_id)
+                                            .hint_text(t.address_hint)
+                                            .char_limit(255)
+                                            .font(FontId::new(17.0, egui::FontFamily::Proportional))
+                                            .frame(egui::Frame::NONE)
+                                            .desired_width(field)
+                                            .min_size(vec2(field, 40.0))
+                                            .align(Align2::LEFT_CENTER),
+                                    )
+                                },
+                            )
+                            .inner;
+                        let grab = ui.data_mut(|d| d.remove_temp::<bool>(field_id)).is_some();
+                        if grab {
+                            edit.request_focus();
+                        }
+                        self.address_focused = edit.has_focus() || grab;
+                        submit = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    }
+                    if self.address != before {
+                        self.address_problem = None;
+                        self.selected_favorite =
+                            self.store.favorite_for(&self.address).map(|f| f.id.clone());
+                    }
+                    let (_, response) = ui.allocate_exact_size(
+                        vec2(CONNECT_WIDTH, BAR_HEIGHT),
+                        if enabled {
+                            Sense::click()
+                        } else {
+                            Sense::hover()
+                        },
+                    );
+                    cap = Some(response);
+                });
+            })
+            .response
+            .rect;
+        if let Some(response) = cap {
+            let label = if connecting { t.connecting } else { t.connect };
+            let ready =
+                enabled && (!self.address.trim().is_empty() || !self.store.data.history.is_empty());
+            paint_connect_cap(ui, bar, ring, &response, label, enabled, ready);
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+            clicked = response
+                .on_hover_cursor(if enabled {
+                    egui::CursorIcon::PointingHand
+                } else {
+                    egui::CursorIcon::NotAllowed
+                })
+                .clicked();
+        }
+        if clicked || (submit && enabled && !self.address.trim().is_empty()) {
+            let address = self.address.clone();
+            self.start_connect(&address);
+        } else if submit && enabled {
+            // Enter on an empty field goes back to the last server.
+            if let Some(last) = self.store.data.history.first().cloned() {
+                let name = self.store.display_name(&last.address, &last.name);
+                self.row_action(RowAction::Connect, &last.address, &name);
+            }
+        }
+
+        // The choices that go with the address.
+        ui.add_space(10.0);
+        let shown = if self.use_other_nickname {
+            t.other_nickname_label.to_string()
+        } else {
+            profile
+                .as_ref()
+                .map_or(t.no_profile.to_string(), |p| p.nickname.clone())
+        };
+        let mut chosen = None;
+        let mut flip_nickname = false;
+        let mut manage = false;
+        // Pictures first: loading one needs `self` mutably.
+        let people: Vec<_> = self
+            .store
+            .data
+            .profiles
+            .clone()
+            .into_iter()
+            .map(|p| {
+                let photo = self.profile_photo(ui.ctx(), &p.id);
+                let note = if !crate::store::nickname_ok(&p.nickname) {
+                    Some(t.nickname_invalid_tag)
+                } else if self.store.is_default_profile(&p.id) {
+                    Some(t.default_profile)
+                } else {
+                    None
+                };
+                (p, photo, note)
+            })
+            .collect();
+        let face = people
+            .iter()
+            .find(|(p, ..)| active.as_deref() == Some(p.id.as_str()))
+            .and_then(|(_, photo, _)| photo.clone());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            let lead = if self.use_other_nickname {
+                Lead::Glyph(icon::PENCIL)
+            } else {
+                Lead::Face(&shown, face.as_ref())
+            };
+            let who = pill(ui, lead, &t.join_as_pill(&shown), false, true);
+            egui::Popup::menu(&who).show(|ui| {
+                ui.set_width(260.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (p, photo, note) in &people {
+                    let current =
+                        !self.use_other_nickname && active.as_deref() == Some(p.id.as_str());
+                    if profile_choice(ui, &p.nickname, *note, photo.as_ref(), current).clicked() {
+                        chosen = Some(p.id.clone());
+                        ui.close();
+                    }
+                }
+                ui.add_space(4.0);
+                let (line, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+                ui.painter().rect_filled(line, 0.0, theme::BORDER_SOFT);
+                ui.add_space(4.0);
+                let (glyph, toggle) = if self.use_other_nickname {
+                    (icon::USER, t.use_saved_profile)
+                } else {
+                    (icon::PENCIL, t.use_other_nickname)
+                };
+                if menu_action(ui, glyph, toggle).clicked() {
+                    flip_nickname = true;
+                    ui.close();
+                }
+                if menu_action(ui, icon::GEAR, t.manage_profiles).clicked() {
+                    manage = true;
+                    ui.close();
+                }
+            });
+            if pill(
+                ui,
+                Lead::Glyph(icon::LOCK_SIMPLE),
+                t.server_password_pill,
+                self.show_password,
+                false,
+            )
+            .clicked()
+            {
+                self.show_password = !self.show_password;
+            }
+            let already = self.store.favorite_for(&self.address).is_some();
+            let on = already || self.save_favorite;
+            let glyph = if on {
+                icon::CHECK
+            } else {
+                icon::BOOKMARK_SIMPLE
+            };
+            let favorite = ui
+                .add_enabled_ui(!already, |ui| {
+                    pill(ui, Lead::Glyph(glyph), t.save_to_favorites, on, false)
+                })
+                .inner;
+            if favorite.clicked() {
+                self.save_favorite = !self.save_favorite;
+            }
+        });
+        if let Some(id) = chosen {
+            self.use_other_nickname = false;
+            self.store.set_last_profile(&id);
+            self.store.save();
+        }
+        if flip_nickname {
+            self.use_other_nickname = !self.use_other_nickname;
+        }
+        if manage {
+            self.open_settings(super::settings::Page::Profile);
+        }
+
+        // What the pills opened.
+        if self.use_other_nickname || self.show_password {
+            ui.add_space(12.0);
+            let both = self.use_other_nickname && self.show_password;
+            let half = if both {
+                (ui.available_width() - 12.0) / 2.0
+            } else {
+                ui.available_width()
+            };
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                if self.use_other_nickname {
+                    ui.vertical(|ui| {
+                        ui.set_width(half);
+                        labeled_input(
+                            ui,
+                            t.other_nickname_label,
+                            &mut self.other_nickname,
+                            "",
+                            NICKNAME_MAX_CHARS,
+                            false,
+                        );
+                    });
+                }
+                if self.show_password {
+                    ui.vertical(|ui| {
+                        ui.set_width(half);
+                        // Never written to disk.
+                        labeled_input(
+                            ui,
+                            t.server_password_hint,
+                            &mut self.password,
+                            "",
+                            128,
+                            true,
+                        );
+                    });
+                }
+            });
+        }
+
+        // One line of feedback, the most pressing first.
+        let profile_bad = !self.use_other_nickname
+            && profile
+                .as_ref()
+                .is_some_and(|p| !crate::store::nickname_ok(&p.nickname));
+        let other_bad = self.use_other_nickname
+            && !self.other_nickname.trim().is_empty()
+            && !crate::store::nickname_ok(&self.other_nickname);
+        let note = if let Some(problem) = self.address_problem {
+            Some((address_message(t, problem).to_string(), theme::DANGER))
+        } else if let Some(error) = self.status.error.clone() {
+            Some((t.connect_error(&error), theme::DANGER))
+        } else if profile_bad {
+            Some((t.profile_nickname_invalid.to_string(), theme::DANGER))
+        } else if other_bad {
+            Some((t.nickname_required.to_string(), theme::DANGER))
+        } else if let Some(text) = self.connect_blocker().filter(|_| !connecting) {
+            Some((text.to_string(), theme::TEXT_3))
+        } else {
+            self.selected_favorite
+                .as_deref()
+                .and_then(|id| self.store.data.favorites.iter().find(|f| f.id == id))
+                .map(|f| (t.selected_favorite(&f.name), theme::TEXT_3))
+        };
+        if let Some((text, color)) = note {
+            ui.add_space(10.0);
+            ui.label(RichText::new(text).size(13.0).color(color));
+        }
+        if let Some(state) = self.reconnect.clone() {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(t.reconnecting(
+                        &state.address,
+                        state.attempt + 1,
+                        super::reconnect::MAX_ATTEMPTS,
+                    ))
+                    .size(13.0)
+                    .color(theme::WARNING),
+                );
+                if ui.small_button(t.reconnect_cancel).clicked() {
+                    // An attempt already handed to the bridge would still
+                    // finish: leave the server again if it does.
+                    if state.at.is_none() {
+                        self.send(Command::Disconnect);
+                    }
+                    self.reconnect = None;
+                    self.rejoin = None;
+                    self.session_password = None;
+                }
+            });
+        }
+
+        if profile.is_none() {
+            ui.add_space(28.0);
+            self.profile_card(ui);
+        }
+
+        // Recent servers; quieter while a new address is being typed.
+        ui.add_space(40.0);
+        let history = self.store.data.history.clone();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(t.recents).size(14.0).color(theme::TEXT_3));
+            if !history.is_empty() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let link = egui::Button::new(
+                        RichText::new(t.view_history)
+                            .size(14.0)
+                            .color(theme::TEXT_3),
+                    )
+                    .frame(false);
+                    if ui.add(link).clicked() {
+                        self.section = Section::History;
+                    }
+                });
+            }
+        });
+        ui.add_space(8.0);
+        if history.is_empty() {
+            ui.label(RichText::new(t.recents_empty).color(theme::TEXT_3));
+            return;
+        }
+        let typing = self.address_focused && !self.address.trim().is_empty();
+        ui.scope(|ui| {
+            if typing {
+                ui.multiply_opacity(0.5);
+            }
+            theme::card()
+                .inner_margin(Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (index, entry) in history.iter().take(RECENTS_SHOWN).enumerate() {
+                        self.history_row(ui, entry, "recent", index > 0);
+                    }
+                });
+        });
     }
 
     pub(super) fn history_view(&mut self, ui: &mut egui::Ui) {
@@ -729,79 +1291,6 @@ impl App {
             .collect()
     }
 
-    /// Last connection, recents, or search results.
-    fn main_column(&mut self, ui: &mut egui::Ui) {
-        let t = self.t;
-        if !self.search.trim().is_empty() {
-            self.search_results(ui);
-            return;
-        }
-        let history = self.store.data.history.clone();
-        let Some((last, rest)) = history.split_first() else {
-            self.empty_history(ui);
-            return;
-        };
-
-        self.last_connection_card(ui, last);
-        if rest.is_empty() {
-            return;
-        }
-        ui.add_space(COLUMN_GAP);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(t.recents).font(FontId::new(22.0, theme::semibold())));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = format!("{}  {}", icon::ARROW_SQUARE_OUT, t.view_history);
-                if ui
-                    .add(egui::Button::new(RichText::new(label).color(theme::TEXT_2)).frame(false))
-                    .clicked()
-                {
-                    self.section = Section::History;
-                }
-            });
-        });
-        ui.add_space(10.0);
-        // One container for all recents, rows divided by hairlines.
-        theme::card()
-            .inner_margin(Margin::symmetric(6, 4))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for (index, entry) in rest.iter().take(RECENTS_SHOWN).enumerate() {
-                    self.history_row(ui, entry, "recent", index > 0);
-                }
-            });
-    }
-
-    /// Matches among saved and recent servers, each server once.
-    fn search_results(&mut self, ui: &mut egui::Ui) {
-        let t = self.t;
-        let query = self.search.trim().to_string();
-        let mut found: Vec<HistoryEntry> = self.filtered_history();
-        for favorite in &self.store.data.favorites {
-            let known = found
-                .iter()
-                .any(|e| normalize_address(&e.address) == normalize_address(&favorite.address));
-            if !known && store::matches(&query, &favorite.name, &favorite.address) {
-                found.push(HistoryEntry {
-                    address: favorite.address.clone(),
-                    name: favorite.name.clone(),
-                    profile_id: None,
-                    last_used: 0,
-                });
-            }
-        }
-        ui.label(RichText::new(t.results).font(FontId::new(16.0, theme::semibold())));
-        ui.add_space(8.0);
-        if found.is_empty() {
-            ui.label(RichText::new(t.no_results).color(theme::TEXT_3));
-            return;
-        }
-        ui.spacing_mut().item_spacing.y = 8.0;
-        for entry in &found {
-            self.history_row(ui, entry, "result", false);
-        }
-    }
-
     fn empty_history(&mut self, ui: &mut egui::Ui) {
         let t = self.t;
         theme::card().show(ui, |ui| {
@@ -875,446 +1364,11 @@ impl App {
             self.row_action(action, &entry.address, &name);
         }
     }
-
-    fn last_connection_card(&mut self, ui: &mut egui::Ui, entry: &HistoryEntry) {
-        let t = self.t;
-        let favorite = self.store.favorite_for(&entry.address).cloned();
-        let name = self.store.display_name(&entry.address, &entry.name);
-        let ago = store::now_secs().saturating_sub(entry.last_used);
-        let enabled = self.can_connect();
-
-        theme::card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            theme::section_label(ui, t.last_connection);
-            ui.add_space(10.0);
-
-            let inner = ui.available_width();
-            // Wide: name and address on the left, favorite state and last
-            // access in their own block on the right. Narrow: stacked.
-            let wide = inner >= 620.0;
-            // Narrow cards stack a third text line, so they get more height
-            // before the buttons.
-            let info_height = if wide { 64.0 } else { 86.0 };
-            let (rect, _) =
-                ui.allocate_exact_size(vec2(inner, info_height + 16.0 + 40.0), Sense::hover());
-            let painter = ui.painter().clone();
-
-            let avatar = 64.0;
-            theme::avatar_tiny(
-                &painter,
-                pos2(rect.left() + avatar / 2.0, rect.top() + info_height / 2.0),
-                avatar,
-                &name,
-                false,
-            );
-            let text_x = rect.left() + avatar + 20.0;
-            let button_size = 40.0;
-
-            let block_width = if wide { 250.0 } else { 0.0 };
-            let divider_x = rect.right() - block_width;
-            let room = (if wide { divider_x - 20.0 } else { rect.right() } - text_x).max(0.0);
-            let top = rect.top() + 6.0;
-            let name_galley = theme::fit_text(
-                &painter,
-                &name,
-                FontId::new(22.0, theme::semibold()),
-                theme::TEXT,
-                room,
-            );
-            painter.galley(pos2(text_x, top), name_galley, theme::TEXT);
-            let address = theme::fit_text(
-                &painter,
-                &entry.address,
-                FontId::new(15.0, egui::FontFamily::Proportional),
-                theme::TEXT_2,
-                room,
-            );
-            // Censored by default; the address or the eye next to it toggles it.
-            let reveal = self.address_reveal(ui.ctx());
-            let address_pos = pos2(text_x, top + 34.0);
-            let address_size = address.size();
-            let toggle_rect = Rect::from_min_size(
-                address_pos - vec2(6.0, 4.0),
-                address_size + vec2(12.0 + 30.0, 8.0),
-            );
-            let toggle = ui.interact(
-                toggle_rect,
-                ui.scope_id().with("address-toggle"),
-                Sense::click(),
-            );
-            let lift = ui.ctx().animate_bool_with_time(
-                toggle.id.with("lift"),
-                toggle.hovered() || toggle.has_focus(),
-                0.12,
-            );
-            toggle.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::Role::Button,
-                    true,
-                    if self.show_addresses {
-                        t.hide_address
-                    } else {
-                        t.show_address
-                    },
-                )
-            });
-            theme::masked_text(&painter, address_pos, address, theme::TEXT_2, reveal, lift);
-            painter.text(
-                pos2(
-                    address_pos.x + address_size.x + 16.0,
-                    address_pos.y + address_size.y / 2.0,
-                ),
-                Align2::LEFT_CENTER,
-                if self.show_addresses {
-                    icon::EYE_SLASH
-                } else {
-                    icon::EYE
-                },
-                FontId::new(16.0, theme::icons()),
-                theme::lerp_color(theme::TEXT_3, Color32::WHITE, lift),
-            );
-            if toggle.clicked() {
-                self.show_addresses = !self.show_addresses;
-            }
-            let toggle = toggle
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(if self.show_addresses {
-                    t.hide_address
-                } else {
-                    t.show_address
-                });
-            let _ = toggle;
-
-            let access_text = t.last_access(ago);
-            if wide {
-                painter.line_segment(
-                    [
-                        pos2(divider_x, rect.top() + 6.0),
-                        pos2(divider_x, rect.top() + info_height - 6.0),
-                    ],
-                    Stroke::new(1.0, theme::BORDER),
-                );
-                let block_x = divider_x + 20.0;
-                let mut line_y = rect.top() + 8.0;
-                if favorite.is_some() {
-                    painter.text(
-                        pos2(block_x, line_y + 9.0),
-                        Align2::LEFT_CENTER,
-                        icon::BOOKMARK_SIMPLE,
-                        FontId::new(16.0, theme::icons()),
-                        theme::SUCCESS,
-                    );
-                    painter.text(
-                        pos2(block_x + 24.0, line_y + 9.0),
-                        Align2::LEFT_CENTER,
-                        t.favorited,
-                        FontId::new(14.0, theme::medium()),
-                        theme::TEXT,
-                    );
-                    line_y += 28.0;
-                }
-                let access = theme::fit_text(
-                    &painter,
-                    &access_text,
-                    FontId::new(13.5, egui::FontFamily::Proportional),
-                    theme::TEXT_2,
-                    block_width - 24.0,
-                );
-                painter.galley(pos2(block_x, line_y + 2.0), access, theme::TEXT_2);
-            } else {
-                let line = if favorite.is_some() {
-                    format!("{} · {access_text}", t.favorited)
-                } else {
-                    access_text
-                };
-                let galley = theme::fit_text(
-                    &painter,
-                    &line,
-                    FontId::new(12.5, egui::FontFamily::Proportional),
-                    theme::TEXT_3,
-                    room,
-                );
-                painter.galley(pos2(text_x, top + 60.0), galley, theme::TEXT_3);
-            }
-
-            // Buttons: "Conectar novamente" and the options button, left aligned.
-            let buttons_top = rect.top() + info_height + 16.0;
-            let again = Rect::from_min_size(pos2(rect.left(), buttons_top), vec2(200.0, 40.0));
-            let more_rect = Rect::from_min_size(
-                pos2(again.right() + 8.0, buttons_top),
-                vec2(button_size, button_size),
-            );
-            {
-                let clicked = ui
-                    .scope_builder(UiBuilder::new().max_rect(again), |ui| {
-                        ui.add_enabled_ui(enabled, |ui| {
-                            theme::button(ui, t.connect_again, None, Tone::Primary, again.width())
-                                .clicked()
-                        })
-                        .inner
-                    })
-                    .inner;
-                if clicked {
-                    self.row_action(RowAction::Connect, &entry.address, &name);
-                }
-            }
-            let more = ui
-                .scope_builder(UiBuilder::new().max_rect(more_rect), |ui| {
-                    theme::icon_button(ui, icon::DOTS_THREE, t.more_options, false, button_size)
-                })
-                .inner;
-            let mut chosen = None;
-            egui::Popup::menu(&more).show(|ui| {
-                ui.set_min_width(190.0);
-                let toggle = if favorite.is_some() {
-                    t.menu_remove_favorite
-                } else {
-                    t.menu_add_favorite
-                };
-                if ui.button(toggle).clicked() {
-                    chosen = Some(RowAction::ToggleFavorite);
-                }
-                if favorite.is_some() && ui.button(t.menu_edit).clicked() {
-                    chosen = Some(RowAction::Edit);
-                }
-                if ui.button(t.menu_remove_history).clicked() {
-                    chosen = Some(RowAction::Remove);
-                }
-            });
-            if let Some(action) = chosen {
-                self.row_action(action, &entry.address, &name);
-            }
-        });
-    }
 }
 
 // Quick connect and profile panels ----------------------------------------------
 
 impl App {
-    fn quick_connect_card(&mut self, ui: &mut egui::Ui) {
-        let t = self.t;
-        theme::card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(t.quick_connect).font(FontId::new(22.0, theme::semibold())));
-            ui.label(RichText::new(t.quick_connect_intro).color(theme::TEXT_2));
-            ui.add_space(14.0);
-
-            // Address.
-            let before = self.address.clone();
-            // Hidden like every other address, but readable while it is edited.
-            let conceal = !self.show_addresses && !self.address_focused;
-            let address_field = labeled_input(
-                ui,
-                t.server_address,
-                &mut self.address,
-                t.address_hint,
-                255,
-                conceal,
-            );
-            self.address_focused = address_field.has_focus();
-            if self.address != before {
-                self.address_problem = None;
-                self.selected_favorite =
-                    self.store.favorite_for(&self.address).map(|f| f.id.clone());
-            }
-            if let Some(problem) = self.address_problem {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(address_message(t, problem))
-                        .small()
-                        .color(theme::DANGER),
-                );
-            } else if let Some(favorite) = self
-                .selected_favorite
-                .as_deref()
-                .and_then(|id| self.store.data.favorites.iter().find(|f| f.id == id))
-            {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(t.selected_favorite(&favorite.name))
-                            .small()
-                            .color(theme::TEXT_3),
-                    )
-                    .truncate(),
-                );
-            }
-            ui.add_space(12.0);
-
-            // Profile.
-            ui.label(
-                RichText::new(t.join_as)
-                    .font(FontId::new(13.0, theme::medium()))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(4.0);
-            let active = self.store.active_profile_id();
-            let shown = active
-                .as_deref()
-                .and_then(|id| self.store.profile(id))
-                .map_or(t.no_profile.to_string(), |p| p.nickname.clone());
-            let mut chosen = None;
-            egui::ComboBox::from_id_salt("profile_select")
-                .selected_text(shown)
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    for profile in &self.store.data.profiles {
-                        let current = active.as_deref() == Some(profile.id.as_str());
-                        let label = if crate::store::nickname_ok(&profile.nickname) {
-                            profile.nickname.clone()
-                        } else {
-                            format!("{} ({})", profile.nickname, t.nickname_invalid_tag)
-                        };
-                        if ui.selectable_label(current, label).clicked() {
-                            chosen = Some(profile.id.clone());
-                        }
-                    }
-                });
-            if let Some(id) = chosen {
-                self.store.set_last_profile(&id);
-                self.store.save();
-            }
-            ui.add_space(2.0);
-            let profile_bad = !self.use_other_nickname
-                && active
-                    .as_deref()
-                    .and_then(|id| self.store.profile(id))
-                    .is_some_and(|p| !crate::store::nickname_ok(&p.nickname));
-            if profile_bad {
-                ui.label(
-                    RichText::new(t.profile_nickname_invalid)
-                        .small()
-                        .color(theme::DANGER),
-                );
-            }
-            ui.label(
-                RichText::new(t.profile_saved_note)
-                    .small()
-                    .color(theme::TEXT_3),
-            );
-            ui.add_space(4.0);
-            let toggle_label = if self.use_other_nickname {
-                t.use_saved_profile
-            } else {
-                t.use_other_nickname
-            };
-            if theme::link(ui, None, toggle_label, 24.0).clicked() {
-                self.use_other_nickname = !self.use_other_nickname;
-            }
-            if self.use_other_nickname {
-                ui.add_space(4.0);
-                labeled_input(
-                    ui,
-                    t.other_nickname_label,
-                    &mut self.other_nickname,
-                    "",
-                    NICKNAME_MAX_CHARS,
-                    false,
-                );
-                if !self.other_nickname.trim().is_empty()
-                    && !crate::store::nickname_ok(&self.other_nickname)
-                {
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(t.nickname_required)
-                            .small()
-                            .color(theme::DANGER),
-                    );
-                }
-            }
-            ui.add_space(8.0);
-
-            // Server password, collapsed until needed. Never written to disk.
-            if disclosure_row(
-                ui,
-                icon::LOCK_SIMPLE,
-                t.server_password_toggle,
-                self.show_password,
-            )
-            .clicked()
-            {
-                self.show_password = !self.show_password;
-            }
-            if self.show_password {
-                ui.add_space(8.0);
-                labeled_input(
-                    ui,
-                    t.server_password_hint,
-                    &mut self.password,
-                    "",
-                    128,
-                    true,
-                );
-            }
-            ui.add_space(12.0);
-
-            // Favorite.
-            let mut already = self.store.favorite_for(&self.address).is_some();
-            ui.add_enabled_ui(!already, |ui| {
-                let flag = if already {
-                    &mut already
-                } else {
-                    &mut self.save_favorite
-                };
-                ui.checkbox(flag, t.save_to_favorites);
-            });
-            ui.add_space(14.0);
-
-            if let Some(state) = self.reconnect.clone() {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(t.reconnecting(
-                            &state.address,
-                            state.attempt + 1,
-                            super::reconnect::MAX_ATTEMPTS,
-                        ))
-                        .small()
-                        .color(theme::WARNING),
-                    );
-                    if ui.small_button(t.reconnect_cancel).clicked() {
-                        // An attempt already handed to the bridge would still
-                        // finish: leave the server again if it does.
-                        if state.at.is_none() {
-                            self.send(Command::Disconnect);
-                        }
-                        self.reconnect = None;
-                        self.rejoin = None;
-                        self.session_password = None;
-                    }
-                });
-            }
-            ui.add_space(8.0);
-            // Connect.
-            let connecting = self.is_connecting();
-            let blocked = self.connect_blocker();
-            let label = if connecting { t.connecting } else { t.connect };
-            let width = ui.available_width();
-            let enabled = self.can_connect();
-            let clicked = ui
-                .add_enabled_ui(enabled, |ui| {
-                    theme::button(ui, label, None, Tone::Primary, width).clicked()
-                })
-                .inner;
-            if clicked {
-                let address = self.address.clone();
-                self.start_connect(&address);
-            }
-            if let Some(text) = blocked.filter(|_| !connecting) {
-                ui.add_space(8.0);
-                ui.label(RichText::new(text).small().color(theme::TEXT_3));
-            }
-            if let Some(error) = self.status.error.clone() {
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(t.connect_error(&error))
-                        .small()
-                        .color(theme::DANGER),
-                );
-            }
-        });
-    }
-
     fn profile_card(&mut self, ui: &mut egui::Ui) {
         let t = self.t;
         theme::card().show(ui, |ui| {

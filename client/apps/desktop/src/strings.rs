@@ -20,12 +20,14 @@ pub struct Strings {
     pub no_profile: &'static str,
 
     // Home screen.
-    pub home_title: &'static str,
-    pub home_subtitle: &'static str,
     pub search_placeholder: &'static str,
-    pub last_connection: &'static str,
-    pub connect_again: &'static str,
-    pub favorited: &'static str,
+    pub greet_morning: &'static str,
+    pub greet_afternoon: &'static str,
+    pub greet_evening: &'static str,
+    pub launcher_title_plain: &'static str,
+    pub server_password_pill: &'static str,
+    pub recents_empty: &'static str,
+    pub manage_profiles: &'static str,
     pub recents: &'static str,
     pub view_history: &'static str,
     pub history_title: &'static str,
@@ -43,11 +45,8 @@ pub struct Strings {
     pub time_days: &'static str,
 
     // Quick connect.
-    pub quick_connect: &'static str,
-    pub quick_connect_intro: &'static str,
     pub use_saved_profile: &'static str,
     pub server_address: &'static str,
-    pub show_address: &'static str,
     pub ping_hint: &'static str,
     pub connection_title: &'static str,
     pub ping_average: &'static str,
@@ -64,16 +63,12 @@ pub struct Strings {
     pub stream_popped: &'static str,
     pub voice_bitrate_custom: &'static str,
     pub monitor_hint: &'static str,
-    pub hide_address: &'static str,
     pub address_hint: &'static str,
     pub address_empty: &'static str,
     pub address_spaces: &'static str,
     pub address_port: &'static str,
-    pub join_as: &'static str,
-    pub profile_saved_note: &'static str,
     pub use_other_nickname: &'static str,
     pub other_nickname_label: &'static str,
-    pub server_password_toggle: &'static str,
     pub server_password_hint: &'static str,
     pub save_to_favorites: &'static str,
     pub connect: &'static str,
@@ -119,7 +114,6 @@ pub struct Strings {
     pub clear_history_body: &'static str,
     pub clear_confirm: &'static str,
     pub create_profile: &'static str,
-    pub results: &'static str,
     pub save_failed: &'static str,
 
     // Menus and dialogs.
@@ -480,6 +474,14 @@ impl Strings {
     }
 
     /// "Verificado agora mesmo", "Verificado há 5 min", "… há 3 h", "… há 2 dias".
+    pub fn launcher_title(&self, nickname: &str) -> String {
+        format!("Para onde vamos, {nickname}?")
+    }
+
+    pub fn join_as_pill(&self, name: &str) -> String {
+        format!("Entrar como {name}")
+    }
+
     pub fn upd_checked_ago(&self, secs: u64) -> String {
         match secs {
             0..=59 => "Verificado agora mesmo".to_string(),
@@ -516,12 +518,14 @@ pub const PT: Strings = Strings {
     local_profile: "Perfil local",
     no_profile: "Sem perfil",
 
-    home_title: "Seus servidores",
-    home_subtitle: "Entre na conversa.",
     search_placeholder: "Buscar servidor",
-    last_connection: "Última conexão",
-    connect_again: "Conectar novamente",
-    favorited: "Favoritado",
+    greet_morning: "Bom dia",
+    greet_afternoon: "Boa tarde",
+    greet_evening: "Boa noite",
+    launcher_title_plain: "Para onde vamos?",
+    server_password_pill: "Senha",
+    recents_empty: "Os servidores que você usar aparecem aqui.",
+    manage_profiles: "Gerenciar perfis",
     recents: "Recentes",
     view_history: "Ver histórico",
     history_title: "Histórico",
@@ -538,11 +542,8 @@ pub const PT: Strings = Strings {
     time_yesterday: "ontem",
     time_days: "há {n} dias",
 
-    quick_connect: "Conexão rápida",
-    quick_connect_intro: "Entre com o endereço de um servidor.",
     use_saved_profile: "Usar o perfil salvo",
     server_address: "Endereço do servidor",
-    show_address: "Mostrar endereço",
     ping_hint: "Detalhes da conexão com o servidor",
     connection_title: "Conexão",
     ping_average: "Ping médio:",
@@ -559,16 +560,12 @@ pub const PT: Strings = Strings {
     stream_popped: "A transmissão está aberta em outra janela.",
     voice_bitrate_custom: "Outro",
     monitor_hint: "Toca sua voz já processada nos fones. Use fones para evitar eco.",
-    hide_address: "Ocultar endereço",
     address_hint: "servidor.exemplo.com",
     address_empty: "Informe o endereço do servidor.",
     address_spaces: "O endereço não pode ter espaços.",
     address_port: "A porta deve ser um número entre 1 e 65535.",
-    join_as: "Entrar como",
-    profile_saved_note: "Perfil salvo neste computador.",
     use_other_nickname: "Usar outro apelido",
     other_nickname_label: "Apelido só para esta conexão",
-    server_password_toggle: "Senha do servidor",
     server_password_hint: "Só se o servidor exigir. Ela não é salva.",
     save_to_favorites: "Salvar nos favoritos",
     connect: "Conectar",
@@ -619,7 +616,6 @@ pub const PT: Strings = Strings {
                          afetados.",
     clear_confirm: "Limpar",
     create_profile: "Criar perfil",
-    results: "Resultados",
     save_failed: "Não foi possível salvar os dados neste computador.",
 
     menu_connect: "Conectar",
