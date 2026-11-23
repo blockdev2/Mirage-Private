@@ -878,6 +878,9 @@ impl App {
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.store.data.quit_on_close
+            // An update closes the app so the updater can swap it and start
+            // the new version; hiding would leave it waiting forever.
+            && self.updater.state() != crate::updater::UpdateState::Restarting
             && crate::tray::hide()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
