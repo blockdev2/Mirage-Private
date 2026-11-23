@@ -6830,7 +6830,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-audio"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -6851,7 +6851,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-bridge"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6878,7 +6878,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-capture"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -6889,7 +6889,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-cli"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -6904,7 +6904,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-core"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -6920,7 +6920,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-desktop"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
@@ -6939,7 +6939,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-input"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -6949,7 +6949,7 @@ dependencies = [
 
 [[package]]
 name = "ts6-stream"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

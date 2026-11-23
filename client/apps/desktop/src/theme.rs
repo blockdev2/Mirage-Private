@@ -67,10 +67,11 @@ pub mod icon {
     pub const SPEAKER: &str = "\u{E44A}";
     pub const HOUSE: &str = "\u{E2C2}";
     pub const CARET_DOWN: &str = "\u{E136}";
-    pub const CARET_UP: &str = "\u{E13C}";
     pub const CARET_RIGHT: &str = "\u{E13A}";
     pub const DOTS_THREE: &str = "\u{E1FE}";
     pub const LOCK_SIMPLE: &str = "\u{E308}";
+    pub const GLOBE: &str = "\u{E288}";
+    pub const USER: &str = "\u{E4C2}";
     pub const SPEAKER_LOW: &str = "\u{E44C}";
     pub const SPEAKER_SLASH: &str = "\u{E45A}";
     pub const INFO: &str = "\u{E2CE}";
@@ -88,7 +89,6 @@ pub mod icon {
     pub const IMAGE: &str = "\u{E2CA}";
     pub const REPLY: &str = "\u{E024}";
     pub const COPY: &str = "\u{E1CA}";
-    pub const EYE_SLASH: &str = "\u{E224}";
     pub const CHECK: &str = "\u{E182}";
 }
 
