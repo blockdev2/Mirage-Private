@@ -14,6 +14,7 @@ mod protocol;
 mod store;
 mod strings;
 mod theme;
+mod tray;
 mod updater;
 
 use eframe::egui;
