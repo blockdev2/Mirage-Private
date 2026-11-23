@@ -4,6 +4,8 @@ Entries describe repository changes. Tagged releases are published as GitHub rel
 
 ## Unreleased
 
+- Fixed: the "Administração" button showed garbled characters in 0.2.0.
+
 - New home screen: a centered launcher with a greeting, one address bar with Conectar at its end, small pills for "Entrar como" (with profile pictures), password and favorites, and your recent servers below. Enter on an empty field reconnects to the last server.
 
 - Closing the window now hides Mirage next to the clock and the call goes on; right-click its icon for "Abrir Mirage", "Procurar atualizações" and "Fechar Mirage". Turn it off in Ajustes → Perfil → Janela.
