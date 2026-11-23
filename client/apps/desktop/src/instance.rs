@@ -180,8 +180,8 @@ pub fn focus_existing() {
 mod windows {
     use windows_sys::Win32::Foundation::{HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
-        ShowWindow, SW_RESTORE,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
 
     struct Search {
@@ -196,11 +196,19 @@ mod windows {
         let mut pid = 0u32;
         // SAFETY: `window` is a handle the system just handed to this callback.
         unsafe { GetWindowThreadProcessId(window, &mut pid) };
-        if pid == search.pid && unsafe { IsWindowVisible(window) } != 0 {
+        if pid == search.pid && (unsafe { IsWindowVisible(window) } != 0 || is_main(window)) {
             search.found = window;
             return 0;
         }
         1
+    }
+
+    /// The main window, also while it is hidden next to the clock.
+    fn is_main(window: HWND) -> bool {
+        let mut text = [0u16; 16];
+        // SAFETY: the buffer outlives the call and its length is passed.
+        let n = unsafe { GetWindowTextW(window, text.as_mut_ptr(), text.len() as i32) };
+        String::from_utf16_lossy(&text[..n.max(0) as usize]) == "Mirage"
     }
 
     pub fn raise_window_of(pid: u32) {
@@ -215,6 +223,7 @@ mod windows {
         }
         // SAFETY: `found` was returned by the enumeration a moment ago.
         unsafe {
+            ShowWindow(search.found, SW_SHOW);
             if IsIconic(search.found) != 0 {
                 ShowWindow(search.found, SW_RESTORE);
             }

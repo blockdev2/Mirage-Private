@@ -4,6 +4,8 @@ Entries describe repository changes. Tagged releases are published as GitHub rel
 
 ## Unreleased
 
+- Closing the window now hides Mirage next to the clock and the call goes on; right-click its icon for "Abrir Mirage", "Procurar atualizações" and "Fechar Mirage". Turn it off in Ajustes → Perfil → Janela.
+
 - Updates are now found: the app checks the releases of the Mirage repository. Installs from 0.1.4 or earlier must run this Setup once.
 
 **Screen sharing now works with the official TeamSpeak client, both ways.**

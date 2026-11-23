@@ -311,6 +311,8 @@ pub struct Data {
     pub share_custom: CustomShare,
     /// Hide Windows' yellow border around what is shared.
     pub share_hide_border: bool,
+    /// Closing the window quits instead of hiding it next to the clock.
+    pub quit_on_close: bool,
 }
 
 /// A hand-picked share quality.

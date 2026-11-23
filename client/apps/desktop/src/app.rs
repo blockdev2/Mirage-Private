@@ -859,11 +859,38 @@ impl App {
     }
 }
 
+impl App {
+    /// Starts the icon next to the clock and turns a close into hiding there,
+    /// unless the user chose to quit on close.
+    fn tray(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Some(RawWindowHandle::Win32(win)) = frame.window_handle().ok().map(|h| h.as_raw()) {
+            let labels = crate::tray::Labels {
+                open: self.t.tray_open,
+                updates: self.t.tray_updates,
+                quit: self.t.tray_quit,
+            };
+            crate::tray::start(win.hwnd.get(), ctx, labels);
+        }
+        if crate::tray::take_update_request() {
+            self.open_settings(settings::Page::Updates);
+            self.check_updates();
+        }
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.store.data.quit_on_close
+            && crate::tray::hide()
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+    }
+}
+
 impl eframe::App for App {
     /// Closing the window during a call must end the session on the server;
     /// otherwise the identity lingers and reopening fails as a clone. Waits at
     /// most one second so a stuck bridge cannot hold the window open.
     fn on_exit(&mut self) {
+        crate::tray::remove();
         if !self.status.connected {
             return;
         }
@@ -883,9 +910,10 @@ impl eframe::App for App {
         raw_input.events.append(&mut self.dev_events);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.drain_events();
         let ctx = ui.ctx().clone();
+        self.tray(&ctx, frame);
         #[cfg(debug_assertions)]
         self.dev_step(&ctx);
         if self.is_connecting() {

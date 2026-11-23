@@ -10,6 +10,7 @@ eframe = "0.37.0"
 egui = "0.37.0"
 egui_extras = { version = "0.37.0", features = ["image", "gif", "webp"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
+raw-window-handle = "0.6.2"
 rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -22,8 +23,11 @@ ts6-core = { path = "../../crates/ts6-core" }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

@@ -291,6 +291,16 @@ impl App {
         if *minutes != before {
             self.store.save();
         }
+        ui.add_space(18.0);
+        group(ui, t.group_window, |ui| {
+            setting_row(ui, t.tray_title, Some(t.tray_hint), |ui| {
+                let mut on = !self.store.data.quit_on_close;
+                if theme::toggle(ui, &mut on, t.tray_title).changed() {
+                    self.store.data.quit_on_close = !on;
+                    self.store.save();
+                }
+            });
+        });
     }
 
     // Profile ---------------------------------------------------------------
