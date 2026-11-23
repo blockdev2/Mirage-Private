@@ -668,7 +668,7 @@ impl App {
         if self.nav_item(ui, icon::PLUS, t.add_server, false) {
             self.open_favorite_dialog(None);
         }
-        if self.in_session() && self.nav_item(ui, icon::GEAR, "AdministraÃ§Ã£o", false) {
+        if self.in_session() && self.nav_item(ui, icon::GEAR, "Administração", false) {
             self.open_admin_window();
         }
 
